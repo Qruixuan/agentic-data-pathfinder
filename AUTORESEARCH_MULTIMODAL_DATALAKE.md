@@ -1,93 +1,118 @@
-# A Self-Driving Physical Data Path Optimizer for Distributed Multimodal Data Lakes
+# Autoresearch for Self-Driving Physical Data Path Optimization in Distributed Multimodal Data Lakes
 
-## Research Direction Description
+## Purpose of This Document
 
-### Executive Summary
+This document defines the research direction: the problem, scope, hypotheses,
+and intended contributions. It deliberately avoids committing to a detailed
+architecture or benchmark setup.
 
-Modern AI pipelines consume large collections of heterogeneous data, including
-text, images, audio, video, documents, tensors, tokens, and embeddings. These
-objects are commonly stored in remote data lakes while computation runs on a
-distributed and heterogeneous cluster. Keeping accelerators supplied with data
-is difficult because the end-to-end data path crosses object storage, network
-links, local disks, host memory, preprocessing workers, and accelerators.
+Companion documents contain the working details:
 
-Existing systems usually optimize one part of this path in isolation. A data
-loader may prefetch objects, a cache may retain frequently accessed files, a
-scheduler may place computation near cached data, and a storage system may move
-objects between tiers. Such local decisions are often insufficient for
-multimodal workloads. The same logical item can exist as a compressed object,
-decoded frames, resized tensors, tokens, or an embedding. Materializing a later
-representation saves computation but consumes more storage and network
-bandwidth. Replicating data improves locality but may congest shared links.
-Staging more data can hide latency but may evict representations needed by a
-concurrent pipeline.
+- [System Design](SYSTEM_DESIGN_MULTIMODAL_DATALAKE.md)
+- [Evaluation Plan](EVALUATION_PLAN_MULTIMODAL_DATALAKE.md)
+- [Research Roadmap and Risks](RESEARCH_ROADMAP_MULTIMODAL_DATALAKE.md)
+- [Ordered Development Checklist](DEVELOPMENT_CHECKLIST_MULTIMODAL_DATALAKE.md)
+- [Background Research and Subdirection Map](BACKGROUND_RESEARCH/00_SUBDIRECTION_MAP.md)
 
-This project proposes a distributed multimodal data lake with a self-driving
-physical data path optimizer. Given a workload and a cluster, the optimizer
-jointly decides:
+## Research Direction in One Paragraph
 
-- which representations of each logical object to materialize;
-- how to chunk, place, and replicate those representations;
-- what to admit to each cache tier and what to evict;
-- when and where to stage or prefetch data;
-- which logical transfer topology should deliver data to consumers; and
-- where data transformation operators should execute.
+Modern AI pipelines repeatedly transform remote multimodal objects into
+model-consumable representations. A video, for example, may appear as a
+compressed object, decoded frames, sampled clips, tensors, visual tokens, and
+embeddings. Each representation has a different storage footprint, production
+cost, transfer cost, reuse scope, and validity condition. This project studies
+a workload-aware physical data path optimizer that jointly chooses
+representation materialization, distributed placement, and
+transformation/delivery placement. Its autoresearch loop turns plan selection
+into an explicit sequence of testable hypotheses and controlled experiments:
+it proposes semantically legal plan changes, selects trials that can resolve
+uncertain plan rankings, collects operator- and resource-level evidence, and
+updates or deploys a plan only when the expected horizon-wide benefit exceeds
+the experiment and transition cost. The initial target is recurring batch AI
+pipelines over an existing object store and heterogeneous CPU/GPU cluster.
 
-The system uses an autoresearch loop to improve these decisions from empirical
-measurements. Each iteration proposes a small batch of legal physical plans,
-executes them on representative workload slices, records end-to-end and
-operator-level telemetry, and updates a model of the data path. The goal is not
-generic configuration tuning. The central research problem is the joint
-optimization of representation, placement, transformation, and delivery for
-multimodal data.
+## What Autoresearch Means in This Project
 
-### Research Hypothesis
+Here, **autoresearch** is the system's evidence-acquisition loop for a
+structured physical-plan space. It does not mean automating literature review
+or paper writing, and it is more specific than repeatedly running a generic
+black-box tuner.
 
-The primary hypothesis is:
+At iteration `t`, the system maintains:
 
-> A multimodal workload should be optimized through a unified physical data
-> path plan. Jointly optimizing representation materialization, data placement,
-> caching, staging, and delivery topology can achieve substantially higher
-> goodput than independently optimizing storage, network, and execution layers.
+```text
+S_t = (W, R, G, P_t, D_t)
+```
 
-A second hypothesis is:
+where `W` is the recurring workload, `R` is the versioned representation
+graph, `G` is the infrastructure and current resource state, `P_t` is the
+deployed physical plan, and `D_t` is the accumulated evidence from profiles,
+trials, and production traces.
 
-> An analytical model alone cannot reliably predict performance under data
-> skew, heterogeneous transformations, shared-resource contention, and changing
-> workloads. A hybrid optimizer that combines structural cost modeling with
-> targeted empirical trials can find strong plans using a practical experiment
-> budget and adapt when the environment changes.
+The autoresearch loop performs seven explicit steps:
 
-### Scope and Terminology
+1. **Observe:** detect an uncertain plan choice, model error, workload change,
+   or resource-state change.
+2. **Hypothesize:** propose a small number of structured `M/L/E` plan changes
+   and record why each could improve the current plan.
+3. **Validate:** reject candidates that violate lineage, compatibility,
+   capacity, or safety constraints.
+4. **Design an experiment:** choose a microbenchmark, workload slice, or canary
+   that is expected to resolve a decision-relevant uncertainty at low cost.
+5. **Execute and measure:** collect representation-, operator-, storage-, and
+   network-level traces, including materialization and migration work.
+6. **Update evidence:** correct local cost-model components and update the
+   confidence of candidate-plan rankings.
+7. **Decide or stop:** deploy only when horizon-wide expected benefit exceeds
+   transition cost and uncertainty; otherwise retain the current plan, run
+   another useful experiment, or stop when further information is not worth
+   its cost.
 
-In this document, a **multimodal data lake** is a data management layer that
-stores immutable or versioned logical objects and their derived
-representations. It maintains metadata about identity, representation,
-lineage, location, size, freshness, and compatibility.
+Autoresearch and self-driving optimization are related but not identical.
+Autoresearch decides **what evidence the system should acquire next**;
+self-driving optimization uses that evidence to **select, deploy, and revisit
+a physical plan**. The same closed loop supports both initial plan discovery
+and later adaptation to contention or workload drift.
 
-A **workload** is a collection or stream of data-consuming workflow DAGs. A DAG
-may contain scans, sampling, decoding, filtering, augmentation, tokenization,
-embedding, retrieval, training, and inference operators.
+The loop is deliberately bounded:
 
-A **physical data path plan** specifies how logical inputs reach their
-consumers. It includes persistent physical design decisions and transient
-execution decisions. It is analogous to a database physical plan, but spans
-storage, network, preprocessing, and accelerator-facing delivery.
+- it explores structured plan transformations, not arbitrary system knobs;
+- a semantic validator, rather than a learned model or LLM, decides legality;
+- every experiment has a measurement, disruption, and transition budget;
+- every result is tied to exact workload, data, plan, code, and cluster
+  provenance; and
+- the system may conclude that the analytical model is already sufficient and
+  that no further experiment is justified.
 
-The term **network topology** refers primarily to a configurable logical
-delivery topology, such as direct reads from the origin, peer-assisted reads,
-relay trees, or rack-local distribution. The project does not assume that the
-physical datacenter network can be rewired for every workload.
+## Motivation
 
-The initial scope should emphasize recurring batch AI pipelines because they
-provide explicit DAGs, measurable reuse, and stable evaluation. Online serving
-can be added as a second workload class after the batch design is established.
+AI workloads consume text, images, audio, video, documents, tensors, tokens,
+and embeddings from distributed storage. Before an accelerator can use an
+input, its data path may cross object storage, shared network links, local SSD,
+host memory, preprocessing workers, and accelerator memory.
 
-### Why Multimodal Data Changes the Optimization Problem
+Existing systems commonly optimize one part of this path at a time. A data
+loader prefetches objects, a cache retains selected outputs, a scheduler places
+tasks near data, and a storage tier absorbs repeated reads. These mechanisms
+are useful, but their decisions interact:
 
-For relational data, a physical designer commonly chooses layouts, indexes,
-partitions, replicas, and materialized views. Multimodal AI pipelines expose a
-related but different representation hierarchy. For example:
+- Caching decoded frames saves CPU work but can multiply storage and network
+  traffic relative to compressed video.
+- Replicating a derived representation improves locality but consumes capacity
+  and may add substantial one-time materialization cost.
+- Moving decoding near storage reduces transferred bytes after filtering, while
+  moving it near GPUs may exploit available worker capacity and avoid managing
+  a large intermediate representation.
+- Staging data for one job can evict a representation reused by another job.
+
+The opportunity is therefore not merely a better cache policy. It is to give
+the system a representation-aware physical plan and optimize the whole path by
+which logical data becomes valid model input.
+
+## Why Multimodal Data Is a Distinct Physical-Design Problem
+
+A logical multimodal object naturally forms a graph of physical
+representations:
 
 ```text
 compressed video
@@ -98,514 +123,313 @@ compressed video
     -> embeddings
 ```
 
-Each node in this representation graph has a different size, production cost,
-transfer cost, reuse scope, and invalidation rule. Some transformations are
-deterministic and reusable across jobs. Others depend on random seeds, model
-versions, preprocessing code, or query-specific parameters.
+This resembles database physical design—choosing layouts, replicas, and
+materialized views—but adds two important properties.
 
-Consequently, the cheapest source representation is not always the cheapest
-end-to-end choice. Sending compressed video saves network bandwidth but consumes
-CPU near the accelerator. Sending decoded frames saves CPU but may multiply
-network traffic. Caching embeddings is valuable for repeated retrieval, but is
-invalid after an embedding model changes. The optimizer must reason about these
-interactions explicitly.
+First, representation size is not monotonic. Decoding a compact object can
+greatly expand it, while tokenization or embedding may reduce it again. The
+best place to cross a network boundary therefore depends on both computation
+and data expansion.
 
-### Formal Problem Definition
+Second, reuse has semantic constraints. A decoded frame may be reusable across
+jobs, while a random augmentation is not generally reusable. Tokens and
+embeddings depend on preprocessing code, parameters, and model versions. The
+optimizer must preserve lineage, determinism, freshness, and compatibility;
+these are correctness constraints rather than performance trade-offs.
 
-The system receives three principal inputs.
+## Core Research Question
+
+> Can a representation-aware optimizer jointly choose what multimodal data to
+> materialize, where to place it, and where to transform and deliver it so that
+> recurring AI pipelines achieve better end-to-end performance and resource
+> efficiency than systems that optimize these layers independently?
+
+This question has three parts:
+
+1. **Abstraction:** Can one physical data path plan express the decisions and
+   correctness constraints shared by multimodal pipelines?
+2. **Joint planning:** Do materialization, placement, and
+   transformation/delivery need to be optimized together once representation
+   expansion, cross-job reuse, and transition cost are included?
+3. **Autoresearch:** Can the system autonomously choose decision-relevant
+   experiments and use their traces to find or maintain a strong plan within a
+   practical measurement, disruption, and reconfiguration budget?
+
+## Initial Scope
+
+The first paper should study **recurring batch pipelines** whose workflow DAGs
+and reuse horizons are observable. Examples include repeated embedding jobs,
+multimodal training epochs, and versioned offline inference pipelines.
+
+The system is an optimization and management layer over an existing durable
+object store; it is not a new object-store consistency protocol or a complete
+replacement for a lakehouse. A multimodal data lake in this project means a
+collection of immutable or versioned logical objects plus metadata for their
+derived representations, lineage, locations, and compatibility.
+
+The initial optimization scope contains three coupled decisions:
+
+1. **Representation materialization:** which deterministic, reusable
+   intermediate representations should exist and for what reuse horizon.
+2. **Placement and replication:** which storage or cache tiers and cluster
+   locations should hold each selected representation.
+3. **Transformation and delivery placement:** where representation-changing
+   operators execute and from which selected representation consumers are
+   staged or served.
+
+Cache allocation, prefetch depth, chunk size, and logical transfer topology may
+be exposed by the prototype, but they should not all become independent primary
+research dimensions in the first version. They are either derived from the
+three decisions above, fixed during an experiment, or added only after an
+ablation shows that they materially affect the central result.
+
+Online serving is a possible later workload class. It has a different objective
+(goodput under tail-latency constraints) and should not be mixed into the first
+evaluation unless the recurring-batch result is already convincing.
+
+## Problem Abstraction
+
+The optimizer receives:
 
 1. A workload graph `W` describing operators, dependencies, access patterns,
-   deadlines, and expected repetition.
+   repetition, and required representation versions.
 2. A representation graph `R` describing logical objects, physical
-   representations, transformation edges, versions, sizes, and compatibility.
-3. An infrastructure graph `G` describing compute nodes, storage tiers, cache
-   capacities, links, bandwidth, latency, and current utilization.
+   representations, transformation edges, sizes, determinism, lineage, and
+   compatibility.
+3. An infrastructure graph `G` describing compute nodes, storage tiers,
+   capacities, network links, and measured resource state.
+4. An evidence store `D` containing versioned microbenchmarks, prior trial
+   results, model uncertainty, and traces linked to exact plans and system
+   states.
 
-For a workload `W`, the optimizer chooses a physical plan:
+For the focused research problem, a physical plan is:
 
 ```text
-P = (M, L, C, S, T, O)
+P = (M, L, E)
 ```
 
 where:
 
-- `M` selects representations to materialize;
-- `L` selects storage-tier placement and replication;
-- `C` selects cache admission, allocation, and eviction policies;
-- `S` selects staging and prefetch schedules;
-- `T` selects logical transfer and sharing topology; and
-- `O` selects the placement and parallelism of transformation operators.
+- `M` selects reusable representations to materialize;
+- `L` selects their tier placement and replication; and
+- `E` selects transformation placement and the delivery path to consumers.
 
-For recurring batch pipelines, the main objective can be expressed as:
+A concrete system plan may contain lower-level cache, staging, chunking, and
+routing fields, but those fields implement `M`, `L`, and `E` rather than define
+six unrelated research problems.
 
-```text
-maximize   sustained valid samples per second
-```
-
-or equivalently as minimizing workflow makespan, subject to storage, compute,
-network, and monetary budgets. The metric should count only data that is
-successfully consumed by the target computation, so speculative work that is
-never used does not inflate performance.
-
-For online workloads, the objective should be goodput under a latency service
-level objective rather than unconstrained throughput:
+For a known recurring workload horizon `H`, the primary objective is to
+minimize amortized end-to-end completion time:
 
 ```text
-maximize   completed requests per second
-subject to p99 latency <= L
-           storage usage <= B_storage
-           network usage <= B_network
-           monetary cost <= B_cost
+minimize   execution_time(P, H) + transition_cost(P_previous -> P)
+subject to storage_usage(P) <= B_storage
+           network_usage(P) <= B_network
+           monetary_cost(P, H) <= B_cost
+           lineage, compatibility, and freshness constraints
 ```
 
-Freshness, representation compatibility, and correctness are hard constraints,
-not quantities that the optimizer may trade away for speed.
+The same outcome can be reported as valid samples consumed per second, but the
+objective must include materialization and migration costs. A plan should not
+appear better merely because its expensive preparation was omitted from the
+measurement window.
 
-### Proposed System Architecture
-
-The proposed system contains four logical layers.
+When the current evidence cannot rank the best candidates confidently, the
+autoresearch problem is to select the next safe experiment `e`:
 
 ```text
-Workload API and FlowMesh workflow DAGs
-                  |
-                  v
-Representation catalog and physical data path planner
-                  |
-                  v
-Distributed data plane: object store, caches, staging, transformations
-                  |
-                  v
-FlowMesh workers and AI consumers on CPUs and GPUs
+maximize   expected_decision_improvement(e | D)
+           ------------------------------------------------
+           trial_cost(e) + disruption(e) + transition_cost(e)
 
-Telemetry --------------------------------> Autoresearch optimizer
-     ^                                               |
-     +---------------- candidate plans --------------+
+subject to semantic validity, resource budgets, and safety constraints
 ```
 
-#### 1. Representation Catalog
+This is an experiment-selection objective, not the runtime performance
+objective itself. It asks whether acquiring a particular trace is worth its
+cost because it can change a consequential plan decision.
 
-The catalog provides the database metadata needed to distinguish this system
-from an unmanaged collection of files. It records:
+## Research Hypotheses
 
-- stable logical object identifiers;
-- modality and schema information;
-- chunks and physical encodings;
-- derived representation lineage;
-- transformation code, parameters, and version fingerprints;
-- object locations and replica states;
-- size and observed access statistics;
-- freshness and compatibility constraints; and
-- cacheability and determinism properties.
+### H1: Joint Planning Has Measurable Value
 
-The catalog should allow the planner to ask whether two workflows can safely
-reuse the same decoded data, tokens, or embeddings.
+Jointly optimizing representation materialization, placement, and
+transformation/delivery will outperform layer-local policies under workloads
+where transformations change data size, representations are reused, and
+storage, CPU, or network resources contend.
 
-#### 2. Distributed Data Plane
+This hypothesis is falsifiable: if independent per-layer optimization reaches
+the same plans or performance across representative conditions, the claimed
+need for a unified optimizer is weak.
 
-The data plane manages remote object storage, node-local NVMe, host memory, and
-optionally accelerator memory. It exposes explicit operations for materialize,
-replicate, stage, pin, evict, and invalidate. A node-local agent reports cache
-contents, tier capacities, transfer rates, and transformation throughput.
+### H2: Reuse Horizon and Transition Cost Change the Best Plan
 
-The data plane should support multiple delivery strategies without changing
-the logical workload. Examples include direct reads from object storage,
-rack-local relay caches, peer-assisted reads, and a producer that decodes an
-object once and distributes the derived representation to multiple consumers.
+Plans selected from steady-state throughput alone will make systematically
+poor choices when materialization, replication, migration, invalidation, and
+reuse horizon are significant. A transition-aware planner will choose
+different plans as reuse count and version churn change and will reduce
+horizon-wide completion time.
 
-#### 3. Physical Data Path Planner
+### H3: Structured Autoresearch Is Experiment-Efficient
 
-The planner compiles the logical workload into a legal physical plan. It uses
-the catalog and cluster graph to prune infeasible or semantically invalid
-choices before empirical search begins. For example, it must not reuse an
-embedding generated by an incompatible model version or cache the result of a
-random transformation as if it were deterministic.
+A structural analytical model will capture sizes, nominal bandwidth, and
+operator costs but will be inaccurate under skew, queueing, and shared-resource
+contention. An autoresearch policy that uses representation and resource
+structure to select targeted experiments will improve plan ranking or
+adaptation at lower total trial and transition cost than passive observation,
+random/exhaustive trials, or a generic black-box tuner with the same budget.
 
-The planner should expose structured plan transformations rather than a flat
-collection of unrelated knobs. Candidate transformations may include:
+This hypothesis is deliberately falsifiable. If the analytical model already
+ranks plans correctly, or if a generic tuner performs equally well at equal
+budget, the planner may remain useful but autoresearch should not be claimed as
+a separate contribution. The label is not itself novelty; decision-relevant
+experiment selection and the evidence it produces must be measurably useful.
 
-- move a transformation before or after a network boundary;
-- materialize or remove an intermediate representation;
-- change the replication factor of a hot shard;
-- replace origin reads with a peer or relay delivery tree;
-- resize cache allocation between modalities or representations;
-- alter chunk size and prefetch depth; and
-- co-locate a transformation with its producer or consumer.
+## Intended Contributions
 
-#### 4. Telemetry and Provenance
+The intended paper should make three defensible contributions:
 
-Every trial should record enough information to explain its result. Required
-telemetry includes per-operator service time, queueing time, bytes transferred,
-link utilization, cache hits by representation, staging waste, CPU and GPU
-utilization, accelerator starvation, object-store requests, and end-to-end
-goodput. Measurements must be linked to the exact workload, plan, dataset
-version, code version, and cluster state.
+1. **A multimodal physical data path abstraction.** A representation-aware plan
+   that unifies materialization, placement, and transformation/delivery under
+   explicit lineage and compatibility constraints, reuse horizons, and
+   transition costs.
+2. **A structured autoresearch method for physical planning.** A method that
+   generates legal plan hypotheses, chooses decision-relevant trials, combines
+   an analytical model with trace evidence, and stops or deploys according to
+   experiment and reconfiguration budgets.
+3. **End-to-end evidence from a distributed prototype.** An implementation on
+   an existing execution substrate, initially FlowMesh, demonstrating when and
+   why joint optimization and targeted experimentation improve recurring
+   multimodal pipelines—and when either provides no additional value.
 
-### The Autoresearch Loop
+The main novelty claim should be the combination of the physical-plan
+abstraction, transition-aware joint planning, and an autoresearch policy
+designed for that structured space. Combining an object store, an LRU cache,
+and a generic black-box tuner would not be sufficient.
 
-The optimizer executes the following loop:
+## Position Relative to Adjacent Work
 
-```text
-propose plans -> validate plans -> execute trials -> measure -> learn -> deploy
-```
+The novelty boundary must be established against at least four neighboring
+areas:
 
-#### Candidate Proposal
+- **ML input-pipeline services and intermediate caching** already choose
+  preprocessing outputs to cache and may scale data workers. The proposed work
+  must go beyond this by optimizing distributed representation placement and
+  transformation/delivery boundaries across jobs.
+- **Distributed training caches and storage fabrics** exploit access patterns,
+  locality, or sample importance. The proposed work adds versioned
+  representations of the same logical item and treats their production and
+  delivery as plan choices.
+- **Multimodal lakehouse and ML storage formats** organize and stream complex
+  data. The proposed work focuses on workload-driven physical paths across
+  derived representations and heterogeneous resources.
+- **Database physical design and configuration tuning** search materialization,
+  placement, or configuration choices. The proposed work needs a structured,
+  semantically constrained representation graph and data-path traces rather
+  than only a flat knob vector and scalar benchmark result.
+- **Self-driving systems and generic online tuners** already profile workloads,
+  explore configurations, and adapt deployed systems. The proposed
+  autoresearch loop must exploit shared structure across representations,
+  operators, and resources to choose more informative experiments at the same
+  trial and disruption budget.
 
-The optimizer proposes `K=3` candidate physical plans per iteration. Candidate
-generation should combine domain-aware plan transformations with exploration.
-An LLM may help explain results or suggest transformations, but plan validity
-and the core optimization procedure should not depend on unconstrained natural
-language generation.
+Particularly close work includes systems that automatically cache outputs from
+multiple preprocessing stages and coordinate memory and storage. Therefore,
+“choosing which intermediate representation to cache” cannot stand alone as
+the novelty claim. The differentiating experiment must exercise distributed
+placement or replication together with a transformation/network boundary.
 
-#### Trial Execution
-
-Candidates are evaluated using representative workload slices, short pilot
-runs, or canary traffic. Expensive persistent changes, such as creating a large
-derived representation, must be accounted for as reconfiguration cost. The
-optimizer should amortize or avoid such changes rather than measuring only
-steady-state performance after preparation is complete.
-
-Parallel trials introduce a subtle measurement problem. Although candidates
-may run in separate containers, they can still share object-store bandwidth,
-network links, and disks. The system must either isolate trial resources,
-schedule non-conflicting candidates together, or estimate and remove
-cross-trial interference. Otherwise, the autoresearch loop can learn an
-incorrect ranking.
-
-#### Learning and Selection
-
-A promising design is a hybrid cost model:
-
-```text
-estimated cost = structural analytical model + learned residual
-```
-
-The analytical component captures object sizes, transformation DAGs, cache
-capacity, placement, and nominal bandwidth. The learned residual captures
-contention, skew, implementation effects, and hardware behavior that are hard
-to model. Operator-level traces provide denser supervision than a single final
-throughput value.
-
-The optimizer maintains a Pareto frontier over goodput, cost, and resource
-usage. It should periodically re-evaluate selected plans to detect workload or
-infrastructure drift. A deployed plan is replaced only when the expected gain
-exceeds migration cost and uncertainty.
-
-### Intended Research Contributions
-
-The intended paper should make the following contributions.
-
-1. **A multimodal physical data path abstraction.** The abstraction unifies
-   representation lineage, materialization, placement, transformation, cache,
-   staging, and delivery decisions under explicit correctness constraints.
-2. **A joint optimizer for representation, placement, and routing.** The work
-   should demonstrate analytically and empirically why independent layer-by-layer
-   optimization can be arbitrarily or substantially suboptimal.
-3. **A trace-guided autoresearch algorithm.** The algorithm searches structured
-   physical plans, learns unknown costs from targeted trials, accounts for
-   reconfiguration cost, and adapts to workload drift.
-4. **A distributed prototype integrated with FlowMesh.** The prototype should
-   execute real multimodal AI pipelines and demonstrate end-to-end improvements
-   across modalities, workloads, and cluster configurations.
-
-The novelty claim should be based on the combination of a new physical plan
-abstraction and an optimizer designed for that abstraction. Merely combining
-an object store, an LRU cache, and a generic Bayesian optimizer would not be a
-sufficient contribution.
-
-### Relationship to Existing Research
-
-Several adjacent areas must be separated carefully from this project.
-
-- Multimodal lakehouse systems already provide formats and streaming access for
-  complex objects. This project focuses on workload-driven physical data paths
-  across derived representations and distributed resources.
-- ML input pipeline systems already autoscale preprocessing and cache selected
-  outputs. This project jointly optimizes representation, placement, staging,
-  and delivery topology across a workload DAG.
-- Distributed training caches already exploit repeated sample access or sample
-  importance. This project models multiple representations of the same logical
-  item and cross-job reuse with versioned lineage.
-- Storage fabrics already use workload information to place data in faster
-  tiers. This project includes transformation placement and network delivery as
-  part of the same physical plan.
-- Database tuning systems already use Bayesian optimization or reinforcement
-  learning to search configuration knobs. This project searches a structured,
-  semantically constrained plan space and uses data-path traces rather than only
-  scalar benchmark outcomes.
-
-Relevant starting points include:
+The closest starting references from the completed background map include:
 
 - [Deep Lake: a Lakehouse for Deep Learning](https://vldb.org/cidrdb/2023/deep-lake-a-lakehouse-for-deep-learning.html)
-- [Symphony: Natural-Language Query Answering over Multi-modal Data Lakes](https://vldb.org/cidrdb/2023/symphony-towards-natural-language-query-answering-over-multi-modal-data-lakes.html)
+- [Plumber: Diagnosing and Removing Performance Bottlenecks in Machine Learning Data Pipelines](https://proceedings.mlsys.org/paper_files/paper/2022/hash/d0e90e9a9310570dfa643aa3b2da6e89-Abstract.html)
 - [Cachew: Machine Learning Input Data Processing as a Service](https://www.usenix.org/conference/atc22/presentation/graur)
-- [SHADE: Enable Fundamental Cacheability for Distributed Deep Learning Training](https://www.usenix.org/conference/fast23/presentation/khan)
-- [Tectonic-Shift: A Composite Storage Fabric for Large-Scale ML Training](https://www.usenix.org/conference/atc23/presentation/zhao)
+- [Pecan: Cost-Efficient ML Data Preprocessing with Automatic Transformation Ordering and Placement](https://www.usenix.org/conference/atc24/presentation/graur)
+- [HyCache: Hybrid Caching for Accelerating DNN Input Preprocessing Pipelines](https://www.usenix.org/conference/atc25/presentation/jha)
+- [Seneca: Intermediate-Representation Caching for DNN Input Pipelines](https://www.usenix.org/conference/fast26/presentation/desai)
+- [KeystoneML: Optimizing Pipelines for Large-Scale Advanced Analytics](https://shivaram.org/publications/keystoneml-icde17.pdf)
+- [Blaze: Holistic Caching for Iterative Data Analytics](https://doi.org/10.1145/3627703.3629558)
 - [LlamaTune: Sample-Efficient DBMS Configuration Tuning](https://www.vldb.org/pvldb/vol15/p2953-kanellis.pdf)
 - [UDO: Universal Database Optimization using Reinforcement Learning](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf)
 
-A comprehensive related-work review is still required before finalizing the
-novelty claim.
+The detailed comparison and caveats are recorded in
+[Background Research Synthesis](BACKGROUND_RESEARCH/99_SYNTHESIS_AND_RESEARCH_GAPS.md).
+The final novelty claim must still be revised after a systematic literature
+search.
 
-### Integration with FlowMesh
+## Evidence Required for the Direction to Succeed
 
-FlowMesh can serve as the control and execution plane rather than the data lake
-itself. Existing capabilities that are directly useful include:
+Before expanding the system, a small testbed should establish all of the
+following:
 
-- workflow DAG parsing and task lifecycle management;
-- distributed worker registration and dispatch;
-- S3, SQL, and external data retrieval;
-- artifact references between stages;
-- cached model and dataset locality hints;
-- stage stickiness and task merging;
-- heterogeneous inference, training, retrieval, and multimodal executors; and
-- task-level runtime and resource telemetry.
+1. At least one recurring multimodal workload is materially bottlenecked on its
+   data path rather than model computation.
+2. The best representation changes with network bandwidth, transformation
+   cost, placement, cache capacity, or reuse horizon.
+3. A joint plan materially outperforms a strong intermediate-caching baseline
+   and an independent per-layer optimizer.
+4. The autoresearch experiment selector identifies useful traces and reaches a
+   better plan—or the same plan at lower total experiment cost—than
+   analytical-only, passive, and generic-tuner baselines at equal budgets.
+5. The loop can refuse low-value experiments, account for artifacts reused
+   across trials, and stop or roll back without hiding transition work.
 
-The project requires new components beyond the current FlowMesh runtime:
+If item 2 is not observed, the representation-aware problem may collapse into
+ordinary caching. If item 3 is not observed, the joint-planning thesis should
+be narrowed. If items 4 and 5 are not observed, the system can still contribute
+a physical planner, but autoresearch should not be the headline.
 
-- a representation and lineage catalog;
-- a chunk and replica metadata service;
-- a distributed multi-tier cache agent;
-- explicit staging and materialization operations;
-- network topology and bandwidth monitoring;
-- a physical data path plan schema and compiler;
-- fine-grained data-path telemetry; and
-- an experiment manager and optimizer.
+## Non-Goals for the Initial Paper
 
-The desired division of responsibility is:
+The initial work should not attempt to:
 
-```text
-new multimodal data plane
-        +
-FlowMesh control and execution plane
-        +
-autoresearch physical plan optimizer
-```
-
-### Evaluation Plan
-
-The evaluation should answer five research questions.
-
-#### RQ1: End-to-End Performance
-
-Does joint data path optimization improve sustained goodput, workflow makespan,
-accelerator utilization, and tail latency relative to existing approaches?
-
-#### RQ2: Value of Joint Optimization
-
-How much performance is lost when representation materialization, placement,
-caching, staging, and routing are optimized independently? This question is
-central to justifying the system architecture.
-
-#### RQ3: Search Efficiency
-
-How many trials, how much data, and how much wall-clock time are required to
-reach a strong plan? The optimizer should be compared with random search, a
-generic black-box tuner, the analytical model alone, and an oracle obtained by
-exhaustive search on small instances.
-
-#### RQ4: Adaptation and Generalization
-
-Can the optimizer reuse knowledge across dataset scales, modalities, models,
-and cluster configurations? How quickly does it recover after changes in
-workload mix, network bandwidth, cache capacity, or transformation cost?
-
-#### RQ5: System Overhead and Robustness
-
-What are the overheads of metadata maintenance, telemetry, plan transitions,
-and experimental trials? How robust are measurements when candidate plans run
-in parallel and share infrastructure?
-
-#### Candidate Workloads
-
-The initial benchmark suite should contain at least three pipelines:
-
-- image-text embedding or contrastive training;
-- video-text decoding, sampling, and embedding; and
-- audio-text preprocessing and inference or training.
-
-An additional mixed workload should run pipelines concurrently to expose cache
-competition and network contention. Workloads should be repeated across several
-epochs or invocations so that materialization and caching decisions have a
-meaningful amortization horizon.
-
-#### Testbed
-
-A useful initial testbed contains:
-
-- remote S3-compatible object storage;
-- multiple FlowMesh compute workers;
-- heterogeneous CPU and GPU resources;
-- RAM and local NVMe cache tiers;
-- configurable or emulated link bandwidth and latency; and
-- enough data to exceed aggregate cache capacity.
-
-The final evaluation should include multiple cluster scales and at least one
-heterogeneous configuration. A small homogeneous cluster alone would not
-exercise the proposed planner.
-
-#### Baselines
-
-At minimum, the evaluation should compare against:
-
-- remote streaming with no application-managed cache;
-- node-local LRU or LFU caching;
-- static full-dataset staging when capacity permits;
-- locality-aware task placement;
-- independent per-layer optimization;
-- a generic black-box tuner over the same plan parameters;
-- the analytical cost model without empirical correction; and
-- an exhaustive-search oracle on reduced problem instances.
-
-#### Metrics
-
-Primary metrics include:
-
-- valid samples or requests consumed per second;
-- batch makespan and online p50/p95/p99 latency;
-- accelerator utilization and starvation time;
-- bytes read from each storage tier;
-- cross-rack and total network traffic;
-- cache hit rate by representation;
-- preprocessing CPU and GPU time;
-- storage footprint and monetary cost;
-- optimizer convergence time and number of trials; and
-- reconfiguration and trial interference overhead.
-
-### Suggested Implementation Stages
-
-#### Stage 1: Measurement and Reproducible Baselines
-
-Build two or three end-to-end multimodal pipelines on FlowMesh. Add operator,
-cache, storage, and network telemetry. Demonstrate that data delivery is a real
-bottleneck and characterize how the best static configuration changes across
-workloads and cluster conditions.
-
-#### Stage 2: Representation Catalog and Controllable Data Plane
-
-Implement logical object identities, representation lineage, version checks,
-and explicit materialize, stage, replicate, and evict operations. Support RAM,
-NVMe, and remote object storage.
-
-#### Stage 3: Physical Plan and Analytical Model
-
-Define the physical plan schema and legal transformations. Build a first-order
-model based on sizes, measured operator throughput, cache capacity, and network
-bandwidth. Use exhaustive search on small instances to identify interactions
-and validate the model.
-
-#### Stage 4: Trace-Guided Autoresearch
-
-Add batched candidate selection, workload slicing, learned cost correction,
-experiment provenance, Pareto tracking, and regression sweeps. Compare
-structured search with generic black-box optimization.
-
-#### Stage 5: Dynamic Adaptation
-
-Add workload-drift detection, migration-aware plan changes, and optionally
-online workloads. This stage should be attempted only after the static and
-recurring-batch story is convincing.
-
-### Major Research Risks
-
-#### Risk 1: The Search Space Is Too Broad
-
-Searching every storage, network, cache, and scheduler parameter at once can
-produce an unfocused system. The mitigation is to center the plan around three
-decisions first: representation materialization, placement/replication, and
-staging/delivery. Secondary knobs should be fixed or tuned within these
-decisions.
-
-#### Risk 2: Autoresearch Appears to Be Generic Tuning
-
-If the optimizer sees only a flat parameter vector and final throughput, the
-work will be difficult to distinguish from prior database tuning. The
-mitigation is a structured plan grammar, explicit semantics, trace-level
-learning, and baselines using the same generic tuner.
-
-#### Risk 3: The System Is Not Clearly a Database Contribution
-
-A distributed cache in front of an object store may be viewed as a storage or
-ML systems paper. The mitigation is to make the representation catalog,
-lineage, declarative workload, physical planning, cost model, and correctness
-constraints first-class components.
-
-#### Risk 4: Trial Cost Dominates the Benefit
-
-Large representations can take hours to materialize, and full workload runs
-may be expensive. The optimizer must model plan transition cost and use pilot
-runs, samples, reuse of prior measurements, and analytical pruning.
-
-#### Risk 5: Evaluation Covers Only One Workload
-
-A result tied to one model and one dataset will not support the general system
-claim. The evaluation must vary modality, reuse pattern, dataset size,
-transformation cost, network condition, and cache capacity.
-
-### Non-Goals for the Initial Paper
-
-The initial project should not attempt to:
-
-- design a new object storage consistency protocol;
-- replace S3-compatible durable storage;
+- design a new durable object-storage or consistency protocol;
+- replace an existing S3-compatible data lake;
 - physically reconfigure datacenter switches;
-- optimize model parallelism or gradient communication;
-- support every online and batch workload with one objective;
-- use an LLM as the sole optimizer; or
-- claim novelty from adding a cache to FlowMesh.
+- optimize model parallelism, gradient communication, or GPU kernels;
+- cover every online and batch objective in one optimizer;
+- automate literature review, paper writing, or unrestricted scientific
+  discovery;
+- flatten every system parameter into an unstructured black-box search space;
+- use an LLM as the sole plan generator or correctness mechanism; or
+- claim novelty from adding a distributed cache to FlowMesh.
 
-### Target Paper Narrative
+## Target Paper Narrative
 
-A concise database-paper narrative is:
-
-1. Multimodal AI pipelines expose multiple physical representations of each
+1. Multimodal pipelines expose several physical representations for each
    logical object.
-2. Representation, placement, transformation, cache, and delivery decisions
-   interact strongly, so existing layer-local optimizations leave accelerators
-   starved or waste network and storage resources.
+2. Their sizes, production costs, reuse conditions, and validity constraints
+   make representation, placement, and transformation/delivery decisions
+   strongly interdependent.
 3. We introduce a physical data path abstraction that makes these decisions
-   jointly optimizable under lineage and compatibility constraints.
-4. We design a hybrid optimizer that combines a structural cost model with
-   trace-guided autoresearch to learn unknown contention and adapt to workload
-   changes.
-5. A distributed implementation on FlowMesh improves end-to-end goodput and
-   resource efficiency across multiple modalities and cluster configurations.
+   jointly optimizable.
+4. We formulate autoresearch as decision-relevant experiment selection over
+   this structured plan space, with semantic, trial, disruption, and transition
+   constraints.
+5. The system automatically proposes plan hypotheses, runs targeted canaries,
+   updates local cost models from traces, and stops or deploys according to the
+   value of further evidence.
+6. A distributed prototype demonstrates the conditions under which joint
+   planning and autoresearch improve end-to-end performance and cost, including
+   negative regimes where one or both are unnecessary.
 
-This framing is suitable for a database venue because the primary contribution
-is a new physical design and optimization problem for data-intensive
-workloads. FlowMesh provides the execution substrate, while autoresearch is the
-mechanism that makes the physical designer empirical and adaptive.
+This framing can fit a database or data-systems venue if the catalog,
+representation lineage, declarative plan, cost model, and correctness
+constraints remain first-class. FlowMesh is the execution substrate, not the
+research contribution by itself.
 
-### One-Paragraph Research Pitch
+## Short Research Pitch
 
-We propose a self-driving physical data path optimizer for distributed
-multimodal data lakes. Unlike conventional data loaders and caches, our system
-models each logical object as a versioned graph of physical representations,
-such as compressed media, decoded data, tensors, tokens, and embeddings. Given
-a workload DAG and a heterogeneous cluster, it jointly chooses representation
-materialization, placement, replication, cache allocation, staging, operator
-placement, and logical delivery topology. Because analytical estimates cannot
-fully capture data skew and shared-resource contention, the optimizer runs
-small batches of candidate plans, learns from operator-level execution traces,
-and continuously revises its cost model. We will implement the system as a new
-distributed data plane integrated with FlowMesh and evaluate whether joint,
-trace-guided optimization improves goodput, accelerator utilization, and cost
-across image, video, audio, and text pipelines.
-
-### Immediate Decisions Before Implementation
-
-Before committing to a full implementation, the project should settle four
-questions experimentally:
-
-1. Which recurring batch workload exhibits the clearest interaction between
-   representation choice and network or cache behavior?
-2. Which three physical decisions account for most of the performance
-   variation in the initial cluster?
-3. Can operator-level measurements predict the effect of a plan on a larger
-   workload slice better than end-to-end throughput alone?
-4. Is logical delivery topology genuinely configurable and beneficial on the
-   available hardware, or should the first paper focus on representation,
-   placement, and staging?
-
-The answers should determine the final paper scope. The project should expand
-only after the central interaction and performance opportunity are reproduced
-reliably.
+We study autoresearch for self-driving physical data path optimization in
+distributed multimodal data lakes. The system models each logical object as a
+versioned graph of compressed media, decoded data, tensors, tokens, and
+embeddings, then jointly plans which representations to materialize, where to
+place them, and where to transform and deliver them. When the structural cost
+model cannot rank plans confidently, an autoresearch controller proposes
+testable plan hypotheses, selects a low-cost microbenchmark or canary that can
+resolve the uncertainty, records operator- and resource-level evidence, and
+updates or deploys a plan only when its reuse-horizon benefit exceeds
+experiment and transition cost. The research asks both whether this joint plan
+beats strong layer-local optimizers and whether structured experiment selection
+reaches good decisions more efficiently than passive measurement or generic
+black-box tuning.
