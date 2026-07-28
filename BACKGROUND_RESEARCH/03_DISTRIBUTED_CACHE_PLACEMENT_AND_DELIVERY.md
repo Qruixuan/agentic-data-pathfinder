@@ -51,7 +51,10 @@ Tectonic-Shift and FalconFS show mature approaches to metadata scalability, flas
 3. **Tectonic-Shift-style intent interfaces.** Consumers declare datasets, deadlines or reuse horizons, and required representations instead of forcing lower layers to infer all intent from block access.
 4. **Blaze-style unified benefit models.** Evaluate retention, eviction, recomputation, and recovery together rather than applying an independent policy per tier.
 5. **Tiered but non-inclusive caching.** DRAM, SSD, and remote replicas need not hold the same objects; distinct tiers may store different representations.
-6. **Separate replica feasibility from capacity allocation.** Generate legal candidate locations first, then allocate capacity under multi-job budgets and fairness constraints.
+6. **Separate replica feasibility from capacity allocation.** Generate
+   policy-valid candidate locations first, then allocate capacity under
+   multi-job budgets and fairness constraints. Residency, transfer, consumer,
+   and storage-tier restrictions must be evaluated before performance ranking.
 
 ## 5. Remaining Research Gaps
 
@@ -71,8 +74,26 @@ Replicating a raw object mainly incurs transfer cost; replicating a decoded or t
 
 “Move computation to data” is not universally correct. Decoding expands bytes, filtering contracts them, GPU hosts may have spare CPUs, and storage-side CPUs may become shared bottlenecks. A valid delivery plan must compare bytes before and after each transform, CPU queues, link contention, and reuse value.
 
+### 5.5 Governance can change the placement object and transform boundary
+
+Geo-distributed and compliant-query systems already optimize under site and
+transfer constraints. The narrower question for this project is whether a
+policy applies differently to raw, decoded, sampled, tensor, or embedding
+versions and therefore changes both the permitted replica locations and the
+transform split point. See
+[D7](07_GOVERNANCE_AND_FEDERATED_DATA_PLACEMENT.md) for the direct precedents
+and scope boundary.
+
 ## 6. Implication for This Project
 
-D3 has already addressed distributed prefetching, cross-job sharing, tiered caching, and some storage-compute coordination. Baselines must include access-aware designs such as NoPFS, unified cache strategies such as Blaze, and production-style hotspot replication.
+D3 has already addressed distributed prefetching, cross-job sharing, tiered
+caching, and some storage-compute coordination. Baselines must include
+access-aware designs such as NoPFS, unified cache strategies such as Blaze, and
+production-style hotspot replication.
 
-The plausible research increment is **representation-aware placement**: the planner places a transformable, versioned, conditionally reusable representation graph rather than fixed samples, and solves placement together with transformation split points. Its value must be demonstrated under data expansion or contraction, resource contention, and cross-job reuse.
+The revised increment is narrower than representation-aware placement alone.
+Pathfinder must show that layout and delivery change the affordable
+representation set for an agent, making access demand endogenous rather than
+merely forecastable. Cache and placement systems remain strong mechanisms and
+baselines; AWM/OED is justified only if their ordinary read traces become
+self-confirming under this feedback.

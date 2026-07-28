@@ -76,6 +76,15 @@ A physical operator can change output layout, size, and reusability, so implemen
 
 The optimizer proposes a plan; an independent validator checks that every consumer version can legally be produced from the selected representations and transformations. Correctness should reside in this validator rather than in a learned ranking model.
 
+### 4.6 Separate semantic identity from policy authorization
+
+A representation can remain byte-identical and semantically valid while a
+residency, ownership, retention, or consumer policy changes. The catalog
+should therefore preserve `RepresentationVersionID` and separately version the
+policy under which a replica, transfer, or reuse decision was authorized.
+Restrictions propagate conservatively through lineage unless an external
+authority supplies an accepted derivation attestation.
+
 ## 5. Remaining Research Gaps
 
 ### 5.1 Semantic reuse and distributed physical location are usually separated
@@ -94,8 +103,24 @@ Tokens, embeddings, and features branch as models, weights, prompts, and preproc
 
 Creating, validating, migrating, replicating, and reclaiming representations all consume resources. Existing workflow materialization provides the benefit-model foundation, but this setting must add cross-tier and cross-node transition costs plus shared benefits across jobs.
 
+### 5.5 Policy changes over derived state
+
+Provenance and reliable deletion are mature mechanisms, but a policy update
+also changes future reuse and planning. The open intersection is to locate
+affected derived replicas, revoke or erase them according to a declared rule,
+and select the next legal `M/L/E` plan without conflating policy invalidation
+with semantic invalidation. See
+[D7](07_GOVERNANCE_AND_FEDERATED_DATA_PLACEMENT.md).
+
 ## 6. Implication for This Project
 
-D4 is both precedent and constraint: common-subcomputation discovery, lineage-based reuse, and cost-driven materialization already exist. The project should not claim to invent them.
+D4 is both precedent and constraint: common-subcomputation discovery,
+lineage-based reuse, and cost-driven materialization already exist. The project
+should not claim to invent them.
 
-A more promising contribution is to extend these ideas into **distributed physical planning over a multimodal representation graph**. For each legal representation version, the planner compares retention, replication, remote reads, local recomputation from a parent, and transforms at different locations. The semantic layer proves legality; the physical layer decides which legal path is worth executing.
+Pathfinder reuses those contracts for two roles: determining which physical
+paths are valid, and deciding whether an artifact produced by a Reveal can be
+retained after restoration. The new claim, if validated, is not lineage
+itself; it is that a valid but previously unaffordable representation hides
+agent demand, while an experiment simultaneously observes that demand and
+changes reusable physical state.

@@ -1,284 +1,418 @@
-# Updated Synthesis: Physical Planning and Structured Autoresearch
+# Synthesis: Performative Physical Design for Agentic Workloads
 
-## 1. Why This Update Was Needed
+## 1. Why the Synthesis Changed
 
-The direction now contains two connected problems:
+The revised direction is no longer primarily "joint physical planning plus
+Structured Autoresearch." It is:
 
-1. **Physical planning:** jointly select materialization `M`, cross-node and cross-tier locations `L`, and transformation or delivery execution `E` for versioned multimodal representations.
-2. **Structured Autoresearch:** when existing evidence cannot reliably rank candidate plans, formulate a structured hypothesis, choose a decision-relevant experiment, update evidence, and then deploy, continue, refuse, or stop.
+> A physical design changes which multimodal representations agents can afford
+> to access; this changes the realized workload and session value; Pathfinder
+> must optimize the resulting endogenous objective under incomplete,
+> design-censored observations.
 
-The physical system has converged on a central controller plus per-node Data Agents. Immutable representation shards are the optimization unit, and child plan epochs isolate canary execution.
+The physical substrate remains `D=(M,L,E)`, but the central modeling change is
+from a fixed workload `W` to a design-induced workload `W(D)`.
 
-The updated survey specifically examined active experimentation, continuous physical design, transition costs, candidate isolation, rollback, and stopping. Most broad capabilities already have mature precedents, so the novelty boundary must be narrower.
+Structured experimentation has a narrower role. AWM represents ambiguity about
+counterfactual workload response. OED uses Commit, Reveal, and Hold to make
+decisions or acquire evidence. Partial materialization, canaries, rollback, and
+artifact reuse implement Reveal and escalation.
 
 ## 2. Conclusions First
 
-The representative literature reviewed through July 2026 supports four conclusions.
+### 2.1 The physical-design substrate is useful but crowded
 
-### 2.1 A physical-planning gap may remain, but it must be stated precisely
+Existing systems already provide:
 
-Existing systems cover:
+- multimodal and tensor representations;
+- transformation-pipeline optimization;
+- multistage caching across memory and storage tiers;
+- distributed placement, prefetching, and remote execution;
+- workflow materialization, lineage, and reuse;
+- joint cost-based physical design;
+- transition-aware continuous tuning; and
+- safe candidate isolation, deployment, rollback, and cleanup.
 
-- physical operators and intermediate materialization in ML workflows;
-- multistage representation caching across DRAM and SSD;
-- local, remote, and storage-near transform placement;
-- distributed sample caching, prefetching, and replication;
-- joint database design across compression, indexing, sorting, and tiering; and
-- online physical design with reconfiguration costs.
+A paper centered only on jointly choosing `M`, `L`, and `E` would face strong
+prior art. The representation-path interaction remains useful, especially
+because transforms expand or contract data and parents can be shared, but it
+is now the systems substrate rather than the whole novelty claim.
 
-The surveyed systems do not appear to simultaneously use a **versioned multimodal representation DAG** to globally select:
+### 2.2 Conventional traces can be self-confirming
+
+A read-react-materialize controller sees only the representations offered by
+its current design. If an expensive structured representation is absent or
+unaffordable, it receives no reads and creates no evidence of latent value.
+The controller can therefore rationally reinforce the incumbent and remain
+locked in.
+
+This is stronger than ordinary workload drift. The design is part of the
+causal mechanism generating the observed workload.
+
+### 2.3 Performative research supplies the right warning, not a complete system
+
+[Performative Prediction](https://proceedings.mlr.press/v119/perdomo20a.html)
+formalizes decision-induced distributions and performative stability.
+[Outside the Echo Chamber](https://proceedings.mlr.press/v139/miller21a.html)
+shows why a stable point can be far from the optimizer of performative risk.
+
+Pathfinder should inherit the distinction:
+
+- a performative optimum maximizes `Phi(D)` under `W(D)`;
+- a stable design is self-consistent under a specified update rule; and
+- an OED certificate is relative to the AWM ambiguity set and the candidate
+  pools it actually covers.
+
+The three are not equivalent.
+
+### 2.4 Censored feedback and exploration have strong precedents
+
+Selective-label research studies outcomes observed only after an earlier
+decision permits them. Bandit physical-design systems explore indexes or
+materialized views through direct rewards. Automated-tuning work supplies
+active sampling, canaries, stopping, rollback, and transition-aware trial
+ordering.
+
+Pathfinder must therefore demonstrate a narrower intersection:
+
+- representation access, not only execution time, responds to design;
+- observations are coupled by task classes and substitution groups;
+- physical interventions are expensive and stateful;
+- probes may create reusable artifacts; and
+- some candidates are not reachable by the current probe mechanism.
+
+### 2.5 AWM is justified only by partial identification
+
+If an ordinary supervised model or bandit can learn the response cheaply, a
+new ambiguity-set model is unnecessary. AWM matters when incumbent observations
+do not point-identify counterfactual demand, but defensible structural
+assumptions still produce useful lower and upper bounds.
+
+Those assumptions must be versioned and falsifiable. Their constraints are
+coupled; independently choosing the worst endpoint of every interval may
+construct a response function that is not feasible.
+
+The current AWM also makes a quoted-price-sufficiency assumption:
+`n(D)=eta(p(D))` and `r(D)=rho(p(D))`. Because workload modes may run on
+different consumers, `p(D)` is a class-specific matrix `p_qv(D)`, not one
+scalar per representation. Felt latency and realized physical cost remain
+separate observables. If felt latency changes response conditional on the
+quote, the current scalar-price model and its Reveal-count theorem do not
+apply without latency reservation or a larger response model.
+
+### 2.6 OED is a candidate-relative safe controller
+
+OED separates:
+
+- `G_cert`: candidates with sufficient bounds for a Commit decision;
+- `G_probe`: candidates reachable by a bounded Reveal; and
+- `G_other`: candidates outside the current certificate and intervention set.
+
+Reveal returns to `D_safe` unless a separate Commit certificate is established.
+It retains the observation and may retain valid artifacts. This is useful, but
+it is not a global optimality guarantee while `G_other` is nonempty.
+
+Before a run, each legal task-class/representation pair has a fixed executable
+price-level universe:
 
 ```text
-M: materialized representation shards
-L: cross-node and cross-tier replicas
-E: transform executors and delivery boundaries
+P_qv = { p_qv(D) : D in D_gov and p_qv(D) is within the access gate }
 ```
 
-The plausible distinction is not “the first joint physical design” or “the first transition-aware optimizer.” It is that representation transformations change both network bytes and the set of materializable downstream objects; a parent may serve several jobs; and replicas of the same representation may span nodes. These properties create a distributed transformation-path coupling different from index/compression design.
+The general Reveal-resolution bound is `sum_{q,v}|P_qv|`. The reduced
+`|Q||V|` and `|V|` bounds require, respectively, pair-canonical Reveals and
+Reveals simultaneously canonical for all affording classes; uniform gates
+alone are insufficient. OED should prefer simultaneous-canonical,
+pair-canonical, and then budget-feasible fallback probes in that order.
 
-This is a gap assessment based on the current literature sample, not yet a defensible “the first” claim.
+Its stability margin must include candidate-value width, incumbent-value
+width, and transition-cost width. With time-uniform confidence sets, this
+supports no-thrashing reasoning without pretending physical cost is known
+exactly. Termination follows from finite legal design and price-level domains;
+the exploration purse limits exposure but is not the termination proof.
 
-### 2.2 General Autoresearch capabilities have strong precedents
+### 2.7 Governance remains an external feasibility constraint
 
-[iTuned](https://www.vldb.org/pvldb/vol2/vldb09-193.pdf) plans online experiments; [Ernest](https://pages.cs.wisc.edu/~shivaram/publications/ernest-nsdi.pdf) uses optimal experiment design; [CherryPick](https://www.usenix.org/conference/nsdi17/technical-sessions/presentation/alipourfard/) uses Bayesian optimization; [MLOS](https://www.vldb.org/pvldb/vol17/p4269-kroth.pdf) supplies experiment infrastructure; [KEA](https://arxiv.org/abs/2106.11445) combines observation with production flighting; and [OnlineTune](https://arxiv.org/abs/2203.14473), [SelfTune](https://www.usenix.org/conference/nsdi23/presentation/karthikeyan), and [OPPerTune](https://www.usenix.org/conference/nsdi24/presentation/somashekar) cover dynamic, safe, low-disruption tuning.
+Geo-distributed compliant planning, provenance, local authorization, auditing,
+revocation, and deletion all have precedents. Pathfinder should consume a
+versioned `D_gov` and external attestations, then enforce them at the resolver
+and Data Agents.
 
-Automatically selecting an experiment, running a canary, managing evidence, stopping, or rolling back cannot be independent novelty claims.
+It should not interpret law, infer that a derived representation is safe, or
+claim a governance contribution unless constraints create a distinct measured
+interaction with performative design.
 
-### 2.3 Continuous physical design and transition costs are also established
+## 3. Capability Matrices
 
-[Online Physical Design Tuning](https://www.microsoft.com/en-us/research/publication/an-online-approach-to-physical-design-tuning/) balances future benefit, creation cost, and thrashing. [To Tune or Not to Tune](https://www.microsoft.com/en-us/research/publication/to-tune-or-not-to-tune-a-lightweight-physical-design-alerter/) decides whether expensive tuning is worthwhile. [UDO](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf) orders heavy and light trials to reuse expensive structures. [Automatic Indexing in Oracle](https://www.vldb.org/pvldb/vol18/p4924-chakkappen.pdf) implements isolation, validation, incremental deployment, regression protection, and accountability.
+### 3.1 Physical-Design Foundations
 
-The transition contribution must therefore concern a partially reusable state graph of representation artifacts, not a generic scalar `transition_cost(P_old, P_new)`.
+Legend: **Primary** is a central decision, **Partial** is narrower or uses a
+different object, and **No** is not central.
 
-### 2.4 The most plausible intersection gap is also the highest risk
-
-> In a versioned `M/L/E` plan space, the system uses plan differences and the representation DAG to select a component, sample, or canary experiment capable of changing the plan ranking. A valid representation shard produced by a trial may become a reusable physical artifact for a later plan, so experiment selection jointly values information, artifact reuse, disruption, and non-reusable transition cost.
-
-This claim must outperform both physical-design and automated-experiment baselines, not only LRU or random search.
-
-## 3. Physical-Planning Capability Matrix
-
-Legend: **Primary** means a core capability, **Partial** means limited coverage or a different data object, and **No** means it is not a primary decision.
-
-| Work | `M` Materialization | `L` Tier/Node | `E` Transform/Delivery | Version/Semantic Reuse | Transition/Reconfiguration | Distributed Multi-job |
+| Work | `M` | `L` | `E` | Versioned reuse | Transition state | Endogenous access |
 |---|---|---|---|---|---|---|
-| [KeystoneML](https://shivaram.org/publications/keystoneml-icde17.pdf) | Primary | Partial | Primary | Partial | Partial | Partial |
-| [Pecan](https://www.usenix.org/conference/atc24/presentation/graur) | No | Primary | Primary | No | No | Partial |
-| [HyCache](https://www.usenix.org/conference/atc25/presentation/jha) | Primary | Partial | Partial | Partial | Partial | Partial |
-| [Seneca](https://www.usenix.org/conference/fast26/presentation/desai) | Primary | Partial | Partial | Partial | Partial | Primary |
-| [NoPFS](https://arxiv.org/abs/2101.08734) | No | Primary | Partial | Partial | No | Primary |
-| [Blaze](https://doi.org/10.1145/3627703.3629558) | Primary | Primary | Partial | Partial | Primary | Primary |
-| [JellyBean](https://users.cs.duke.edu/~ml579/papers/jellybean_vldb23.pdf) | No | Primary | Primary | No | No | Partial |
-| [Nectar](https://www.microsoft.com/en-us/research/publication/nectar-automatic-management-of-data-and-computation-in-data-centers/) / [HELIX](https://www.vldb.org/pvldb/vol12/p446-xin.pdf) | Primary | Partial | Partial | Primary | Partial | Partial |
-| [Compression-Aware Physical Design](https://www.vldb.org/pvldb/vol4/p657-kimura.pdf) | Primary | Partial | No | No | Partial | No |
+| [KeystoneML](https://shivaram.org/publications/keystoneml-icde17.pdf) | Primary | Partial | Primary | Partial | Partial | No |
+| [HyCache](https://www.usenix.org/conference/atc25/presentation/jha) | Primary | Partial | Partial | Partial | Partial | No |
+| [Seneca](https://www.usenix.org/conference/fast26/presentation/desai) | Primary | Partial | Partial | Partial | Partial | No |
+| [Blaze](https://doi.org/10.1145/3627703.3629558) | Primary | Primary | Partial | Partial | Primary | No |
+| [JellyBean](https://users.cs.duke.edu/~ml579/papers/jellybean_vldb23.pdf) | No | Primary | Primary | No | No | No |
+| [Nectar](https://www.microsoft.com/en-us/research/publication/nectar-automatic-management-of-data-and-computation-in-data-centers/) / [HELIX](https://www.vldb.org/pvldb/vol12/p446-xin.pdf) | Primary | Partial | Partial | Primary | Partial | No |
 | [Budget-Conscious Physical Design](https://www.vldb.org/pvldb/vol15/p4079-richly.pdf) | Primary | Primary | No | No | Primary | No |
-| [Online Physical Design](https://www.microsoft.com/en-us/research/publication/an-online-approach-to-physical-design-tuning/) | Primary | No | No | No | Primary | Partial |
-| [Oracle Automatic Indexing](https://www.vldb.org/pvldb/vol18/p4924-chakkappen.pdf) | Primary | No | No | Partial | Primary | Primary |
-| **Proposed project** | **Primary** | **Primary** | **Primary** | **Primary** | **Primary** | **Primary** |
+| [Online Physical Design](https://www.microsoft.com/en-us/research/publication/an-online-approach-to-physical-design-tuning/) | Primary | No | No | No | Primary | No |
+| [DBA Bandits](https://renata.borovica-gajic.com/data/2021_icde.pdf) | Primary | No | No | No | Primary | No |
+| **Pathfinder** | **Primary** | **Primary** | **Primary** | **Primary** | **Primary** | **Primary** |
 
-The matrix does not imply that prior systems optimize only one layer. It shows that strong pairwise combinations and joint physical designs already exist. An interaction study must demonstrate that representation-transform/network coupling causes strong independent or sequential optimizers to choose systematically inferior plans.
+The last column is the proposed distinction and must be demonstrated causally.
+It cannot be inferred merely because workloads change over time.
 
-## 4. Autoresearch Capability Matrix
+### 3.2 Behavioral and Experimental Foundations
 
-| Work | Active Experiment Selection | Structural Priors | Online Safety | Transition/Trial Ordering | Persistent Artifact Reuse | Semantic Plan Validation |
-|---|---|---|---|---|---|---|
-| [iTuned](https://www.vldb.org/pvldb/vol2/vldb09-193.pdf) | Primary | Partial | Primary | Partial | No | No |
-| [Ernest](https://pages.cs.wisc.edu/~shivaram/publications/ernest-nsdi.pdf) | Primary | Primary | No | No | No | No |
-| [CherryPick](https://www.usenix.org/conference/nsdi17/technical-sessions/presentation/alipourfard/) | Primary | Partial | No | Partial | No | No |
-| [MLOS](https://www.vldb.org/pvldb/vol17/p4269-kroth.pdf) | Partial | Partial | Partial | Partial | No | No |
-| [KEA](https://arxiv.org/abs/2106.11445) | Partial | Partial | Primary | Partial | No | Partial |
-| [UDO](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf) | Primary | Primary | No | Primary | Partial | Partial |
-| [OnlineTune](https://arxiv.org/abs/2203.14473) | Primary | Primary | Primary | Partial | No | Partial |
-| [SelfTune](https://www.usenix.org/conference/nsdi23/presentation/karthikeyan) | Primary | Partial | Primary | Partial | No | Partial |
-| [OPPerTune](https://www.usenix.org/conference/nsdi24/presentation/somashekar) | Primary | Primary | Primary | Partial | No | Partial |
-| [Oracle Automatic Indexing](https://www.vldb.org/pvldb/vol18/p4924-chakkappen.pdf) | Primary | Primary | Primary | Primary | Partial | Primary |
-| [Seneca](https://www.usenix.org/conference/fast26/presentation/desai) | Partial | Primary | Primary | Partial | Partial | Partial |
-| **Proposed project** | **Primary** | **Primary** | **Primary** | **Primary** | **Primary** | **Primary** |
+| Work/area | Decision-induced response | Censored observation | Structural bounds | Safe exploration | Stateful artifacts |
+|---|---|---|---|---|---|
+| [Performative Prediction](https://proceedings.mlr.press/v119/perdomo20a.html) | Primary | Partial | Primary | No | No |
+| [Performative-risk optimization](https://proceedings.mlr.press/v139/miller21a.html) | Primary | Partial | Primary | Partial | No |
+| [Selective-label learning](https://proceedings.mlr.press/v235/chang24e.html) | Partial | Primary | Primary | No | No |
+| [iTuned](https://www.vldb.org/pvldb/vol2/vldb09-193.pdf) / [Ernest](https://pages.cs.wisc.edu/~shivaram/publications/ernest-nsdi.pdf) | No | No | Partial | Partial | No |
+| [OnlineTune](https://arxiv.org/abs/2203.14473) / [OPPerTune](https://www.usenix.org/conference/nsdi24/presentation/somashekar) | No | No | Partial | Primary | No |
+| [UDO](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf) | No | No | No | Partial | Partial |
+| **Pathfinder AWM/OED** | **Primary** | **Primary** | **Primary** | **Primary** | **Primary** |
 
-Having all columns is not itself novel. The distinction must reside in the controlled object and experiment structure: versioned multimodal shards, cross-node replicas, transform/network boundaries, and partial adoption of artifacts produced by losing candidates.
+Having every column is not sufficient novelty. Evaluation must show that their
+interaction changes decisions and outperforms simpler combinations.
 
-## 5. Mature Capabilities to Reuse
+## 4. Mature Capabilities to Reuse
 
-- tensor and columnar multimodal formats with versions and random/sequential access;
-- operator profiling, parallelism, prefetching, and remote offload;
-- multistage cache selection among raw, decoded, and augmented forms;
-- caching, prefetching, and replica management across DRAM, NVMe, shared storage, and peers;
-- workflow intermediate identity, lineage, equivalence, and invalidation;
-- cost-based operator, materialization, and placement planning;
-- joint compression, indexing, sorting, and tiering design;
-- continuous physical design, creation-cost accounting, and anti-thrashing;
-- adaptive sampling, optimal experiment design, and Bayesian or RL tuning;
-- experiment infrastructure, provenance, and production flighting; and
-- candidate isolation, canaries, regression protection, and rollback.
+### Representation and Execution Substrate
 
-These are mechanism sources, infrastructure patterns, and strong baselines, not standalone contributions.
+- versioned representation DAGs and transformation fingerprints;
+- object, tensor, and columnar multimodal formats;
+- operator profiling, parallelism, prefetching, and offload;
+- caching and replica management across RAM, NVMe, peers, and object storage;
+- lineage, equivalence, invalidation, and reuse; and
+- capacity-aware distributed scheduling.
 
-The controller plus per-node Data Agent architecture is consequently a substrate:
+### Physical Planning
 
-- the catalog and plan registry implement identity, plan epochs, and replica validity;
-- Data Agents execute transform, replicate, serve, pin, evict, and telemetry operations;
-- child plan epochs isolate candidates;
-- origin-read and parent-plan fallback provide safe recovery; and
-- the Evidence Store records interventions, traces, artifact adoption, and decisions.
+- semantic feasibility before cost ranking;
+- analytical resource and critical-path models;
+- joint and transition-aware physical design;
+- candidate dominance and structured search;
+- reduced-instance exhaustive oracles; and
+- incremental deployment and anti-thrashing.
 
-Research value comes from executing `M/L/E` interventions that existing abstractions cannot express and exposing artifact-aware experiment state.
+### Experiments and Safety
 
-## 6. Updated Research Gaps
+- active sampling, optimal design, Bayesian optimization, and bandits;
+- trial namespaces and child plans;
+- canaries, rollback, restoration, and regression protection;
+- evidence stores and experiment provenance;
+- expensive-trial ordering and switching-cost accounting; and
+- stopping and refusal rules.
 
-### G1. Distributed representation-path physical planning — core
+### Governance
 
-Jointly select:
+- externally defined policy facts and compliant candidate generation;
+- local authenticated enforcement;
+- provenance and auditable operations; and
+- revocation, retention, and deletion propagation.
 
-```text
-M: which representation shards exist and for how long
-L: which nodes and tiers hold their replicas
-E: which parent is served, where transforms run, and where bytes cross links
-```
+These are required mechanisms and baselines, not independent contributions.
 
-The mechanism differs from established joint physical design because:
+## 5. Updated Research Gaps
 
-- transformations may first expand and then contract data;
-- `M` changes which representation and how many bytes cross the network;
-- `E` changes which nodes become reusable materialization points;
-- `L` changes transform resources and cross-job reuse value; and
-- a common parent may branch to several consumers or versions.
+### G1. Performative Physical Design — Central Systems Gap
 
-**Required counterfactual:** global `M/L/E` planning must significantly outperform a strong independent or sequential optimizer using the same mechanisms in at least one reproducible regime.
+Select a distributed multimodal `D=(M,L,E)` while its access profile changes
+the agentic workload and session value. The access profile is the
+class-specific quote matrix `p_qv(D)`; felt latency and realized cost are
+modeled separately.
 
-### G2. Artifact-aware transition graph — planner/Autoresearch bridge
+**Required evidence:** matched quote and physical interventions must show a
+repeatable `D -> access -> W(D) -> Phi(D)` causal chain, and a quote-fixed
+latency intervention must support quoted-price sufficiency.
 
-Represent transitions as a partially shared artifact DAG:
+### G2. Censored Read-React-Materialize Lock-In — Central Motivation
 
-```text
-trial or plan operation
-  -> creates or moves a representation shard
-  -> the shard may be adopted by several later plans
-  -> later transition cost depends on current valid artifacts and leases
-```
+Show that an incumbent-dependent trace can hide a valuable representation and
+cause a natural materialization controller to remain at an inferior design.
 
-The planner must distinguish reusable, stranded, invalid, and disruptive work while deciding which artifacts from failed candidates to retain, whether to copy or recompute, how adjacent experiments share shards, and which common ancestors survive version churn.
+**Required evidence:** a real agent and physical path must reproduce the
+lock-in; the superior design must still win after transition cost.
 
-**Required counterfactual:** artifact-aware planning must beat both a scalar switch-cost model and UDO-style grouping based only on heavy configurations.
+### G3. Adaptive Workload Model — Core Modeling Gap
 
-### G3. Plan-difference-directed Autoresearch — high-risk candidate core
+Maintain a history-indexed coupled ambiguity set for counterfactual task-class
+access and success, with explicit affordability and substitution structure.
 
-Compare legal plans, identify unknown model terms that determine their ranking, and choose among:
+**Required evidence:** assumption falsification, held-out/reduced-oracle
+coverage, tighter bounds than trivial alternatives, and decisions changed by
+those bounds.
 
-- operator microbenchmarks;
-- transfer or storage benchmarks;
-- sampled representation materialization; and
-- child-plan workload canaries.
+### G4. Optimistic Elastic Design — Core Control Gap
 
-```text
-experiment_value =
-  expected decision improvement
-  + expected reusable-artifact value
-  - measurement cost
-  - foreground disruption
-  - non-reusable transition cost
-```
+Choose Commit, Reveal, or Hold relative to `D_safe`, including full forward,
+foreground, restoration, and artifact-state costs.
 
-This extends iTuned, Ernest, Bayesian optimization, and UDO to a new plan structure. It is a contribution only if it outperforms plan-level Bayesian optimization, generic optimal design, random component sampling, and UDO-style ordering under equal budgets.
+**Required evidence:** equal-budget improvement over passive, random, bandit,
+Bayesian, black-box, and UDO-style baselines. Report safe-sequence results
+separately from exploratory loss.
 
-### G4. Multi-job, multi-version representation coordination — core regime
+### G5. Causal Access-Path Resolver — Measurement Substrate
 
-Determine which parent representations are shared globally, which final forms are job- or node-private, whether a candidate harms other jobs, what survives version updates, and how to separate external contention from candidate performance.
+Expose complete offered choices, class-specific quotes `p_qv`, felt latency,
+and realized cost; enforce access budgets; and bind terminal outcomes to task
+class and design. Use quote interventions for efficient identification, real
+physical interventions matched on `p_qv` for construct validity, and a
+quote-fixed latency factorial for the sufficiency assumption.
 
-G4 should expose G1–G3 interactions, not expand into a general fairness scheduler.
+This is essential infrastructure. It becomes a contribution only if its
+semantics support measurements that existing storage traces cannot express.
+Queued scheduling imposes the current exogeneity contract; deliberate
+re-arrivals should be evaluated as an out-of-scope robustness stress test, not
+misreported as a fifth falsification gate.
 
-### G5. Unified compatibility contract — correctness substrate
+### G6. Representation-Path and Artifact-Aware State — Physical Substrate
 
-Input, code, parameters, randomness, model, tokenizer, and quality versions should consistently drive:
+Jointly represent materialization, replicas, transform/serve placement, and
+probe-created artifacts over a versioned DAG.
 
-- representation IDs;
-- cache and replica keys;
-- invalidation;
-- child-plan legality; and
-- trial-artifact adoption.
+**Required evidence:** joint `M/L/E` must beat strong independent/sequential
+planning, and artifact-aware transitions must improve over scalar switching
+cost and heavy/light grouping.
 
-Lineage and equivalence are mature topics, so G5 is essential infrastructure rather than a headline contribution.
+### G7. Candidate and Price-Domain Completeness — Guarantee Boundary
 
-### G6. Interaction and experiment-value evaluation — evidence
+The fixed ex ante sets `P_qv`, candidate generator, and probe mechanism define
+what OED can certify. `G_other` must remain visible. The implementation must
+label each Reveal as simultaneously canonical, pair-canonical, or fallback
+and report only the corresponding valid resolution bound.
 
-Run a factorial interaction study varying:
+**Required evidence:** reduced exhaustive instances must decompose loss into
+behavioral uncertainty, exploration policy, unresolved price levels, and
+omitted-candidate opportunity.
 
-- expansion and contraction ratios;
-- transform CPU intensity;
-- network and storage bandwidth;
-- NVMe and RAM capacity;
-- reuse horizon and version churn; and
-- job concurrency and skew.
+### G8. Governance-Constrained Performative Design — Conditional Extension
 
-Then evaluate Autoresearch using plan quality versus cumulative experiment cost, artifact-adoption ratio, stranded and invalid bytes, foreground disruption, stopping/refusal accuracy, and adaptation regret.
+Apply the same framework within externally supplied `D_gov`.
 
-## 7. Priorities
+**Required evidence for a separate contribution:** governance must change
+representation access and the best performative `M/L/E` design in a way that
+post-hoc repair handles poorly. Otherwise it remains a correctness feature.
 
-| Priority | Item | Role |
+## 6. Formal Gaps in the Current Paper Skeleton
+
+The following are human/theory work, not questions that experiments alone will
+repair:
+
+1. distinguish performative optimum, stability, and OED certification;
+2. make the non-identifiability witness respect the global access-budget
+   domain;
+3. verify that the ex ante `P_qv` construction covers the full declared legal
+   design domain and that each claimed reduced Reveal bound satisfies its
+   exact canonicality condition;
+4. state tightness relative to the ambiguity set and separate safe deployment
+   from exploration loss;
+5. define the initial state and counting unit in transition lower bounds; and
+6. complete task and success semantics in the hardness reduction.
+
+Experiments may test assumptions and relevance, but cannot substitute for
+correct definitions or proofs.
+
+## 7. Priority Order
+
+| Priority | Item | Reason |
 |---|---|---|
-| P0 | G1 `M/L/E` interaction | Core physical-planning question |
-| P0 | G6/G0 interaction study | Go/no-go gate before building a planner |
-| P1 | G2 artifact-aware transition graph | Distinguishes the work from generic transition-aware design |
-| P1 | G4 multi-job and multi-version regime | Exposes sharing and distributed coupling |
-| P1 | G5 semantic contract | Correctness for planning and artifact adoption |
-| P1/P2 | G3 Structured Autoresearch | Pursue only after G1/G2 hold and analytical models remain insufficient |
-| P2 | Online drift adaptation | Extension after the core result is established |
+| P0 | Formal audit | Prevents experiments from being attached to incorrect claims |
+| P0 | G5 causal resolver, elasticity pilot, and quote-sufficiency factorial | Go/no-go gates for the performative premise and current scalar-price theory |
+| P0 | G2 reduced real lock-in case | Establishes the central failure mode |
+| P1 | G6 minimal `M/L/E` substrate | Makes real design interventions possible |
+| P1 | G3 AWM on a reduced oracle | Tests identification and bound soundness |
+| P1 | G4 OED with restoration | Tests the proposed controller |
+| P1 | G7 candidate/price completeness | Defines honest certificate scope |
+| P2 | Cross-mode scale and adaptation | Expands only after the core result |
+| P2 | G8 governance interaction | Headline only with separate evidence |
 
-Recommended implementation order:
+Recommended order:
 
 ```text
-static A/B/C paths
-  -> G0 interaction study
-  -> analytical joint planner
-  -> child-plan experiment manager
-  -> plan-difference experiment selection
-  -> drift adaptation
+formal audit
+  -> causal resolver and ex ante P_qv
+  -> elasticity/monotonicity and quote-sufficiency pilots
+  -> static Designs A/B/C/D
+  -> reduced exhaustive response surface
+  -> real lock-in demonstration
+  -> AWM coverage
+  -> OED Commit/Reveal/Hold
+  -> cross-mode and scale
 ```
 
-If the analytical planner reliably selects the correct plan, G3 does not hold and a learned autonomous loop should not be forced into the system.
+## 8. Required Baselines
 
-## 8. Required Strong Baselines
-
-### 8.1 Physical data-path baselines
+### Physical Baselines
 
 1. origin streaming;
-2. local caching and prefetching;
-3. HyCache/Seneca-style multistage tier caching;
-4. NoPFS/Tectonic-Shift-style access-aware placement;
-5. Pecan/FastFlow/SOPHON-style transform offload;
-6. KeystoneML/Blaze/Budget-Conscious-style structured cost-based planning;
-7. independent `M`, `L`, and `E` optimization in fixed orders using the same primitives; and
-8. exhaustive search over a reduced plan space.
+2. local LRU/LFU and prefetching;
+3. static staging;
+4. multistage representation caching;
+5. locality-aware transform/consumer placement;
+6. independent and sequential `M/L/E` planning;
+7. fixed-workload joint `M/L/E` planning;
+8. hand tuning; and
+9. reduced exhaustive deployment.
 
-### 8.2 Autoresearch baselines
+### Behavioral/Controller Baselines
 
-1. analytical-only planning;
-2. passive traces;
-3. random plan trials;
-4. a CherryPick/Bayesian plan-level tuner;
-5. Ernest-style component optimal design without plan differences;
-6. UDO-style heavy/light ordering;
-7. operator traces with random experiment selection;
-8. full plan-difference and artifact-aware Autoresearch; and
-9. an oracle with all experiment outcomes on a reduced instance.
+1. naive read-react-materialize;
+2. passive AWM;
+3. analytical point prediction;
+4. trivial independent uncertainty boxes;
+5. random feasible probes;
+6. contextual or combinatorial bandits;
+7. Bayesian/black-box tuning;
+8. UDO-style transition ordering;
+9. OED without partial materialization or artifact reuse;
+10. full AWM + OED + escalation; and
+11. an omniscient reduced oracle.
 
-Trial count alone is insufficient. All methods must begin from the same current plan, evidence, and materialized artifacts, and use the same legal space, budget, workload slice, adoption rules, and foreground contention.
+All methods must share the same initial `D_safe`, observations, artifacts,
+candidate domain, governance constraints, and total budget.
 
 ## 9. Minimum Research Slice
 
-- **Workload:** a recurring batch video pipeline plus one image, audio, or embedding pipeline with different expansion behavior.
-- **Representations:** raw compressed data, a decoded or sampled parent, and a final tensor or embedding.
-- **Unit:** immutable representation shard.
-- **Tiers:** durable object storage, node NVMe, and host RAM.
-- **Executors:** storage-near or data-node CPU and consumer-local CPU.
-- **Topology:** one central controller plus per-node Data Agents.
-- **Sharing:** at least two consumers or jobs with partially overlapping representation paths.
-- **Plans:** fixed A/B/C paths, a strong independent planner, and a global `M/L/E` planner.
-- **Autoresearch:** add only after the interaction gate, starting with component, materialization-sample, and canary experiments.
+- **Corpus:** one full-corpus video dataset.
+- **Representation graph:** compressed video, sampled frames, embeddings, and
+  one expensive structured multimodal digest.
+- **Tasks:** two or three explicit queued agent task classes.
+- **Endogenous scope:** agent representation access and completion.
+- **Fixed contributors:** recurring training and analytics over shared
+  representations.
+- **Tiers:** object storage, node NVMe, and host RAM.
+- **Executors:** data/storage-near CPU and consumer-local CPU/GPU.
+- **Designs:** A/B/C cheap paths plus D exposing the expensive censored path.
+- **Price domain:** class-specific finite sets `P_qv`, derived from the full
+  legal design domain and frozen before data collection.
+- **Oracle:** a reduced instance where every legal design is physically
+  deployed.
+- **Governance:** one externally supplied multi-zone constraint, initially as
+  correctness support.
+
+Add a second modality only after this slice passes the performative premise,
+AWM coverage, and lock-in gates.
 
 ## 10. Updated Narrative
 
 The defensible thesis is:
 
-> Existing formats, caches, workflow systems, physical-design tools, and automated tuners each solve substantial parts of the problem. This project studies distributed physical planning over versioned multimodal representation paths, where materialization, cross-node placement, and transformation boundaries interact through data expansion, contraction, and cross-job reuse. When analytical evidence cannot rank close plans, structured Autoresearch selects plan-difference-directed experiments and treats valid artifacts produced by those experiments as reusable physical state.
+> Existing data systems optimize physical designs for observed or forecast
+> workloads. For agentic multimodal sessions, however, the physical design can
+> determine which representations are affordable and therefore which workload
+> and value become observable. Pathfinder models this feedback as performative
+> physical design. It uses an Adaptive Workload Model to bound
+> counterfactual task-class responses and Optimistic Elastic Design to Commit,
+> Reveal, or Hold while accounting for distributed representation state,
+> transition, restoration, and candidate coverage.
 
-The project should not claim to be the first joint physical optimizer, the first transition-aware system, the first automatic experiment manager, or the first safe canary tuner. Its viability depends on demonstrating the narrower `M/L/E` interaction and artifact-aware experiment value against strong baselines.
+The project should not claim to be the first joint physical optimizer, online
+tuner, safe canary system, bandit designer, performative-learning method, or
+governance-aware planner. Its viability depends on demonstrating the narrower
+causal and systems intersection against strong simpler alternatives.

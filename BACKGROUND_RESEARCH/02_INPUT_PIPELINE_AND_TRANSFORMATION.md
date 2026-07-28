@@ -78,6 +78,12 @@ A production system may independently enable caching, replication, and offload, 
 
 ## 6. Implication for This Project
 
-D2 already covers many single-mechanism and pairwise optimizations. The greatest overlap risk comes from HyCache and Seneca on multistage caching, and from Pecan and SOPHON on transformation placement.
+D2 already covers many single-mechanism and pairwise optimizations. The
+greatest overlap risk comes from HyCache and Seneca on multistage caching, and
+from Pecan and SOPHON on transformation placement.
 
-A more defensible opening is a recurring, distributed, multi-job setting in which one planner jointly selects versioned representation materialization, cross-tier and cross-node replicas, and transformation or delivery split points while explicitly amortizing reconfiguration cost. This still requires interaction studies and pilot experiments; it should not yet be described as a confirmed “first.”
+Pathfinder should reuse these execution mechanisms and add the access-facing
+effect they usually omit: the chosen transformation boundary changes the
+price, latency, and quality offered to an agent task. A causal pilot must show
+that this change alters access or completion before the project claims that
+`W(D)` requires new planning machinery.

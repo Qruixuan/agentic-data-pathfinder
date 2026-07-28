@@ -65,6 +65,12 @@ A format can identify versions, but it does not naturally decide which nodes sho
 
 ## 6. Implication for This Project
 
-D1 has made substantial progress on structuring and accessing multimodal data. This project should not compete by introducing another format. Its contribution should be workload-driven planning of physical data paths above existing formats.
+D1 has made substantial progress on structuring and accessing multimodal data.
+This project should not compete by introducing another format. Existing
+formats supply the representation graph over which Pathfinder reasons.
 
-The most stable interface is to treat formats, object stores, and catalogs as replaceable substrates that expose representation properties, versions, access granularity, and locations. This keeps the first paper focused while leaving room to support additional data-lake formats later.
+The revised question is whether materializing and exposing one of those
+representations changes agent access and session value. Formats, object stores,
+and catalogs should remain replaceable substrates that expose properties,
+versions, access granularity, and locations; the performative response belongs
+to the task/access model, not to a new file format.

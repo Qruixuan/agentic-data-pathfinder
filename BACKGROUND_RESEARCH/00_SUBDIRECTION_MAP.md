@@ -2,193 +2,182 @@
 
 ## 1. Purpose
 
-This directory answers three questions:
+This directory maps the communities that intersect with Pathfinder and
+separates mature mechanisms from the remaining research gap.
 
-1. Which established research communities intersect with this project?
-2. What has each community already solved, and what remains open?
-3. Which gaps arise only when representation, placement, and execution
-   boundaries are considered together?
-
-The project studies the following physical plan:
+The revised project studies a performative physical design:
 
 ```text
-P = (M, L, E)
+D = (M, L, E)
 
-M: which reusable representations to materialize
-L: which tiers and nodes hold them, and with what replication
-E: where transformations execute and how data is delivered to consumers
+M: materialized reusable representations
+L: cross-node and cross-tier locations and replicas
+E: transformation, serving, and delivery execution
+
+D -> offered access and class-specific prices p_qv(D) -> W(D) -> session value Phi(D)
 ```
 
-These are not independent features. A transformation may expand or shrink
-data, so `M` changes network cost. `L` changes the CPU, storage, and bandwidth
-available to transformations. `E` changes which intermediate representations
-are worth retaining. The potential contribution comes from this coupling, not
-from inventing another isolated cache policy.
+The new premise is that the workload is not entirely fixed. A design changes
+which representations an agent can afford or observe, and this can change the
+tasks it completes and the value the system subsequently measures.
 
-## 2. Six Research Subdirections
+## 2. Eight Research Subdirections
 
-### D1. Multimodal Representations and Physical Formats for AI Data Lakes
+### D1. Multimodal Representations and Physical Formats
 
-This area studies compressed objects, decoded outputs, tensors, tokens,
-embeddings, and physical formats for random access, scans, versioning, and
-streaming.
+Studies compressed objects, frames, tensors, tokens, embeddings, structured
+artifacts, and formats for random access, scans, streaming, and versioning.
 
-It provides:
-
-- a definition of logical objects and representation graphs;
-- physical properties such as size, access granularity, encoding, and version;
-- metadata for discovering, querying, and tracking representations.
-
-It usually does not choose an end-to-end cross-node transformation and
-delivery path.
+Reusable foundation: representation nodes, sizes, schemas, granularities, and
+metadata. Missing intersection: choosing a representation path jointly with
+distributed layout and design-dependent agent access.
 
 See [D1: Multimodal Representations and Data Lakes](01_MULTIMODAL_REPRESENTATION_AND_LAKE.md).
 
-### D2. ML Input Pipelines and Transformation Optimization
+### D2. Input Pipelines and Transformation Optimization
 
-This area studies reading, decoding, sampling, augmentation, batching,
-profiling, parallelism, operator ordering, scaling, and remote offload.
+Studies decode, sampling, augmentation, batching, operator ordering,
+parallelism, profiling, and remote or storage-near execution.
 
-It provides:
-
-- operator-level profiling and bottleneck diagnosis;
-- candidate transformation orders, split points, and execution locations;
-- mechanisms for executing transformations on local, remote, or
-  storage-near CPUs.
-
-It usually optimizes the current job without managing the full cross-job,
-cross-version lifetime of derived representations.
+Reusable foundation: transformation graphs, service-rate measurements, and
+execution split points. Missing intersection: persistent cross-session
+representations whose availability changes agent behavior.
 
 See [D2: Input Pipelines and Transformation](02_INPUT_PIPELINE_AND_TRANSFORMATION.md).
 
 ### D3. Distributed Caching, Placement, Prefetching, and Delivery
 
-This area studies caching, replication, prefetching, eviction, and scheduling
-across RAM, local SSD, shared storage, and remote nodes.
+Studies caching, replication, prefetching, eviction, and scheduling across RAM,
+NVMe, shared storage, and remote nodes.
 
-It provides:
-
-- hierarchical caching and cross-node placement mechanisms;
-- future-access-aware prefetching and replica management;
-- capacity allocation and delivery under multi-job contention.
-
-It often treats a sample as one physical object rather than a versioned graph
-of transformable representations.
+Reusable foundation: tier and replica management under capacity and
+contention. Missing intersection: demand that is censored by the current
+physical access path rather than exogenously given.
 
 See [D3: Distributed Caching, Placement, and Delivery](03_DISTRIBUTED_CACHE_PLACEMENT_AND_DELIVERY.md).
 
 ### D4. Workflow Materialization, Reuse, Lineage, and Correctness
 
-This area studies derived-data identity, intermediate materialization,
-incremental recomputation, reuse across runs, garbage collection, and the
-equivalence conditions required for safe reuse.
+Studies derived-data identity, intermediate reuse, incremental recomputation,
+garbage collection, and semantic equivalence.
 
-It provides:
-
-- representation identity, lineage, and compatibility rules;
-- comparisons between materialization benefit and recomputation cost;
-- reuse boundaries under randomness and code or model version changes.
-
-It usually emphasizes whether a result can be reused, with less emphasis on
-jointly choosing its cross-tier replicas and transformation/network boundary.
+Reusable foundation: compatibility, lineage, invalidation, and version
+contracts. Missing intersection: probe-created artifacts that are both
+observations and potentially reusable physical state.
 
 See [D4: Workflow Materialization and Semantics](04_WORKFLOW_MATERIALIZATION_AND_LINEAGE.md).
 
 ### D5. Cost Models, Physical Planning, and Search
 
-This area formulates operator selection, materialization, resource allocation,
-and device or node placement as constrained optimization problems solved with
-dynamic programming, ILP, heuristics, Bayesian optimization, or learning.
+Studies cost-based operator and physical-structure selection, resource
+allocation, placement, combinatorial search, and transition-aware planning.
 
-It provides:
-
-- a formal basis for `P=(M,L,E)`;
-- structured pruning, performance prediction, and multi-resource constraints;
-- methods for amortizing materialization and migration cost.
-
-The goal is not another generic tuner. It is to use representation-graph
-semantics to reduce the search space and expose coupled physical decisions.
+Reusable foundation: structured candidate generation, constrained
+optimization, deployment cost, and reduced-instance oracles. Missing
+intersection: optimizing session-level value when the workload itself is a
+function of design.
 
 See [D5: Physical Planning and Search](05_COST_MODEL_PLANNING_AND_SEARCH.md).
 
-### D6. Structured Autoresearch, Automated Experiments, and Safe Adaptation
+### D6. Automated Experiments and Safe Adaptation
 
-This area studies how a system actively selects decision-relevant experiments,
-updates evidence from fine-grained telemetry, and safely validates, deploys,
-rejects, or revisits plans under model error, drift, and contention.
+Studies active experiment selection, optimal design, bandits, Bayesian tuning,
+canaries, rollback, drift, and low-disruption online control.
 
-It provides:
+Reusable foundation: evidence acquisition and safe deployment. In the revised
+project these mechanisms become Reveal and escalation machinery over
+predeclared class-specific price levels; they are not the main novelty by
+themselves.
 
-- measurements that separate operator, storage, network, and queueing time;
-- adaptive sampling, optimal experiment design, and Bayesian optimization;
-- production flighting, candidate isolation, rollback, and safe adaptation;
-- accounting for trial, disruption, persistent materialization, and switching
-  costs.
+See [D6: Automated Experiments, Reveal, and Safe Adaptation](06_TELEMETRY_AND_ONLINE_ADAPTATION.md).
 
-Automated experimentation and self-tuning are already mature topics.
-Therefore, experiment selection or safe canaries are not novel by themselves.
-This project must show that representation DAGs, `M/L/E` plan differences, and
-reusable materialized artifacts create a new experiment-selection problem.
+### D7. Governance-Constrained and Geo-Distributed Planning
 
-See [D6: Structured Autoresearch and Safe Adaptation](06_TELEMETRY_AND_ONLINE_ADAPTATION.md).
+Studies residency, ownership, retention, consumer, transfer, attestation,
+audit, revocation, and deletion constraints on distributed execution.
 
-## 3. Relationship to the Core Decisions
+Reusable foundation: externally supplied feasibility constraints and local
+enforcement. Pathfinder consumes `D_gov`; it does not infer legal meaning.
 
-| Subdirection | Supports `M` | Supports `L` | Supports `E` | Cross-run/online role |
+See [D7: Governance-Constrained and Geo-Distributed Physical Planning](07_GOVERNANCE_AND_FEDERATED_DATA_PLACEMENT.md).
+
+### D8. Performative Systems, Endogenous Workloads, and Censored Feedback
+
+Studies decisions that change the future data distribution, the difference
+between stable and globally optimal solutions, selective observation, and
+exploration under action-dependent feedback.
+
+Reusable foundation: distribution maps, performative risk, stability
+distinctions, causal interventions, partial identification, and exploration.
+Missing intersection: expensive, stateful physical designs that determine
+representation affordability and leave reusable artifacts after experiments.
+
+See [D8: Performative Systems and Endogenous Workloads](08_PERFORMATIVE_SYSTEMS_AND_ENDOGENOUS_WORKLOADS.md).
+
+## 3. Relationship to the Core Problem
+
+| Subdirection | `M` | `L` | `E` | `W(D)` / evidence role |
 |---|---:|---:|---:|---|
-| D1 Representations and formats | Strong | Medium | Medium | Versions and metadata |
-| D2 Input pipelines | Medium | Medium | Strong | Job-level adaptation |
-| D3 Caching and delivery | Medium | Strong | Medium | Cross-node/cross-job |
-| D4 Materialization and lineage | Strong | Medium | Medium | Cross-run reuse |
-| D5 Planning and search | Strong | Strong | Strong | Unified optimization |
-| D6 Autoresearch and adaptation | Medium | Medium | Medium | Experiments, deployment, drift |
+| D1 Representations | Strong | Medium | Medium | Defines alternatives offered to agents |
+| D2 Transformations | Medium | Medium | Strong | Maps designs to price, latency, and quality |
+| D3 Caching/delivery | Medium | Strong | Medium | Controls physical availability and realized cost |
+| D4 Lineage/reuse | Strong | Medium | Medium | Validates reusable and probe-created state |
+| D5 Planning/search | Strong | Strong | Strong | Optimizes feasible designs and transitions |
+| D6 Experiments/adaptation | Medium | Medium | Medium | Implements Reveal, restoration, and escalation |
+| D7 Governance | Constraint | Constraint | Constraint | Defines externally authorized `D_gov` |
+| D8 Performative systems | Indirect | Indirect | Indirect | Models endogenous demand and censored outcomes |
 
-No single neighboring community naturally covers all three decisions. The
-review must ask which decisions a system controls, which couplings it omits,
-and whether those omissions cause measurable plan errors.
+The new core is the intersection of D1–D5 with D8. D6 supplies the active
+observation mechanism. D7 limits the legal intervention space.
 
 ## 4. Common Review Questions
 
-Each subdirection is evaluated with the same questions:
+Each subdirection should be reviewed using:
 
-1. **Object model:** files, samples, tensors, workflow nodes, or versioned
-   representations?
-2. **Decision variables:** which parts of `M`, `L`, and `E` are controlled?
-3. **Scope:** single-node or distributed; single-job or multi-job; one run or a
-   reuse horizon?
-4. **Objective:** throughput, makespan, tail latency, cost, bandwidth, or
-   constrained multi-objective optimization?
-5. **Correctness:** how are lineage, stochastic transformations, code/model
-   versions, and stale data handled?
-6. **Dynamics:** are contention, drift, and transition costs included?
-7. **Experiments:** are trials selected actively, what state do they change,
-   and can their artifacts be reused?
-8. **Evidence:** which strong baselines are used, and under which conditions
-   does the claimed benefit disappear?
+1. What object and task class does the system model?
+2. Which parts of `M`, `L`, and `E` are controlled?
+3. Is demand fixed, drifting independently, or induced by the design?
+4. Which choices and outcomes are unobserved under the incumbent design?
+5. Are class-specific quoted prices, felt latency, and realized costs
+   distinguished, and is quoted-price sufficiency tested?
+6. What assumptions identify counterfactual behavior?
+7. Are stability, optimality, and candidate-relative guarantees separated?
+8. What does an experiment change physically, and can its artifacts be reused?
+9. Are transition, disruption, and restoration costs included?
+10. Which external authority defines legality, and where is it enforced?
+11. Which strong baseline or falsification test can refute the claimed gap?
 
 ## 5. Core and Peripheral Boundaries
 
-The core intersection is D2–D5: transformation execution, representation
-materialization, distributed placement, and semantic constraints in one
-physical planning problem. D1 supplies representation and storage foundations.
-D6 is an explicit second research question: can this structure acquire
-decision-changing evidence more efficiently than generic automated
-experimentation?
+The first paper's core is:
 
-The first paper does not independently target:
+- a versioned multimodal representation graph;
+- joint `M/L/E` design;
+- design-dependent access for queued agent sessions;
+- an Adaptive Workload Model over a coupled ambiguity set;
+- OED decisions over certified, probeable, and unreachable candidates; and
+- complete transition and exploration accounting.
 
+Training and analytics initially contribute fixed reuse and resource demand.
+Governance is a supported constraint unless it creates a distinct evaluated
+interaction.
+
+The first paper does not target:
+
+- universal optimization for arbitrary distributed systems;
+- arbitrary online arrival elasticity;
 - a new object-store consistency protocol;
-- GPU kernels, model parallelism, or gradient communication;
-- general lakehouse query optimization or natural-language data discovery;
-- tail-latency control for online inference;
-- a complete data quality, privacy, and access-control system.
-
-These may later become constraints or workload extensions, but including them
-now would weaken the causal argument and explode the experimental matrix.
+- model, kernel, or collective-communication optimization;
+- natural-language data discovery;
+- continuous unrestricted price design;
+- automatic policy or legal interpretation;
+- anonymization certification;
+- identity federation or trusted-execution design; or
+- a general-purpose agent behavior theory.
 
 ## 6. Research Artifacts
 
-1. This file defines the subdirections and their boundaries.
-2. Files `01`–`06` review representative work, reusable mechanisms, and limits.
-3. [The synthesis](99_SYNTHESIS_AND_RESEARCH_GAPS.md) compares capabilities and
-   retains only gaps supported by both prior work and falsifiable experiments.
+1. This map defines the eight subdirections and their boundaries.
+2. Files `01`–`08` review representative mechanisms and limitations.
+3. [The synthesis](99_SYNTHESIS_AND_RESEARCH_GAPS.md) identifies the central
+   performative physical-design gap and its required falsification tests.

@@ -1,435 +1,584 @@
-# Autoresearch for Self-Driving Physical Data Path Optimization in Distributed Multimodal Data Lakes
+# Performative Physical Design for Agentic Multimodal Workloads
 
 ## Purpose of This Document
 
-This document defines the research direction: the problem, scope, hypotheses,
-and intended contributions. It deliberately avoids committing to a detailed
-architecture or benchmark setup.
+This file defines the research direction only. Detailed mechanisms,
+implementation choices, experiments, and development order belong in:
 
-Companion documents contain the working details:
+- [System Design](SYSTEM_DESIGN_MULTIMODAL_DATALAKE.md);
+- [Evaluation Plan](EVALUATION_PLAN_MULTIMODAL_DATALAKE.md);
+- [Research Roadmap](RESEARCH_ROADMAP_MULTIMODAL_DATALAKE.md);
+- [Development Checklist](DEVELOPMENT_CHECKLIST_MULTIMODAL_DATALAKE.md); and
+- [Background Research](BACKGROUND_RESEARCH/00_SUBDIRECTION_MAP.md).
 
-- [System Design](SYSTEM_DESIGN_MULTIMODAL_DATALAKE.md)
-- [Evaluation Plan](EVALUATION_PLAN_MULTIMODAL_DATALAKE.md)
-- [Research Roadmap and Risks](RESEARCH_ROADMAP_MULTIMODAL_DATALAKE.md)
-- [Ordered Development Checklist](DEVELOPMENT_CHECKLIST_MULTIMODAL_DATALAKE.md)
-- [Background Research and Subdirection Map](BACKGROUND_RESEARCH/00_SUBDIRECTION_MAP.md)
+The working system name is **Pathfinder**. The research problem is
+**Performative Physical Design (PPD)**.
 
 ## Research Direction in One Paragraph
 
-Modern AI pipelines repeatedly transform remote multimodal objects into
-model-consumable representations. A video, for example, may appear as a
-compressed object, decoded frames, sampled clips, tensors, visual tokens, and
-embeddings. Each representation has a different storage footprint, production
-cost, transfer cost, reuse scope, and validity condition. This project studies
-a workload-aware physical data path optimizer that jointly chooses
-representation materialization, distributed placement, and
-transformation/delivery placement. Its autoresearch loop turns plan selection
-into an explicit sequence of testable hypotheses and controlled experiments:
-it proposes semantically legal plan changes, selects trials that can resolve
-uncertain plan rankings, collects operator- and resource-level evidence, and
-updates or deploys a plan only when the expected horizon-wide benefit exceeds
-the experiment and transition cost. The initial target is recurring batch AI
-pipelines over an existing object store and heterogeneous CPU/GPU cluster.
+Classical physical design treats the workload as an external input. Agentic
+workloads can violate that assumption: an agent decides which data,
+representations, and tools to access partly according to what is affordable
+under the deployed design. Materializing an embedding, digest, or other
+derived representation may therefore reduce access cost and induce requests
+that are absent from the current log. Pathfinder studies physical design over
+a versioned multimodal representation graph, jointly selecting what to
+materialize, where to place it, and where transformations execute. Its
+Adaptive Workload Model represents design-induced demand as a set rather than
+a point estimate. Optimistic Elastic Design then commits only to changes that
+are beneficial under a pessimistic bound, and buys an expensive reveal only
+when an optimistic bound shows that the otherwise censored demand may justify
+the transition. The central empirical question is whether this endogenous
+workload effect is real and large enough to require a new optimizer.
 
-## What Autoresearch Means in This Project
+## The Change from the Previous Direction
 
-Here, **autoresearch** is the system's evidence-acquisition loop for a
-structured physical-plan space. It does not mean automating literature review
-or paper writing, and it is more specific than repeatedly running a generic
-black-box tuner.
-
-At iteration `t`, the system maintains:
+The previous direction assumed a recurring workload `W` and asked whether
+joint `M/L/E` planning plus Structured Autoresearch could optimize it:
 
 ```text
-S_t = (W, R, G, P_t, D_t)
+observed workload W
+  -> estimate plan costs
+  -> choose P = (M, L, E)
+  -> run experiments when cost estimates are uncertain
 ```
 
-where `W` is the recurring workload, `R` is the versioned representation
-graph, `G` is the infrastructure and current resource state, `P_t` is the
-deployed physical plan, and `D_t` is the accumulated evidence from profiles,
-trials, and production traces.
-
-The autoresearch loop performs seven explicit steps:
-
-1. **Observe:** detect an uncertain plan choice, model error, workload change,
-   or resource-state change.
-2. **Hypothesize:** propose a small number of structured `M/L/E` plan changes
-   and record why each could improve the current plan.
-3. **Validate:** reject candidates that violate lineage, compatibility,
-   capacity, or safety constraints.
-4. **Design an experiment:** choose a microbenchmark, workload slice, or canary
-   that is expected to resolve a decision-relevant uncertainty at low cost.
-5. **Execute and measure:** collect representation-, operator-, storage-, and
-   network-level traces, including materialization and migration work.
-6. **Update evidence:** correct local cost-model components and update the
-   confidence of candidate-plan rankings.
-7. **Decide or stop:** deploy only when horizon-wide expected benefit exceeds
-   transition cost and uncertainty; otherwise retain the current plan, run
-   another useful experiment, or stop when further information is not worth
-   its cost.
-
-Autoresearch and self-driving optimization are related but not identical.
-Autoresearch decides **what evidence the system should acquire next**;
-self-driving optimization uses that evidence to **select, deploy, and revisit
-a physical plan**. The same closed loop supports both initial plan discovery
-and later adaptation to contention or workload drift.
-
-The loop is deliberately bounded:
-
-- it explores structured plan transformations, not arbitrary system knobs;
-- a semantic validator, rather than a learned model or LLM, decides legality;
-- every experiment has a measurement, disruption, and transition budget;
-- every result is tied to exact workload, data, plan, code, and cluster
-  provenance; and
-- the system may conclude that the analytical model is already sufficient and
-  that no further experiment is justified.
-
-## Motivation
-
-AI workloads consume text, images, audio, video, documents, tensors, tokens,
-and embeddings from distributed storage. Before an accelerator can use an
-input, its data path may cross object storage, shared network links, local SSD,
-host memory, preprocessing workers, and accelerator memory.
-
-Existing systems commonly optimize one part of this path at a time. A data
-loader prefetches objects, a cache retains selected outputs, a scheduler places
-tasks near data, and a storage tier absorbs repeated reads. These mechanisms
-are useful, but their decisions interact:
-
-- Caching decoded frames saves CPU work but can multiply storage and network
-  traffic relative to compressed video.
-- Replicating a derived representation improves locality but consumes capacity
-  and may add substantial one-time materialization cost.
-- Moving decoding near storage reduces transferred bytes after filtering, while
-  moving it near GPUs may exploit available worker capacity and avoid managing
-  a large intermediate representation.
-- Staging data for one job can evict a representation reused by another job.
-
-The opportunity is therefore not merely a better cache policy. It is to give
-the system a representation-aware physical plan and optimize the whole path by
-which logical data becomes valid model input.
-
-## Why Multimodal Data Is a Distinct Physical-Design Problem
-
-A logical multimodal object naturally forms a graph of physical
-representations:
+The updated direction makes the workload a function of the deployed design:
 
 ```text
-compressed video
-    -> decoded frames
-    -> sampled and resized frames
-    -> model-ready tensors
-    -> visual tokens
-    -> embeddings
+physical design D
+  -> changes access prices and availability
+  -> changes which tasks an agent attempts
+  -> induces workload W(D)
+  -> changes which design is valuable
 ```
 
-This resembles database physical design—choosing layouts, replicas, and
-materialized views—but adds two important properties.
+Cost-side uncertainty remains important, but it is no longer the main reason
+for Autoresearch. The harder uncertainty is demand that cannot be observed
+while a representation remains too expensive to reach.
 
-First, representation size is not monotonic. Decoding a compact object can
-greatly expand it, while tokenization or embedding may reduce it again. The
-best place to cross a network boundary therefore depends on both computation
-and data expansion.
+## Physical-Design Object
 
-Second, reuse has semantic constraints. A decoded frame may be reusable across
-jobs, while a random augmentation is not generally reusable. Tokens and
-embeddings depend on preprocessing code, parameters, and model versions. The
-optimizer must preserve lineage, determinism, freshness, and compatibility;
-these are correctness constraints rather than performance trade-offs.
-
-## Core Research Question
-
-> Can a representation-aware optimizer jointly choose what multimodal data to
-> materialize, where to place it, and where to transform and deliver it so that
-> recurring AI pipelines achieve better end-to-end performance and resource
-> efficiency than systems that optimize these layers independently?
-
-This question has three parts:
-
-1. **Abstraction:** Can one physical data path plan express the decisions and
-   correctness constraints shared by multimodal pipelines?
-2. **Joint planning:** Do materialization, placement, and
-   transformation/delivery need to be optimized together once representation
-   expansion, cross-job reuse, and transition cost are included?
-3. **Autoresearch:** Can the system autonomously choose decision-relevant
-   experiments and use their traces to find or maintain a strong plan within a
-   practical measurement, disruption, and reconfiguration budget?
-
-## Initial Scope
-
-The first paper should study **recurring batch pipelines** whose workflow DAGs
-and reuse horizons are observable. Examples include repeated embedding jobs,
-multimodal training epochs, and versioned offline inference pipelines.
-
-The system is an optimization and management layer over an existing durable
-object store; it is not a new object-store consistency protocol or a complete
-replacement for a lakehouse. A multimodal data lake in this project means a
-collection of immutable or versioned logical objects plus metadata for their
-derived representations, lineage, locations, and compatibility.
-
-The initial optimization scope contains three coupled decisions:
-
-1. **Representation materialization:** which deterministic, reusable
-   intermediate representations should exist and for what reuse horizon.
-2. **Placement and replication:** which storage or cache tiers and cluster
-   locations should hold each selected representation.
-3. **Transformation and delivery placement:** where representation-changing
-   operators execute and from which selected representation consumers are
-   staged or served.
-
-Cache allocation, prefetch depth, chunk size, and logical transfer topology may
-be exposed by the prototype, but they should not all become independent primary
-research dimensions in the first version. They are either derived from the
-three decisions above, fixed during an experiment, or added only after an
-ablation shows that they materially affect the central result.
-
-Online serving is a possible later workload class. It has a different objective
-(goodput under tail-latency constraints) and should not be mixed into the first
-evaluation unless the recurring-batch result is already convincing.
-
-## Problem Abstraction
-
-The optimizer receives:
-
-1. A workload graph `W` describing operators, dependencies, access patterns,
-   repetition, and required representation versions.
-2. A representation graph `R` describing logical objects, physical
-   representations, transformation edges, sizes, determinism, lineage, and
-   compatibility.
-3. An infrastructure graph `G` describing compute nodes, storage tiers,
-   capacities, network links, and measured resource state.
-4. An evidence store `D` containing versioned microbenchmarks, prior trial
-   results, model uncertainty, and traces linked to exact plans and system
-   states.
-
-For the focused research problem, a physical plan is:
+Let the representation graph be:
 
 ```text
-P = (M, L, E)
+R = (V, T)
+
+V: versioned physical representations
+T: deterministic, fingerprint-addressable transformations
 ```
 
-where:
+Examples of nodes include compressed objects, decoded media, sampled clips,
+tensors, tokens, embeddings, structured digests, and promotable session
+artifacts. Representation sizes may expand and contract non-monotonically.
 
-- `M` selects reusable representations to materialize;
-- `L` selects their tier placement and replication; and
-- `E` selects transformation placement and the delivery path to consumers.
-
-A concrete system plan may contain lower-level cache, staging, chunking, and
-routing fields, but those fields implement `M`, `L`, and `E` rather than define
-six unrelated research problems.
-
-For a known recurring workload horizon `H`, the primary objective is to
-minimize amortized end-to-end completion time:
+A conceptual design is:
 
 ```text
-minimize   execution_time(P, H) + transition_cost(P_previous -> P)
-subject to storage_usage(P) <= B_storage
-           network_usage(P) <= B_network
-           monetary_cost(P, H) <= B_cost
-           lineage, compatibility, and freshness constraints
+D = (M, L, E)
+
+M: representations and shards to materialize
+L: node, zone, and tier placement of replicas
+E: transformation executors and delivery paths
 ```
 
-The same outcome can be reported as valid samples consumed per second, but the
-objective must include materialization and migration costs. A plan should not
-appear better merely because its expensive preparation was omitted from the
-measurement window.
+The system compiles `D` into an executable `PhysicalPlan` with a plan epoch,
+operations, capabilities, fallbacks, telemetry, and audit requirements.
+`D` denotes the research-level choice; `PhysicalPlan` denotes its executable
+realization.
 
-When the current evidence cannot rank the best candidates confidently, the
-autoresearch problem is to select the next safe experiment `e`:
+## Endogenous Workload
+
+Let `W(D)` be the workload induced by design `D`. The first model uses task
+classes `q in Q`:
+
+- class arrival rate `Lambda_q`;
+- per-session access budget `k_bar_q`;
+- task value `u_q`;
+- a terminal representation `tau(q)`;
+- class-by-representation access rate `n_qv(D)`; and
+- successful-session rate `r_q(D)`.
+
+Access is class-specific. Let:
 
 ```text
-maximize   expected_decision_improvement(e | D)
-           ------------------------------------------------
-           trial_cost(e) + disruption(e) + transition_cost(e)
-
-subject to semantic validity, resource budgets, and safety constraints
+p_qv(D)           = quoted access price shown to task class q for representation v
+realized_cost_qv(D) = realized resource/latency cost charged by the objective
 ```
 
-This is an experiment-selection objective, not the runtime performance
-objective itself. It asks whether acquiring a particular trace is worth its
-cost because it can change a consequential plan decision.
+The class index is necessary because the same replica can be local to a
+training consumer and remote from an analytics or agent consumer. Quoted price
+and realized cost are distinct: the resolver gates and the agent respond to
+`p_qv(D)`, while `Phi` charges `realized_cost_qv(D)`.
 
-## Research Hypotheses
+Utility is credited once per successful session, not once per access. This
+prevents an optimizer from treating additional tool calls as inherently
+valuable. Accesses contribute cost even when they are intermediate operations
+that do not complete a task.
 
-### H1: Joint Planning Has Measurable Value
+The initial scope treats queued session arrivals as exogenous:
 
-Jointly optimizing representation materialization, placement, and
-transformation/delivery will outperform layer-local policies under workloads
-where transformations change data size, representations are reused, and
-storage, CPU, or network resources contend.
+```text
+sum_v n_qv(D) <= Lambda_q * k_bar_q
+r_q(D) <= Lambda_q
+```
 
-This hypothesis is falsifiable: if independent per-layer optimization reaches
-the same plans or performance across representative conditions, the claimed
-need for a unified optimizer is weak.
+The design changes what a session can afford and therefore what it touches. It
+does not create additional user sessions. Interactive systems in which lower
+latency attracts more sessions are outside the first guarantee.
 
-### H2: Reuse Horizon and Transition Cost Change the Best Plan
+The current theory also assumes quoted-price sufficiency over the deployed
+operating range:
 
-Plans selected from steady-state throughput alone will make systematically
-poor choices when materialization, replication, migration, invalidation, and
-reuse horizon are significant. A transition-aware planner will choose
-different plans as reuse count and version churn change and will reduce
-horizon-wide completion time.
+```text
+n(D) = eta(p(D))
+r(D) = rho(p(D))
+```
 
-### H3: Structured Autoresearch Is Experiment-Efficient
+That is, conditional on the quoted price matrix, felt latency or another
+unmodeled feature of the design does not materially change access or success.
+Identical agents and prompts do not establish this assumption; the evaluation
+must test it directly.
 
-A structural analytical model will capture sizes, nominal bandwidth, and
-operator costs but will be inaccurate under skew, queueing, and shared-resource
-contention. An autoresearch policy that uses representation and resource
-structure to select targeted experiments will improve plan ranking or
-adaptation at lower total trial and transition cost than passive observation,
-random/exhaustive trials, or a generic black-box tuner with the same budget.
+## Objective and Solution Concepts
 
-This hypothesis is deliberately falsifiable. If the analytical model already
-ranks plans correctly, or if a generic tuner performs equally well at equal
-budget, the planner may remain useful but autoresearch should not be claimed as
-a separate contribution. The label is not itself novelty; decision-relevant
-experiment selection and the evidence it produces must be measurably useful.
+For a horizon `H`, define the performative value of a design:
+
+```text
+Phi(D) =
+    H * sum_q u_q * r_q(D)
+  - H * lambda * sum_qv n_qv(D) * realized_cost_qv(D)
+  - storage_cost(D)
+```
+
+The steady-state performative optimum is:
+
+```text
+D_PO = argmax_{D in D_gov} Phi(D)
+```
+
+A transition is evaluated separately:
+
+```text
+Gain(D_t -> D') =
+    Phi(D') - Phi(D_t) - transition_cost(D_t -> D')
+```
+
+This separation ensures that transition cost appears exactly once.
+
+Three notions must remain distinct:
+
+1. **Performative optimum:** maximizes value under the workload the same
+   design induces.
+2. **Performative stable point:** a best response to the distribution induced
+   by the incumbent. This is the fixed-point notion used in performative
+   prediction.
+3. **OED certificate:** a candidate-relative robust statement over the
+   generated, governance-valid designs that the current demand envelope can
+   certify.
+
+Pathfinder targets safe progress and a bounded uncertainty certificate over
+its generated candidate pools. It does not initially claim to compute the
+global performative optimum.
+
+## Why the Classical Loop Can Fail
+
+### Degenerate cost minimization
+
+If observed demand disappears when a task is unaffordable, directly
+substituting `W(D)` into a cost-only objective rewards a design for driving
+demand away. A design serving no derived task can then appear cheapest.
+The PPD objective must credit successful work, not only charge served work.
+
+### Design-induced censoring
+
+When the access-path resolver rejects a task whose quoted path cost exceeds
+its declared budget, the current log contains zero demand for that
+class-representation pair. The log alone cannot distinguish:
+
+- no latent demand; from
+- substantial demand that would appear if the representation became
+  affordable.
+
+This is an identification problem, not merely a noisy cost estimate.
+
+### Self-confirming lock-in
+
+Repeatedly optimizing against the last observed workload can retain a shallow
+representation with visible demand while never materializing a deeper
+representation whose higher latent value remains censored. The resulting
+design can be a stable fixed point of re-optimization and still be far from
+the performative optimum.
+
+The claim is about re-optimization that imputes missing demand from its own
+censored log. A bandit that preserves exploration bonuses may escape, but
+must pay expensive physical transitions. It is therefore a strong baseline,
+not something the project assumes away.
+
+## Adaptive Workload Model
+
+Pathfinder does not require a point prediction for the entire response
+function. It maintains a history-indexed feasible set:
+
+```text
+O_t = all deployed designs, observations, costs, and task outcomes
+E_t(D) = demand and success states consistent with O_t and the assumptions
+```
+
+The first envelope uses:
+
+1. **Own-price monotonicity:** lowering a representation's quoted price does
+   not reduce its own access rate.
+2. **Declared substitution groups:** lowering one member may move demand away
+   from another, but should not reduce the class's total demand for the group.
+3. **Success monotonicity:** lowering access prices does not reduce graded task
+   success.
+4. **Exogenous arrivals and finite per-session access:** provide a finite
+   class-level upper bound.
+5. **Graph locality:** changing one representation price affects only its
+   declared graph/resource closure.
+6. **Quoted-price sufficiency:** demand and success respond to `D` through
+   the class-specific quoted-price matrix over the declared operating range.
+
+These are falsifiable assumptions, not universal properties of agents.
+
+For a candidate `D`, the planner computes:
+
+```text
+Phi_t^-(D) = minimum value over E_t(D) and cost-confidence sets
+Phi_t^+(D) = maximum value over E_t(D) and cost-confidence sets
+```
+
+The extrema are solved over the coupled feasible set. Substituting independent
+per-cell lower and upper bounds is unsound because demand shares a session
+budget and can move within substitution groups.
+
+Observed probe designs remain in `O_t` after rollback. A Reveal is useful only
+if later rounds retain and use its observation.
+
+## Optimistic Elastic Design
+
+Every planning round begins on the last certified safe design
+`D_safe`. Candidate designs are divided into:
+
+- **certifiable candidates:** their envelope is sound relative to the safe
+  design, or the exact design has already been observed;
+- **probe candidates:** they make at least one unresolved class-representation
+  state affordable and can therefore buy new information; and
+- **other candidates:** neither certifiable nor uncensoring under the current
+  structure.
+
+The third pool is an explicit limitation. The initial OED guarantee does not
+cover the entire governance-legal design space.
+
+### Commit
+
+Commit when the robust pessimistic gain exceeds a safety margin:
+
+```text
+Phi_t^-(D')
+  - Phi_t^+(D_safe)
+  - upper_transition_cost(D_safe -> D')
+  > margin
+```
+
+A Commit changes `D_safe`. The certified safe-design sequence should improve
+monotonically when all envelope and cost-confidence assumptions hold.
+
+### Reveal
+
+When no Commit is available, consider a probe only if its optimistic value can
+cover:
+
+- transition to the probe;
+- transition back to `D_safe`;
+- foreground loss during the observation window; and
+- the declared per-excursion and cumulative exploration budgets.
+
+After observing the probe, restore `D_safe` but retain the observation.
+The next round may then certify, reject, or continue holding the probe design.
+
+Resolution is indexed by price, not only by a class-representation pair. Before
+the run, declare the finite affordable price universe:
+
+```text
+P_qv = {
+  p_qv(D) :
+  D in D_gov and p_qv(D) <= choke_price_qv
+}
+
+canonical_price_qv = max P_qv
+```
+
+The general Reveal-count bound is:
+
+```text
+sum_qv |P_qv|
+```
+
+It improves to `|Q||V|` only when every Reveal is taken at a candidate already
+quoting the canonical price for its target pair. It improves to `|V|` only
+when every Reveal is simultaneously canonical for all classes that can afford
+the target representation. A common affordability gate alone is insufficient;
+class-independent quoting together with a common gate is a sufficient
+structural condition.
+
+Candidate selection should therefore prefer:
+
+```text
+simultaneously canonical probes
+  -> pair-canonical probes
+  -> other budget-feasible probes
+```
+
+A non-canonical Reveal remains legal, but consumes one level of the general
+`sum_qv |P_qv|` bound.
+
+### Hold and stop
+
+A candidate that clears neither test is held, not declared globally inferior.
+The loop can stop in two different states:
+
+- **certificate-limited stability:** no generated certifiable candidate has
+  positive pessimistic gain and no generated probe has positive optimistic
+  gain;
+- **budget-limited:** a useful probe may exist but cannot be afforded.
+
+Only the first state supports a candidate-relative stability statement.
+
+For certifiable candidates, the unresolved stability radius includes all
+uncertainty used by the failed Commit test:
+
+```text
+delta_t =
+  max over D' in G_cert of
+    value_width_t(D')
+  + value_width_t(D_safe)
+  + transition_cost_width_t(D_safe, D')
+```
+
+Candidate width alone is insufficient unless incumbent value and transition
+cost are known exactly. Termination follows from the finite predeclared price
+universe and the finite design domain; it does not require every Reveal to
+have a strictly positive minimum excursion cost. The exploration purse limits
+financial exposure rather than proving termination.
+
+## Escalation Ladder
+
+Full materialization should be the last information-gathering instrument:
+
+```text
+analytical model
+  -> operator or transfer microbenchmark
+  -> workload slice on existing replicas
+  -> partial materialization or lazy population
+  -> full Reveal deployment
+```
+
+The cheaper rungs resolve cost-side uncertainty and may create reusable
+shards. They cannot identify demand that appears only after the complete
+representation or coverage threshold becomes affordable.
+
+Partial materialization is useful only when value scales sufficiently with
+coverage. If a representation becomes useful only after full corpus coverage,
+partial routing cannot substitute for a Reveal.
+
+## Governance Boundary
+
+Governance restricts the feasible domain:
+
+```text
+D_gov = designs satisfying the active semantic and governance constraints
+```
+
+It is not a soft penalty and not a fourth physical decision variable.
+Pathfinder receives versioned constraints and transformation-specific
+attestations from an external policy authority. It does not interpret laws or
+certify de-identification.
+
+By default, derived representations inherit their parents' restrictions. A
+broader eligibility set requires an external attestation bound to the source
+policy version and transformation fingerprint. The planner validates the
+attestation; the Data Agents enforce authenticated plan capabilities locally.
+
+The first paper evaluates policy enforcement and whether a policy changes the
+best physical path. It does not claim that an embedding, caption, digest, or
+other derived representation is legally anonymous.
+
+## Initial Workload Scope
+
+The paper studies a shared corpus consumed through:
+
+1. **Agentic inference:** endogenous access intensity and task abandonment;
+2. **Batch training:** primarily fixed scheduled demand, but a consumer of
+   shared representations; and
+3. **Analytics:** primarily fixed query arrivals, also sharing the same
+   representations.
+
+The core PPD premise depends on the agentic stream. Training and analytics
+provide cross-mode amortization and resource interaction; they do not need to
+be modeled as equally elastic.
+
+The primary case study should contain:
+
+- a representation whose construction is expensive enough that full
+  experimentation is material;
+- a non-monotonic representation graph;
+- at least two access modes that reuse the candidate artifact;
+- a task whose demand is censored while the artifact is absent; and
+- one policy constraint that changes a legal placement or execution boundary.
+
+A structured multimodal digest is a stronger candidate than a cheap embedding
+index when each individual mode already justifies the index.
+
+## Core Research Questions
+
+### RQ1: Does Performative Physical Design occur?
+
+Does reducing representation access cost change which tasks an agent attempts
+or how many representations it accesses per session?
+
+### RQ2: Are the envelope assumptions empirically defensible?
+
+Do substitution-group totals, task success, finite session budgets, and graph
+locality behave as required in the target queued-agent regime?
+
+### RQ3: Does design-induced censoring cause practical lock-in?
+
+Does repeated re-optimization settle on a self-confirming design while a
+deployed reduced-instance oracle finds a materially better design?
+
+### RQ4: Is the Adaptive Workload Model useful?
+
+Does it contain the realized demand and success state while remaining narrow
+enough to classify a useful fraction of candidates?
+
+### RQ5: Does OED improve the information-cost trade-off?
+
+Does Commit/Reveal/Hold reach a strong safe design with less exploration loss
+than bandit, Bayesian, passive, random, and repeated-reoptimization baselines?
+
+### RQ6: Does joint cross-mode `M/L/E` planning add value?
+
+After accounting for full materialization, storage, transition, rollback, and
+governance costs, does joint planning outperform single-mode and sequential
+planners?
 
 ## Intended Contributions
 
-The intended paper should make three defensible contributions:
+The target contribution stack is:
 
-1. **A multimodal physical data path abstraction.** A representation-aware plan
-   that unifies materialization, placement, and transformation/delivery under
-   explicit lineage and compatibility constraints, reuse horizons, and
-   transition costs.
-2. **A structured autoresearch method for physical planning.** A method that
-   generates legal plan hypotheses, chooses decision-relevant trials, combines
-   an analytical model with trace evidence, and stops or deploys according to
-   experiment and reconfiguration budgets.
-3. **End-to-end evidence from a distributed prototype.** An implementation on
-   an existing execution substrate, initially FlowMesh, demonstrating when and
-   why joint optimization and targeted experimentation improve recurring
-   multimodal pipelines—and when either provides no additional value.
+1. **PPD problem formulation:** physical design with endogenous,
+   design-censored agent demand and a non-degenerate session-value objective.
+2. **Failure characterization:** conditions under which cost-only optimization
+   degenerates and observed-log re-optimization can lock in.
+3. **Adaptive Workload Model:** a history-indexed, coupled feasible set for
+   latent access and task-success states.
+4. **Optimistic Elastic Design:** robust Commit, budgeted Reveal, Hold, and
+   cost-side escalation over a structured physical-design space.
+5. **Pathfinder system:** representation catalog, access-path resolver,
+   Session Manager, per-node Data Agents, safe plan epochs, and artifact
+   promotion.
+6. **Falsifiable evidence:** pilot gates for the PPD premise and end-to-end
+   comparison against strong physical-design and exploration baselines.
 
-The main novelty claim should be the combination of the physical-plan
-abstraction, transition-aware joint planning, and an autoresearch policy
-designed for that structured space. Combining an object store, an LRU cache,
-and a generic black-box tuner would not be sufficient.
+Hardness, reveal-count, no-thrashing, and commit-tightness results remain
+candidate theoretical contributions until their definitions and proofs pass a
+separate formal audit.
 
-## Position Relative to Adjacent Work
+## Formalization Items to Resolve Before Freezing Claims
 
-The novelty boundary must be established against at least four neighboring
-areas:
+The paper and implementation should not depend on unresolved theorem wording.
+Before claiming the current guarantees:
 
-- **ML input-pipeline services and intermediate caching** already choose
-  preprocessing outputs to cache and may scale data workers. The proposed work
-  must go beyond this by optimizing distributed representation placement and
-  transformation/delivery boundaries across jobs.
-- **Distributed training caches and storage fabrics** exploit access patterns,
-  locality, or sample importance. The proposed work adds versioned
-  representations of the same logical item and treats their production and
-  delivery as plan choices.
-- **Multimodal lakehouse and ML storage formats** organize and stream complex
-  data. The proposed work focuses on workload-driven physical paths across
-  derived representations and heterogeneous resources.
-- **Database physical design and configuration tuning** search materialization,
-  placement, or configuration choices. The proposed work needs a structured,
-  semantically constrained representation graph and data-path traces rather
-  than only a flat knob vector and scalar benchmark result.
-- **Self-driving systems and generic online tuners** already profile workloads,
-  explore configurations, and adapt deployed systems. The proposed
-  autoresearch loop must exploit shared structure across representations,
-  operators, and resources to choose more informative experiments at the same
-  trial and disruption budget.
+1. distinguish performative optimality, performative stability, and
+   candidate-relative OED stability;
+2. repair the non-identifiability construction so the response functions obey
+   the class access budget at every price vector, not only at the incumbent;
+3. verify that the implemented candidate generator draws every quote from the
+   finite, predeclared price universe required by the corrected Reveal-count
+   theorem;
+4. state robust commit tightness relative to the explicit ambiguity set and
+   distinguish safe commits from total exploration loss;
+5. define the initial design and counting unit in the irreversible-deployment
+   lower bound; and
+6. complete the task-class and success mapping in the NP-hardness reduction.
 
-Particularly close work includes systems that automatically cache outputs from
-multiple preprocessing stages and coordinate memory and storage. Therefore,
-“choosing which intermediate representation to cache” cannot stand alone as
-the novelty claim. The differentiating experiment must exercise distributed
-placement or replication together with a transformation/network boundary.
+These are mathematical specification tasks. They must be completed before
+experiments are used to support the theorems.
 
-The closest starting references from the completed background map include:
+## Falsification and Stop Conditions
 
-- [Deep Lake: a Lakehouse for Deep Learning](https://vldb.org/cidrdb/2023/deep-lake-a-lakehouse-for-deep-learning.html)
-- [Plumber: Diagnosing and Removing Performance Bottlenecks in Machine Learning Data Pipelines](https://proceedings.mlsys.org/paper_files/paper/2022/hash/d0e90e9a9310570dfa643aa3b2da6e89-Abstract.html)
-- [Cachew: Machine Learning Input Data Processing as a Service](https://www.usenix.org/conference/atc22/presentation/graur)
-- [Pecan: Cost-Efficient ML Data Preprocessing with Automatic Transformation Ordering and Placement](https://www.usenix.org/conference/atc24/presentation/graur)
-- [HyCache: Hybrid Caching for Accelerating DNN Input Preprocessing Pipelines](https://www.usenix.org/conference/atc25/presentation/jha)
-- [Seneca: Intermediate-Representation Caching for DNN Input Pipelines](https://www.usenix.org/conference/fast26/presentation/desai)
-- [KeystoneML: Optimizing Pipelines for Large-Scale Advanced Analytics](https://shivaram.org/publications/keystoneml-icde17.pdf)
-- [Blaze: Holistic Caching for Iterative Data Analytics](https://doi.org/10.1145/3627703.3629558)
-- [LlamaTune: Sample-Efficient DBMS Configuration Tuning](https://www.vldb.org/pvldb/vol15/p2953-kanellis.pdf)
-- [UDO: Universal Database Optimization using Reinforcement Learning](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf)
+The direction should be narrowed or stopped if:
 
-The detailed comparison and caveats are recorded in
-[Background Research Synthesis](BACKGROUND_RESEARCH/99_SYNTHESIS_AND_RESEARCH_GAPS.md).
-The final novelty claim must still be revised after a systematic literature
-search.
+1. agent access intensity and task selection are insensitive to representation
+   access price in the target workloads;
+2. group-total or task-success monotonicity fails broadly enough that the
+   envelope cannot certify useful candidates;
+3. quoted price is not a sufficient mediator because felt latency or another
+   design feature materially changes access or success after conditioning on
+   `p(D)`, unless an enforceable latency reservation repairs the model;
+4. a strong forecaster accurately predicts censored demand from the incumbent
+   trace without costly deployment;
+5. partial materialization cheaply reveals the relevant demand in every target
+   regime;
+6. the envelope is sound but too wide to classify candidates;
+7. repeated re-optimization does not exhibit a meaningful lock-in gap;
+8. the generator's excluded or `other` candidate pool contains most oracle
+   value; or
+9. joint cross-mode `M/L/E` planning offers no benefit over strong sequential
+   planners.
 
-## Evidence Required for the Direction to Succeed
+If PPD fails but joint physical planning remains valuable, the project may
+fall back to a transition-aware `M/L/E` planner. If joint planning also fails,
+the direction should not be expanded through more Autoresearch machinery.
 
-Before expanding the system, a small testbed should establish all of the
-following:
+## Non-Goals for the First Paper
 
-1. At least one recurring multimodal workload is materially bottlenecked on its
-   data path rather than model computation.
-2. The best representation changes with network bandwidth, transformation
-   cost, placement, cache capacity, or reuse horizon.
-3. A joint plan materially outperforms a strong intermediate-caching baseline
-   and an independent per-layer optimizer.
-4. The autoresearch experiment selector identifies useful traces and reaches a
-   better plan—or the same plan at lower total experiment cost—than
-   analytical-only, passive, and generic-tuner baselines at equal budgets.
-5. The loop can refuse low-value experiments, account for artifacts reused
-   across trials, and stop or roll back without hiding transition work.
+The first paper does not attempt to:
 
-If item 2 is not observed, the representation-aware problem may collapse into
-ordinary caching. If item 3 is not observed, the joint-planning thesis should
-be narrowed. If items 4 and 5 are not observed, the system can still contribute
-a physical planner, but autoresearch should not be the headline.
-
-## Non-Goals for the Initial Paper
-
-The initial work should not attempt to:
-
-- design a new durable object-storage or consistency protocol;
-- replace an existing S3-compatible data lake;
-- physically reconfigure datacenter switches;
-- optimize model parallelism, gradient communication, or GPU kernels;
-- cover every online and batch objective in one optimizer;
-- automate literature review, paper writing, or unrestricted scientific
-  discovery;
-- flatten every system parameter into an unstructured black-box search space;
-- use an LLM as the sole plan generator or correctness mechanism; or
-- claim novelty from adding a distributed cache to FlowMesh.
+- optimize interactive user arrival rates that respond to latency;
+- solve arbitrary continuous-price demand response;
+- guarantee global optimality over the full governance-legal design space;
+- automatically discover correct substitution groups without validation;
+- schedule KV-cache pages, prefixes, batches, or intra-node GPU kernels;
+- choose model architectures, prompts, or logical agent workflows;
+- design cross-organization identity or plan-negotiation protocols;
+- interpret laws or certify anonymization;
+- build a new object-store consistency protocol; or
+- use an LLM as the correctness mechanism for physical planning.
 
 ## Target Paper Narrative
 
-1. Multimodal pipelines expose several physical representations for each
-   logical object.
-2. Their sizes, production costs, reuse conditions, and validity constraints
-   make representation, placement, and transformation/delivery decisions
-   strongly interdependent.
-3. We introduce a physical data path abstraction that makes these decisions
-   jointly optimizable.
-4. We formulate autoresearch as decision-relevant experiment selection over
-   this structured plan space, with semantic, trial, disruption, and transition
-   constraints.
-5. The system automatically proposes plan hypotheses, runs targeted canaries,
-   updates local cost models from traces, and stops or deploys according to the
-   value of further evidence.
-6. A distributed prototype demonstrates the conditions under which joint
-   planning and autoresearch improve end-to-end performance and cost, including
-   negative regimes where one or both are unnecessary.
-
-This framing can fit a database or data-systems venue if the catalog,
-representation lineage, declarative plan, cost model, and correctness
-constraints remain first-class. FlowMesh is the execution substrate, not the
-research contribution by itself.
+1. Agentic systems can make physical design performative: the design changes
+   what agents can afford, and therefore changes the workload used to judge
+   the design.
+2. Cost-only optimization becomes ill-posed under abandonment, while
+   observed-log re-optimization can become self-confirming.
+3. The missing demand cannot always be point-estimated from the incumbent
+   trace, but structural and operational assumptions can define a sound,
+   testable feasible set.
+4. Pathfinder commits only when robustly safe, reveals only when the upside
+   can pay for an explicitly budgeted excursion, and otherwise holds.
+5. A representation-aware physical system realizes those decisions over
+   materialization, placement, execution, governance, session artifacts, and
+   safe plan epochs.
+6. The evaluation first tries to falsify the PPD premise and its envelope
+   assumptions, then measures whether the surviving method improves physical
+   design and exploration cost.
 
 ## Short Research Pitch
 
-We study autoresearch for self-driving physical data path optimization in
-distributed multimodal data lakes. The system models each logical object as a
-versioned graph of compressed media, decoded data, tensors, tokens, and
-embeddings, then jointly plans which representations to materialize, where to
-place them, and where to transform and deliver them. When the structural cost
-model cannot rank plans confidently, an autoresearch controller proposes
-testable plan hypotheses, selects a low-cost microbenchmark or canary that can
-resolve the uncertainty, records operator- and resource-level evidence, and
-updates or deploys a plan only when its reuse-horizon benefit exceeds
-experiment and transition cost. The research asks both whether this joint plan
-beats strong layer-local optimizers and whether structured experiment selection
-reaches good decisions more efficiently than passive measurement or generic
-black-box tuning.
+Pathfinder studies physical design for agentic workloads whose demand depends
+on the design itself. A representation that is absent or too expensive can
+record zero demand even when making it affordable would unlock valuable agent
+tasks, so re-optimizing against the current log can become self-confirming.
+Pathfinder models versioned multimodal representations and jointly selects
+materialization, placement, and transformation execution under external
+governance constraints. Its Adaptive Workload Model brackets censored demand;
+Optimistic Elastic Design commits only to robust improvements and spends a
+budgeted physical Reveal only when cheaper probes cannot resolve a potentially
+valuable demand state. The project succeeds only if agent demand is measurably
+elastic, the envelope assumptions survive falsification tests, and the system
+beats strong physical-design and exploration baselines after charging every
+transition and probe.

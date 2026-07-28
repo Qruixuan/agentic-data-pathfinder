@@ -1,519 +1,452 @@
-# Development Checklist for the Multimodal Data-Lake Optimizer
+# Ordered Development Checklist for Pathfinder
 
-## 1. Purpose and Order
+## 1. Implementation Order
 
-This checklist turns the research direction into an implementation sequence. Each stage has a gate: later components should not be built until the earlier evidence or system invariant holds.
+This checklist follows the revised performative-physical-design direction.
+Every gate can narrow or stop later work.
 
 ```text
-D0 environment and interfaces
-  -> D1 reproducible baseline and telemetry
-  -> D2 representation catalog and compatibility
-  -> D3 per-node data plane
-  -> D4 declarative physical plans A/B/C
-  -> G0 interaction study
-  -> D5 analytical planner
-  -> D6 experiment manager
-  -> D7 structured Autoresearch
-  -> D8 online adaptation and hardening
-  -> D9 full evaluation and reproducibility
+F0 formal-model audit
+  -> D0 task/access contract and environment
+  -> D1 causal access-response harness
+  -> G0 performative-premise gate
+  -> D2 representation catalog and session state
+  -> D3 Data Agents and physical operations
+  -> D4 static Designs A/B/C/D and restoration
+  -> G1 reduced oracle and lock-in gate
+  -> D5 Adaptive Workload Model
+  -> D6 OED Commit/Reveal/Hold
+  -> D7 escalation and candidate expansion
+  -> D8 adaptation, governance, and hardening
+  -> D9 full evaluation and artifact release
 ```
 
-The critical principle is to prove the physical-planning problem before implementing a sophisticated optimizer or learned Autoresearch loop.
+The critical path is to prove that physical design causally changes agent
+access before building a sophisticated controller.
 
----
-
-## D0. Environment, FlowMesh Interfaces, and Repository Boundaries
+## F0. Formal-Model Audit
 
 ### Goal
 
-Replace architectural assumptions with verified interfaces and establish a minimal controller/agent skeleton.
+Turn the paper skeleton's formal claims into precise, implementation-aligned
+definitions.
 
 ### Tasks
 
-- [ ] Inventory cluster nodes, CPU/GPU resources, RAM, local NVMe, network links, and durable object storage.
-- [ ] Measure or document the permissions available to the controller and workers.
-- [ ] Verify whether FlowMesh can pass `plan_id`, `plan_epoch`, and a local agent endpoint to each task.
-- [ ] Verify whether FlowMesh reports task start, finish, retry, and cancellation.
-- [ ] Verify whether CPU preprocessing tasks can be placed on selected nodes.
-- [ ] Verify whether GPU tasks can call a local Data Agent or sidecar.
-- [ ] Select the first control RPC, agent-to-agent data-transfer, and telemetry protocols.
-- [ ] Select a metadata store with transactions or compare-and-swap support.
-- [ ] Fix the first representation-shard policy instead of making shard size an optimization variable.
-- [ ] Define a uniform `run_id / plan_epoch / trial_id / shard_id` naming convention.
-- [ ] Record unverified assumptions and a fallback implementation for each one.
+- [ ] Define `D = (M, L, E)`, `W(D)`, `Phi(D)`, transition cost, and
+  `Gain(D_t -> D')`.
+- [ ] Separate performative optimum, performative stability, and OED's
+  candidate-relative certificate.
+- [ ] State the history, ambiguity set, and exact AWM assumption families.
+- [ ] Repair the non-identifiability construction so every residual demand
+  function respects the declared access budget over the full price domain.
+- [ ] Declare ex ante finite `P_qv` universes before defining Reveal bounds.
+- [ ] Check the general `sum_qv |P_qv|`, pair-canonical `|Q||V|`, and
+  simultaneously canonical `|V|` cases separately.
+- [ ] State tightness relative to the ambiguity set.
+- [ ] Separate loss along the certified safe sequence from exploration loss.
+- [ ] Define the initial design and transition-counting unit for lower bounds.
+- [ ] Complete the task, access, and success mapping for the hardness reduction.
+- [ ] Mark each theorem as draft, checked, or experimentally motivated.
+
+### Gate F0
+
+Each theorem has a definition/assumption/claim sheet. Unresolved proof items are
+explicitly excluded from the current guarantee rather than silently assumed.
+
+## D0. Task/Access Contract and Environment
+
+### Goal
+
+Verify the execution environment and define the observable interface between a
+physical design and an agent session.
+
+### Tasks
+
+- [ ] Inventory object storage, nodes, CPU/GPU, RAM, NVMe, and network links.
+- [ ] Verify FlowMesh task placement, lifecycle events, and propagation of
+  `design_id`, `design_epoch`, `session_id`, `task_class_id`, and `trial_id`.
+- [ ] Select one video corpus and deterministic representation graph.
+- [ ] Define the first two or three task classes and terminal success metrics.
+- [ ] Define representation substitution groups.
+- [ ] Define per-task access budgets and affordability semantics.
+- [ ] Declare the finite access-price universe for each task-class and
+  representation pair.
+- [ ] Keep `p_qv`, felt latency, and `realized_cost_qv` separate in every
+  schema.
+- [ ] Define queued agentic sessions as endogenous.
+- [ ] Define training and analytics as fixed contributors for the first pilot.
+- [ ] Define externally supplied governance policies and attestations.
+- [ ] Select catalog, RPC, transfer, and telemetry interfaces.
+- [ ] Record every unverified infrastructure assumption and fallback.
 
 ### Recommended Code Boundaries
 
 ```text
 controller/
   catalog/
-  planner/
-  experiment_manager/
-  autoresearch/
+  candidate_generator/
+  awm/
+  oed/
+  escalation/
 
 agent/
   replica_manager/
-  transfer/
   transform_executor/
+  access_resolver/
+  session_manager/
   telemetry/
 
 common/
   representation/
-  physical_plan/
+  physical_design/
+  task_access/
+  governance/
   protocol/
 
 adapters/
   flowmesh/
   object_store/
+  policy_authority/
 
 workloads/
-  video/
+  video_agent/
 
 experiments/
-  configs/
+  causal_harness/
+  reduced_oracle/
   runners/
   analysis/
 ```
 
-Names may change, but the controller, agent, shared plan protocol, adapters, and workload harness should remain separate.
-
-### Deliverables
-
-- [ ] `ENVIRONMENT_AND_INTERFACES.md` describing verified interfaces and constraints.
-- [ ] Minimal controller and agent processes that register and exchange health checks.
-- [ ] A versioned experiment configuration describing nodes, tiers, bandwidth limits, and workload.
-
 ### Gate D0
 
-Proceed only when:
+The harness can offer a versioned set of representation choices and prices to a
+task class, and every session reaches a logged terminal outcome.
 
-- at least two nodes can participate in data transfer;
-- FlowMesh tasks receive stable plan and trial identities;
-- object storage and local NVMe are accessible through the test harness; and
-- every critical assumption is either verified or has an explicit fallback.
-
----
-
-## D1. Reproducible Origin Data Path and Telemetry
+## D1. Causal Access-Response Harness
 
 ### Goal
 
-Establish a correct baseline without an optimizer:
-
-```text
-object store -> consumer-node CPU -> transform -> GPU or dummy consumer
-```
+Estimate whether agent behavior changes when physical access changes.
 
 ### Tasks
 
-- [ ] Select one video dataset or controlled generator.
-- [ ] Fix one transform chain: `raw -> decode -> sample -> resize/tensor`.
-- [ ] Define a fixed shard list and deterministic workload slice.
-- [ ] Implement the origin-streaming baseline.
-- [ ] Separate cold-cache and warm-cache runs.
-- [ ] Record operator input/output bytes, service time, and queueing time.
-- [ ] Record object-store requests, bytes, latency, and throughput.
-- [ ] Record cross-node transfer bytes and time.
-- [ ] Record consumer stalls, effective sample goodput, and makespan.
-- [ ] Record CPU, GPU, NVMe, memory, and network utilization.
-- [ ] Bind all measurements to workload, dataset, code version, run, and random seed.
-- [ ] Repeat runs and quantify variance.
+- [ ] Hold model, prompt, task distribution, decoding policy, and seeds fixed.
+- [ ] Implement class-specific quote intervention within each declared
+  `P_qv`.
+- [ ] Log every offered representation, `p_qv`, budget, selection, and
+  rejection.
+- [ ] Log realized latency, bytes, compute, cost, success, quality, and session
+  value.
+- [ ] Counterbalance intervention order and cold/warm state.
+- [ ] Implement matched real physical interventions.
+- [ ] Compare quote-induced and physically induced responses.
+- [ ] Match real and injected interventions on `p_qv`, not realized cost.
+- [ ] Run an advertised-price × felt-latency factorial experiment.
+- [ ] Test quoted-price sufficiency with a pre-registered equivalence margin.
+- [ ] Estimate access probability and `epsilon_qv` by task class,
+  representation, and quote.
+- [ ] Test group-total monotonicity.
+- [ ] Test representation-success monotonicity.
+- [ ] Check whether training/analytics remain stable under design changes.
+- [ ] Deliberately allow a fraction of sessions to re-arrive under cheaper
+  access and measure exogeneity-violation tolerance.
+- [ ] Repeat trials and quantify uncertainty.
 
-### First Required Measurements
+### Gate G0: Performative Premise
 
-- [ ] Mean and tail raw-video shard size.
-- [ ] Data expansion ratio after decode.
-- [ ] Data contraction ratio after sampling or filtering.
-- [ ] Transform throughput on data-node and consumer-local CPUs.
-- [ ] Effective read throughput from origin, peer, and local NVMe.
-- [ ] Consumer data demand per second.
-- [ ] Whether the pipeline is data-, CPU-, or GPU-bound.
+Proceed with Pathfinder's headline only if:
 
-### Deliverables
+1. at least one important task class has repeatable access elasticity;
+2. the response changes session value, not merely an internal read count;
+3. real design interventions broadly reproduce the quote response; and
+4. quoted price is a sufficient mediator over the declared operating range;
+   and
+5. a defensible subset of AWM assumptions survives falsification tests.
 
-- [ ] A one-command reproducible baseline.
-- [ ] An end-to-end bottleneck decomposition.
-- [ ] A trace schema and trace analysis/viewer.
-- [ ] Confidence intervals or distributions from at least three repeated runs.
+If not, revert to fixed-workload physical design or narrow the task/model scope.
 
-### Gate D1
-
-- A reproducible data-path bottleneck must exist.
-- Operator and transfer measurements should approximately explain makespan.
-- If the workload is always GPU-bound, change the workload or parameters before building a planner.
-
----
-
-## D2. Representation Catalog, Identity, and Compatibility
+## D2. Representation Catalog, Task Classes, and Session State
 
 ### Goal
 
-Answer precisely:
-
-> What representation is this shard, how was it produced, where does it exist, and may the current consumer reuse it?
+Answer which representation exists, how it was produced, who can access it,
+what alternatives were offered, and what outcome followed.
 
 ### Tasks
 
-- [ ] Implement `LogicalDataset` and `dataset_version`.
-- [ ] Implement `RepresentationVersion` and the parent representation DAG.
-- [ ] Implement a `RepresentationShard` manifest.
-- [ ] Implement `Replica(node, tier, state, checksum, lease)`.
-- [ ] Implement a transformation fingerprint containing:
-  - [ ] input versions;
-  - [ ] operator code version;
-  - [ ] parameters;
-  - [ ] randomness contract;
-  - [ ] model or tokenizer version; and
-  - [ ] output schema and quality contract.
-- [ ] Implement replica state transitions:
-  `ABSENT -> RESERVED -> BUILDING/TRANSFERRING -> VERIFYING -> VALID`.
-- [ ] Implement temporary writes, checksum/manifest validation, and atomic publication.
-- [ ] Implement an independent compatibility validator.
-- [ ] Propagate invalidation after upstream version changes.
-- [ ] Recover the catalog after restart and scan for orphan replicas.
+- [ ] Implement logical dataset and version.
+- [ ] Implement representation DAG, shard manifests, and transformation
+  fingerprints.
+- [ ] Implement replicas with node, tier, state, checksum, lease, and policy
+  version.
+- [ ] Implement `TaskClass` and versioned success contract.
+- [ ] Implement versioned substitution groups.
+- [ ] Implement `SessionArtifact` with temporary, reusable, and promoted states.
+- [ ] Implement `DesignObservation` linked to history, task class, choices,
+  quote profile, outcome, and realized cost.
+- [ ] Keep semantic identity, access profile, and governance policy versions
+  separate.
+- [ ] Implement atomic publication after checksum/manifest validation.
+- [ ] Implement compatibility, affordability, and governance validation.
+- [ ] Implement lineage invalidation, revocation, and erasure propagation.
+- [ ] Recover catalog state and detect orphan artifacts after restart.
 
 ### Tests
 
-- [ ] Two workflows with the same fingerprint discover and reuse one representation.
-- [ ] Reuse is rejected for incompatible parameters, code, or model versions.
-- [ ] A random transformation cannot be reused across runs without a compatible seed contract.
-- [ ] A partial write or failed verification never becomes `VALID`.
-- [ ] Controller restart neither loses valid replicas nor accepts temporary files as valid.
+- [ ] Compatible sessions reuse one deterministic representation.
+- [ ] Code/model/parameter/randomness incompatibilities are rejected.
+- [ ] Unaffordable representations are never returned by the resolver.
+- [ ] Policy-ineligible access is rejected even for a byte-compatible local
+  replica.
+- [ ] Failed or partial writes never become valid.
+- [ ] A restored probe retains its observation and correctly classifies its
+  artifacts.
 
 ### Gate D2
 
-Two workflows safely share one deterministic derived shard, and every constructed incompatibility case is rejected by the validator.
+The complete causal chain from offered access to terminal session value is
+replayable from catalog and observation records.
 
----
-
-## D3. Per-Node Data Agent and Minimal Data Plane
+## D3. Data Agents and Physical Operations
 
 ### Goal
 
-Implement the minimum primitives required to execute `M/L/E`.
+Execute the materialization, layout, and execution components of
+`D = (M, L, E)`.
 
-### Agent Infrastructure
+### Tasks
 
-- [ ] Agent registration, heartbeat, and capability reports.
-- [ ] Local replica index.
-- [ ] Capacity reservation, leases, pins, and reader references.
-- [ ] Idempotency keys: `(plan_epoch, operation_id)`.
-- [ ] Operation-status queries and retries.
-
-### Data Operations
-
-- [ ] `ensure_replica`
-- [ ] `run_transform`
-- [ ] `replicate`
-- [ ] `serve`
-- [ ] `stage`
-- [ ] `pin`
-- [ ] `evict`
-- [ ] `invalidate`
-
-### Required Paths
-
-- [ ] Object store to agent.
-- [ ] Local NVMe to local consumer.
-- [ ] Peer agent to consumer agent.
-- [ ] Object store to data-node transform to NVMe.
-- [ ] Peer transfer to consumer-local transform.
-- [ ] Origin-read fallback.
-
-### Safety
-
-- [ ] Failed transfers or transforms never publish partial artifacts.
-- [ ] A shard with active readers cannot be evicted.
-- [ ] Agents recover local state from files and catalog records after restart.
-- [ ] Eviction never affects the durable source.
+- [ ] Agent registration, heartbeat, capabilities, zone, and trust labels.
+- [ ] Authenticated plan capabilities and idempotent operations.
+- [ ] Capacity reservations, leases, pins, and active-reader references.
+- [ ] `ensure_replica`, `run_transform`, `replicate`, `serve`, `stage`,
+  `pin`, `evict`, and `invalidate`.
+- [ ] Origin-to-agent, peer-to-agent, local-NVMe, and transform paths.
+- [ ] Resolve every logical request through the access-path resolver.
+- [ ] Enforce affordability and governance at serve time.
+- [ ] Emit task-class, quote, path, realized-cost, and outcome telemetry.
+- [ ] Prevent partial publication and eviction with active readers.
+- [ ] Recover local replica state after restart.
 
 ### Gate D3
 
-The same logical request is served correctly from origin, local NVMe, and a peer replica. Transform outputs are validated, reusable, and recoverable, and each path emits attributable telemetry.
+The same logical request is served correctly through origin, local, peer, and
+transformed paths, with complete access and cost attribution. Constructed
+illegal and unaffordable requests are rejected at the agent boundary.
 
----
-
-## D4. Physical Plan, Compiler, and Three Static Paths
+## D4. Static Designs, Transitions, and Restoration
 
 ### Goal
 
-Control the physical system correctly with a declarative `P = (M, L, E)` before adding an automatic optimizer.
+Deploy declarative designs and restore a certified incumbent before adding AWM
+or OED.
 
 ### Tasks
 
-- [ ] Implement a `PhysicalPlan` schema.
-- [ ] Implement plan validation.
-- [ ] Implement a plan registry and monotonically increasing `plan_epoch`.
-- [ ] Compile a Transition Plan from `P_old` to `P_new`.
-- [ ] Implement runtime bindings.
-- [ ] Implement a telemetry specification per plan.
-- [ ] Implement an explicit rollback plan.
-- [ ] Bind admitted tasks immutably to one epoch.
+- [ ] Implement the `PhysicalPlan` schema corresponding to `D = (M, L, E)`.
+- [ ] Bind task classes, quote profiles, governance version, and observation
+  specification.
+- [ ] Implement plan validation and machine-readable rejection reasons.
+- [ ] Compile transitions and restoration plans.
 - [ ] Implement `PREPARING -> CANARY -> ACTIVE -> DRAINING`.
-- [ ] Ensure the controller is not on the per-sample critical path.
+- [ ] Bind admitted sessions immutably to one epoch.
+- [ ] Define a certified `D_safe`.
+- [ ] Charge forward, foreground-disruption, and restoration costs.
+- [ ] Retain observations after probe restoration.
+- [ ] Promote probe artifacts only through an explicit compatibility and value
+  decision.
 
-### Mandatory Static Plans
+### Mandatory Static Designs
 
 ```text
-Plan A
-origin raw -> consumer CPU transform -> GPU
-
-Plan B
-origin raw -> data-node transform -> materialized tensor on NVMe
-           -> consumer/GPU
-
-Plan C
-origin raw -> data-node decode/sample -> materialized parent on NVMe
-           -> consumer-local final transform -> GPU
+Design A: compressed video -> local decode/sample -> cheap embedding access
+Design B: shared sampled frames/embeddings on NVMe -> agent sessions
+Design C: consumer-local transform from a shared parent representation
+Design D: expensive structured multimodal digest -> agent sessions
 ```
 
-### Tests
-
-- [ ] Manually submitted A/B/C plans produce their intended byte paths.
-- [ ] Switching A to B includes all materialization work.
-- [ ] Switching B to C reuses compatible parents or explicitly records why reuse is illegal.
-- [ ] Plan activation is atomic.
-- [ ] Failures fall back to Plan A's origin-read path.
-- [ ] Old replicas are released only after old-epoch readers drain.
+Design D must initially expose the censored/expensive access path needed to
+study performative lock-in.
 
 ### Gate D4
 
-Plans A/B/C produce semantically equivalent outputs from the same logical inputs. Traces distinguish representation, node, tier, transform location, and transition cost.
+Designs A–D produce valid task inputs, distinct access profiles, and
+explainable session outcomes. Any probe can restore `D_safe` without losing the
+observation or corrupting active sessions.
 
----
-
-## G0. Interaction Study: Go/No-Go Gate Before the Optimizer
-
-### Goal
-
-Determine whether joint `M/L/E` decisions genuinely outperform independent policies. This is the project's most important early research gate.
-
-### Tasks
-
-- [ ] Enumerate or manually construct a small legal plan space.
-- [ ] Vary:
-  - [ ] network bandwidth;
-  - [ ] storage bandwidth;
-  - [ ] data-node CPU;
-  - [ ] consumer-local CPU;
-  - [ ] NVMe and RAM capacity;
-  - [ ] reuse horizon;
-  - [ ] concurrent consumers or jobs; and
-  - [ ] representation expansion and contraction ratios.
-- [ ] Find a regime where early transformation wins.
-- [ ] Find a regime where late transformation wins.
-- [ ] Find a regime where a shared materialized parent wins.
-- [ ] Implement strong independent planners in at least two fixed orders, such as `M -> L -> E` and `E -> L -> M`.
-- [ ] Compare independent plans with the global optimum.
-- [ ] Compute break-even reuse counts by regime.
-- [ ] Include transition costs in every comparison.
-
-### Gate G0
-
-Continue to planner development only if:
-
-1. different plans win in at least two regimes;
-2. a strong independent optimizer deviates materially from the global best in at least one realistic, reproducible regime;
-3. the gap comes from representation, placement, and transformation-boundary interaction rather than weak LRU or thread-count settings; and
-4. the conclusion survives transition-cost accounting.
-
-If condition 2 fails, narrow or redefine the joint-planning claim. If condition 1 fails, stop expanding the system.
-
----
-
-## D5. Transition-Aware Analytical Planner
+## G1. Reduced Oracle and Lock-In
 
 ### Goal
 
-After G0 proves the problem exists, implement the first automatic planner without a learned model.
+Establish the central failure mode on a fully enumerable instance.
 
 ### Tasks
 
-- [ ] Build representation, operator, and resource profiles from the catalog and telemetry.
-- [ ] Generate legal candidates.
-- [ ] Apply semantic pruning.
-- [ ] Apply dominated-plan pruning.
-- [ ] Model transforms, reads, transfers, queues, and the critical path.
-- [ ] Model materialization, replication, migration, warm-up, adoption, and eviction.
-- [ ] Accept an explicit reuse horizon.
-- [ ] Compute break-even reuse counts.
-- [ ] Rank plans and expose uncertain terms and confidence intervals.
-- [ ] Implement exhaustive search on reduced instances.
-- [ ] Explain each selected plan using dominant benefits, bottlenecks, and transition amortization.
+- [ ] Enumerate every feasible reduced design under `D_gov`.
+- [ ] Deploy every design and measure `W(D)` and `Phi(D)`.
+- [ ] Implement naive read-react-materialize.
+- [ ] Construct the predicted censoring loop.
+- [ ] Show whether an unobserved expensive representation is truly valuable.
+- [ ] Include all transition and restoration costs.
+- [ ] Declare candidate-generation output and `G_other`.
+- [ ] Freeze an oracle dataset for AWM/OED validation.
+
+### Gate G1
+
+Continue to the full controller only if the lock-in is reproducible with a real
+agent and physical access path, and a superior design remains after complete
+cost accounting.
+
+## D5. Adaptive Workload Model
+
+### Goal
+
+Maintain a history-indexed, coupled feasible set of design-dependent workload
+responses.
+
+### Tasks
+
+- [ ] Define observation-history and assumption-version schemas.
+- [ ] Version `P_qv`, quoted-price sufficiency, and latency-reservation
+  contracts.
+- [ ] Encode affordability gates.
+- [ ] Encode allowed own-price, group-total, substitution, and success
+  constraints.
+- [ ] Solve lower/upper access, value, and gain queries over the full coupled
+  feasible set.
+- [ ] Avoid independent endpoint substitution unless proved equivalent.
+- [ ] Validate coverage against the reduced oracle and held-out sessions.
+- [ ] Report width and active constraints for every bound.
+- [ ] Maintain time-uniform confidence events for demand, realized-cost boxes,
+  transition costs, and probe-window loss.
+- [ ] Detect assumption violations and invalidate affected certificates.
+- [ ] Implement assumption-family and trivial-box ablations.
 
 ### Gate D5
 
-- The planner approaches the exhaustive oracle on reduced instances.
-- It predicts the main regime changes observed in G0.
-- It gives interpretable pruning reasons for clearly inferior plans.
-- When close plans are ranked incorrectly, it identifies the uncertain model term that D6/D7 should measure.
+AWM achieves declared coverage and produces decision-relevant bounds that are
+tighter than assumption-free and independent-box alternatives.
 
----
-
-## D6. Experiment Manager and Canary Child Plans
+## D6. Optimistic Elastic Design
 
 ### Goal
 
-Measure candidate plans safely and reproducibly without allowing Autoresearch to mutate the active plan directly.
+Make explicit Commit, Reveal, or Hold decisions while preserving `D_safe`.
 
 ### Tasks
 
-- [ ] Implement child `plan_epoch` creation.
-- [ ] Select deterministic shard and consumer subsets.
-- [ ] Implement a trial namespace, capacity reservation, and budget.
-- [ ] Compile the physical delta between parent and child.
-- [ ] Support sequential or resource-isolated trials.
-- [ ] Record shared-resource background load.
-- [ ] Validate trial correctness.
-- [ ] Implement promote, rollback, and cleanup.
-- [ ] Classify reusable, stranded, invalid, and disruptive trial work.
-- [ ] Store a complete `ResearchIteration` provenance record.
-- [ ] Implement passive, random, and exhaustive-small-instance experiment baselines.
+- [ ] Classify candidates into `G_cert`, `G_probe`, and `G_other`.
+- [ ] Track the highest affordable observed price for every `(q,v)`.
+- [ ] Select simultaneously canonical probes first, pair-canonical probes
+  second, and other budget-feasible probes last.
+- [ ] Record which Reveal tier was taken and charge non-canonical probes
+  against `sum_qv |P_qv|`.
+- [ ] Compute conservative Commit gain including transition cost.
+- [ ] Compute optimistic Reveal value including forward, foreground, and
+  restoration cost.
+- [ ] Commit only when the candidate is certified to improve over `D_safe`.
+- [ ] Reveal only when the probe has positive decision value under the declared
+  ambiguity set.
+- [ ] Restore `D_safe` after Reveal unless a separate Commit certificate exists.
+- [ ] Retain the new observation and re-run AWM.
+- [ ] Implement explicit Hold/certificate-limited/budget-limited reasons.
+- [ ] Track the safe sequence separately from probe executions.
+- [ ] Compute `delta_t` from candidate, incumbent, and transition-cost widths.
+- [ ] Prove termination from finite `P_qv` and the finite design domain rather
+  than assuming a positive minimum excursion cost.
+- [ ] Compare against passive, random, bandit, Bayesian, and black-box policies.
 
 ### Gate D6
 
-A candidate completes a canary without corrupting normal jobs, produces replayable evidence, and can be promoted or rolled back safely. A failed trial cannot damage the active plan or publish an invalid representation.
+On the reduced oracle and held-out runs, OED improves safe design quality or
+reaches the oracle decision at lower total exploration cost than equal-budget
+baselines. Claims remain candidate-relative when `G_other` is nonempty.
 
----
-
-## D7. Structured Autoresearch
+## D7. Escalation and Candidate Expansion
 
 ### Goal
 
-Choose the next most valuable experiment, rather than merely selecting the currently cheapest predicted plan.
+Respond to structural ambiguity that ordinary probes cannot resolve.
 
-### Minimum Version
+### Tasks
 
-- [ ] Define triggers:
-  - [ ] overlapping confidence intervals among top plans;
-  - [ ] persistent prediction errors;
-  - [ ] workload or version changes; and
-  - [ ] substantial resource-state drift.
-- [ ] Generate structured hypotheses from plan differences.
-- [ ] Map uncertain terms to executable interventions:
-  - [ ] operator microbenchmark;
-  - [ ] sampled representation materialization;
-  - [ ] transfer benchmark; and
-  - [ ] workload-slice canary.
-- [ ] Implement an initial experiment-value score.
-- [ ] Prefer shared measurements that discriminate among several candidates.
-- [ ] Update the relevant cost-model component and plan confidence.
-- [ ] Implement `deploy / continue / refuse / stop`.
-- [ ] Record a structured stopping reason.
-- [ ] Model reusable artifacts created by each trial.
-
-### Defer Until Evidence Requires It
-
-- [ ] `[optional]` Learned residual model, only for systematic contention or skew errors.
-- [ ] `[optional]` LLM hypothesis proposals, only as suggestions within the valid plan space.
-- [ ] `[optional]` Parallel experiments, only after sequential ranking is stable.
-
-### Required Baselines
-
-- [ ] Analytical-only planner.
-- [ ] Passive traces.
-- [ ] Random experiment selection.
-- [ ] Generic plan-level black-box tuner.
-- [ ] Generic component optimal design without plan differences.
-- [ ] UDO-style heavy/light trial ordering.
-- [ ] Structured search with end-to-end feedback only.
-- [ ] Exhaustive oracle on reduced instances.
+- [ ] Escalate from microbenchmarks to sampled materialization.
+- [ ] Escalate to broader task slices or representation coverage.
+- [ ] Escalate to alternative quote profiles from the declared alphabet.
+- [ ] Expand/refine task classes or substitution groups when assumptions fail.
+- [ ] Expand candidate generation when `G_other` risk is high.
+- [ ] Permit an external review request for an unsupported policy/semantic
+  choice.
+- [ ] Record why escalation was chosen and what uncertainty it can resolve.
+- [ ] Refuse escalation whose robust value does not cover its cost.
 
 ### Gate D7
 
-Under equal measurement, disruption, and transition budgets, Autoresearch finds a better plan or reaches the same plan at materially lower total cost, while correctly refusing low-value experiments. Otherwise retain the analytical planner and remove Autoresearch from the main contribution.
+Every escalation either tightens a named decision bound, discovers an
+assumption violation, expands the candidate certificate, or is explicitly
+refused.
 
----
-
-## D8. Online Adaptation, Migration, and Hardening
-
-### Goal
-
-Replan after workload or resource changes without oscillation or damage to running tasks.
+## D8. Adaptation, Governance, and Hardening
 
 ### Tasks
 
-- [ ] Detect sustained prediction error and resource drift.
-- [ ] Trigger on workload, version, or reuse-horizon changes.
-- [ ] Add hysteresis and a minimum stable window.
-- [ ] Implement migration-aware replanning.
-- [ ] Recover from controller crashes.
-- [ ] Handle agent disconnect and rejoin.
-- [ ] Reject stale plan epochs.
-- [ ] Reconcile replicas and clean orphan artifacts.
-- [ ] Provide a reduced-overhead telemetry mode.
-- [ ] Back up and restore the catalog and Evidence Store.
-- [ ] Stress-test multi-job capacity contention and externalities.
+- [ ] Detect sustained task-mix, resource, and prediction drift.
+- [ ] Add hysteresis and minimum stable windows.
+- [ ] Revalidate on policy, attestation, retention, and erasure changes.
+- [ ] Block stale epochs and revoked access.
+- [ ] Recover controller and agents and reconcile orphan artifacts.
+- [ ] Stress-test shared-resource interference.
+- [ ] Provide reduced-overhead telemetry.
+- [ ] Back up/restore catalog and observations.
+- [ ] Run revocation and erasure correctness tests separately from performance
+  adaptation.
 
 ### Gate D8
 
-After controlled bandwidth, CPU, capacity, or reuse changes, the system returns to an appropriate plan within budget. Short-lived noise does not repeatedly create and migrate large representations.
+The system adapts within budget without oscillating and never serves a newly
+unauthorized request after a policy change.
 
----
-
-## D9. Full Evaluation, Reproducibility, and Research Delivery
-
-### Goal
-
-Turn the implementation into evidence that supports or rejects the research claims.
+## D9. Full Evaluation and Research Artifact
 
 ### Tasks
 
-- [ ] Complete one primary video workload.
-- [ ] Add one image, audio, or embedding workload with different expansion behavior.
-- [ ] Implement all required data-path baselines.
-- [ ] Implement the strong independent `M/L/E` baseline.
-- [ ] Implement the optimizer and Autoresearch baselines.
-- [ ] Complete required ablations.
-- [ ] Report cold-start, steady-state, and horizon-amortized results.
-- [ ] Report trial, disruption, transition, and telemetry overheads.
-- [ ] Report negative regimes where joint planning or Autoresearch is unnecessary.
-- [ ] Freeze dataset versions, configuration, seeds, cluster allocation, and background load.
-- [ ] Provide one-command runners and analysis notebooks or scripts.
-- [ ] Validate selected plans with held-out long runs.
-- [ ] Produce architecture, interaction, convergence, and breakdown figures.
+- [ ] Complete the primary video workload and all falsification gates.
+- [ ] Add one secondary modality only after the primary result is stable.
+- [ ] Add fixed training and analytics consumers.
+- [ ] Implement all physical-design and performative-controller baselines.
+- [ ] Complete all AWM/OED and `M/L/E` ablations.
+- [ ] Report negative regimes and assumption violations.
+- [ ] Report candidate-pool coverage and oracle decomposition.
+- [ ] Report quoted versus realized cost agreement.
+- [ ] Report transition, probe, restoration, and telemetry overhead.
+- [ ] Freeze code, data, prompts, models, seeds, policies, and configurations.
+- [ ] Provide one-command reduced-oracle and end-to-end runners.
+- [ ] Release trace schemas, oracle traces, and analysis scripts.
 
 ### Final Success Conditions
 
-- [ ] Different physical plans have stable, explainable winning regimes.
-- [ ] Joint `M/L/E` beats a strong independent optimizer in target regimes.
-- [ ] Transition-aware objectives change the plan and improve horizon-wide cost.
-- [ ] Structured Autoresearch beats passive, random, generic optimal-design, and black-box baselines at equal budget.
-- [ ] Benefits remain after charging materialization, migration, trials, disruption, and telemetry.
+- [ ] Design causally changes agent access and session value.
+- [ ] Read-react-materialize exhibits real lock-in.
+- [ ] AWM is both empirically sound and more informative than trivial bounds.
+- [ ] OED beats equal-budget exploration baselines after complete cost
+  accounting.
+- [ ] Joint `M/L/E` matters beyond a conventional cache choice.
+- [ ] Certificate scope and `G_other` are reported honestly.
+- [ ] Every constructed illegal operation is rejected at planning and agent
+  boundaries.
 
----
-
-## 2. Priority Summary
-
-### P0: Prove the research problem
-
-- [ ] D0 environment and interfaces.
-- [ ] D1 baseline and telemetry.
-- [ ] D2 catalog.
-- [ ] D3 Data Agent.
-- [ ] D4 static Plans A/B/C.
-- [ ] G0 interaction study.
-
-Do not implement a complex planner or Autoresearch loop before P0 is complete.
-
-### P1: Build the paper's core system
-
-- [ ] D5 transition-aware analytical planner.
-- [ ] D6 experiment manager.
-- [ ] D7 Structured Autoresearch, only if required by evidence.
-
-### P2: Extend and harden
-
-- [ ] D8 online adaptation.
-- [ ] D9 workload breadth, reproducibility, and engineering hardening.
-
-## 3. Recommended Immediate Next Steps
+## 2. Immediate Next Steps
 
 If implementation has not begun:
 
-1. Complete the D0 FlowMesh, object-store, and cluster interface table.
-2. Build the D1 single-path video baseline.
-3. Measure raw, decoded, sampled, and tensor sizes and transformation costs before implementing the catalog or optimizer.
-4. Confirm that a meaningful data-path bottleneck exists, then start D2.
+1. Complete the F0 definition and theorem audit.
+2. Write the D0 task-class, access-budget, substitution-group, and finite-price
+   contracts.
+3. Build the D1 resolver harness around one video corpus and two task classes.
+4. Run the G0 causal pilot before implementing the catalog or OED.
 
-The first research-critical code is not the Autoresearch controller. It is a physical system that can replay Plans A/B/C on the same workload and account completely for materialization, transfer, and transition costs.
+The first research-critical code is the causal access-path resolver and logging
+harness. The optimizer becomes justified only after that harness shows that the
+workload actually depends on the physical design.

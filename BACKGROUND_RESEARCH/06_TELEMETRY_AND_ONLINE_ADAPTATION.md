@@ -1,178 +1,217 @@
-# Subdirection D6: Structured Autoresearch, Automated Experiments, and Safe Adaptation
+# D6. Automated Experiments, Reveal, and Safe Adaptation
 
-## 1. Updated Research Object
+## 1. Revised Role
 
-The revised direction defines Autoresearch as an evidence-acquisition loop:
+The previous direction treated Structured Autoresearch as a broad
+evidence-acquisition loop. The mentor's paper skeleton makes its role more
+specific:
 
 ```text
-S_t = (W, R, G, P_t, D_t)
-
-observe
-  -> formulate a structured plan hypothesis
-  -> validate
-  -> select a decision-relevant experiment
-  -> execute and measure
-  -> update evidence
-  -> deploy, continue, refuse, or stop
+observations -> Adaptive Workload Model
+             -> OED Commit / Reveal / Hold
+             -> restoration or certified deployment
+             -> escalation when ambiguity is structural
 ```
 
-The central question is not generic self-tuning. Given a versioned representation DAG, the current `M/L/E` plan, and physical state, can the system select a low-cost experiment that changes an important planning decision? Candidate interventions include operator microbenchmarks, sampled representation materialization, transfer tests, and child-plan canaries.
-
-Active experiment selection, automated benchmarks, safe online exploration, canaries, transition-aware trial ordering, stopping, and rollback all have strong precedents. Autoresearch can be a distinct contribution only if representation-plan structure materially lowers total experimentation cost.
+D6 supplies experiment-selection and safe-execution mechanisms. The main
+research question is now whether those mechanisms can reveal censored,
+design-dependent workload behavior at acceptable cost.
 
 ## 2. Representative Work
 
-| Work | What It Achieves | Constraint and Lesson for This Project |
+| Work | Established capability | Implication |
 |---|---|---|
-| [iTuned, VLDB 2009](https://www.vldb.org/pvldb/vol2/vldb09-193.pdf) | Uses adaptive sampling to plan low-overhead database experiments and discover influential parameters and strong configurations | Active evidence acquisition and online experiment planning are not new |
-| [Ernest, NSDI 2016](https://pages.cs.wisc.edu/~shivaram/publications/ernest-nsdi.pdf) | Uses workload compute/communication structure and optimal experiment design to minimize training runs for performance models | Structural, information-efficient experiment selection is established; differentiation must come from plan decisions over representation DAGs |
-| [CherryPick, NSDI 2017](https://www.usenix.org/conference/nsdi17/technical-sessions/presentation/alipourfard/) | Uses Bayesian optimization to find near-optimal cloud configurations with few trials | A strong plan-level black-box baseline and evidence that learning a complete response surface is unnecessary |
-| [Online Physical Design Tuning, ICDE 2007](https://www.microsoft.com/en-us/research/publication/an-online-approach-to-physical-design-tuning/) | Continuously creates and drops indexes while accounting for creation cost and suppressing oscillation | Continuous physical design, future-benefit reasoning, and do-no-harm principles are established |
-| [To Tune or Not to Tune, VLDB 2006](https://www.microsoft.com/en-us/research/publication/to-tune-or-not-to-tune-a-lightweight-physical-design-alerter/) | Uses low-cost bounds to decide whether expensive tuning is worthwhile | Refusing low-value tuning is not a new system objective; it must be tied specifically to plan-ranking uncertainty |
-| [UDO, PVLDB 2021](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf) | Orders heavy and light parameter trials to reuse expensive structures and reduce reconfiguration overhead | Strong precedent for persistent experiment state and transition-aware ordering |
-| [MLOS, DEEM 2020](https://www.microsoft.com/en-us/research/publication/mlos-an-infrastructure-for-automated-software-performance-engineering/) / [MLOS in Action, PVLDB 2024](https://www.vldb.org/pvldb/vol17/p4269-kroth.pdf) | Provides reusable infrastructure for automated benchmarks, cross-VM experiments, metrics, result management, and optimizers | Experiment managers, evidence stores, and provenance are infrastructure patterns rather than contributions |
-| [KEA, 2021](https://arxiv.org/abs/2106.11445) | Combines observational tuning with cautious production flighting in large-scale data infrastructure | Passive evidence plus conservative online trials is already a production pattern |
-| [OnlineTune, 2022](https://arxiv.org/abs/2203.14473) | Applies contextual Bayesian optimization and black-/white-box safety constraints to dynamic cloud databases | Workload drift, context-aware tuning, and safe subspace exploration are mature |
-| [SelfTune, NSDI 2023](https://www.usenix.org/conference/nsdi23/presentation/karthikeyan) | Uses simple interfaces and online learning to tune production cluster-manager parameters | General self-tuning has been deployed at scale, though representation semantics are outside its scope |
-| [OPPerTune, NSDI 2024](https://www.usenix.org/conference/nsdi24/presentation/somashekar) | Automatically selects what and at what scope to tune while reducing post-deployment disruption | Automatic tuning-scope selection and low-disruption adaptation are strong baselines |
-| [Automatic Indexing in Oracle, PVLDB 2025](https://www.vldb.org/pvldb/vol18/p4924-chakkappen.pdf) | Incrementally discovers, isolates, validates, deploys, and reclaims index candidates with regression protection | Candidate isolation, safe deployment, rollback, and a complete physical-structure lifecycle are production capabilities |
-| [Seneca, FAST 2026](https://www.usenix.org/conference/fast26/presentation/desai) | Opportunistically samples concurrent jobs to calibrate allocation among encoded, decoded, and augmented caches | The closest empirical-adaptation precedent for representations, though not cross-node active `M/L/E` experimentation |
+| [iTuned, VLDB 2009](https://www.vldb.org/pvldb/vol2/vldb09-193.pdf) | Adaptive low-overhead database experiment planning | Active evidence acquisition is not new |
+| [Ernest, NSDI 2016](https://pages.cs.wisc.edu/~shivaram/publications/ernest-nsdi.pdf) | Structural models and optimal experiment design | Information-efficient structured sampling is established |
+| [CherryPick, NSDI 2017](https://www.usenix.org/conference/nsdi17/technical-sessions/presentation/alipourfard/) | Bayesian optimization with few cloud-configuration trials | Strong plan-level black-box baseline |
+| [To Tune or Not to Tune, VLDB 2006](https://www.microsoft.com/en-us/research/publication/to-tune-or-not-to-tune-a-lightweight-physical-design-alerter/) | Low-cost bounds for deciding whether tuning is worthwhile | Hold/refusal is not novel by itself |
+| [UDO, PVLDB 2021](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf) | Heavy/light trial ordering to amortize transitions | Strong stateful-experiment baseline |
+| [MLOS in Action, PVLDB 2024](https://www.vldb.org/pvldb/vol17/p4269-kroth.pdf) | Reusable experiment infrastructure and result management | Experiment manager and evidence store are substrate |
+| [KEA, 2021](https://arxiv.org/abs/2106.11445) | Observational tuning plus cautious production flighting | Passive evidence plus canaries is established |
+| [OnlineTune, 2022](https://arxiv.org/abs/2203.14473) | Contextual Bayesian optimization with safety constraints | Safe subspace exploration under drift is mature |
+| [SelfTune, NSDI 2023](https://www.usenix.org/conference/nsdi23/presentation/karthikeyan) | Online production tuning through simple interfaces | General self-tuning is not a contribution |
+| [OPPerTune, NSDI 2024](https://www.usenix.org/conference/nsdi24/presentation/somashekar) | Automatic choice of tuning scope with low disruption | Scope selection and low-disruption adaptation are strong baselines |
+| [Oracle Automatic Indexing, PVLDB 2025](https://www.vldb.org/pvldb/vol18/p4924-chakkappen.pdf) | Isolated validation, incremental deployment, regression protection, cleanup | Safe physical-design lifecycle is mature |
 
-## 3. State of the Art
+Bandit physical-design systems in D5 and performative/selective-feedback work
+in D8 are also required comparisons.
 
-### 3.1 Active experiment selection is not a new capability
+## 3. Mature Mechanisms to Reuse
 
-iTuned plans samples, Ernest uses optimal experiment design, and CherryPick and many Bayesian tuners choose subsequent configurations from prior results. The project cannot claim novelty from automatically selecting the next experiment.
+The following are implementation patterns, not standalone claims:
 
-The more precise question is whether structural differences between valid physical plans identify a shared unknown and permit a cheaper experiment than a complete plan trial. If several candidates differ mainly in storage-near decode throughput under current concurrency, the system should measure that component instead of running every full plan.
+- active sampling and optimal experiment design;
+- Bayesian and bandit exploration;
+- child plans, canaries, and namespaces;
+- deployment gates and regression protection;
+- rollback and restoration;
+- experiment provenance and replay;
+- transition-aware trial ordering;
+- drift detection and anti-thrashing; and
+- stopping when expected information or improvement value is too low.
 
-### 3.2 Experiment infrastructure and provenance are mature
+## 4. What Changes Under Performative Physical Design
 
-MLOS orchestrates benchmarks, collects metrics, and manages results; KEA combines observational models with production flighting. An Experiment Manager, Evidence Store, trial namespace, and versioned results are sensible architecture, but not contributions by themselves.
+### 4.1 The observation target is counterfactual workload
 
-The project can extend a generic `(configuration, score)` record to:
+A conventional canary asks how a known workload performs under a candidate.
+A Pathfinder Reveal also asks whether the candidate makes a representation
+accessible and thereby changes task choice, success, or future demand.
 
-```text
-(workload version,
- representation DAG,
- parent/child plan epoch,
- experiment intervention,
- reusable transition artifacts,
- operator/resource traces,
- decision outcome)
-```
+Telemetry must record the complete offered set, not only the selected path.
+For every task class and representation it must distinguish:
 
-Evaluation must show that these structured fields improve experiment selection.
+- quoted access price `p_qv(D)`;
+- felt latency after selection; and
+- realized physical cost.
 
-### 3.3 Safe continuous physical design has complete precedents
+Quote interventions and real physical interventions should be matched on
+`p_qv`; otherwise an apparent construct-validity result can be caused by
+different offers rather than equivalent access signals.
 
-Online Physical Design, Oracle Automatic Indexing, OnlineTune, and OPPerTune already cover continuous adaptation, candidate isolation, protected rollout, drift, and low-disruption exploration. The following should be described as adopted principles:
+### 4.2 A probe changes both knowledge and physical state
 
-- child-plan or candidate isolation;
-- promotion after a canary;
-- fallback to the origin or parent plan;
-- rollback by plan epoch;
-- stopping, refusal, and anti-thrashing; and
-- reopening the loop after workload drift.
+A Reveal may create a digest, embedding, replica, or transform output. After
+restoring `D_safe`, the observation remains; a valid artifact may also remain
+eligible for future adoption.
 
-### 3.4 Persistent experiment state and ordering are established
-
-UDO orders expensive trials so related configurations share transition work. The new opportunity is narrower: a sampled-frame shard created by a losing candidate may still be a legal parent for a later plan. Experiment outcomes are both measurements and changes to physical state.
-
-The system should distinguish:
-
-- **reusable work:** compatible, validated artifacts that future plans will consume;
-- **stranded work:** legal artifacts with no expected future demand;
-- **invalid work:** artifacts that fail compatibility or validation; and
-- **disruption:** cost imposed on foreground jobs without producing reusable state.
-
-## 4. Defensible Autoresearch Boundary
-
-### 4.1 Capabilities that cannot be claimed alone
-
-- automatically selecting the next experiment;
-- optimal experiment design, Bayesian optimization, or active learning;
-- finding a good configuration with few trials;
-- online tuning and drift adaptation;
-- safe exploration, canaries, and rollback;
-- stopping or deciding whether tuning is worthwhile;
-- accounting for configuration-switching cost;
-- automated benchmarking, trace stores, and experiment provenance; or
-- using an LLM to generate hypotheses or summarize traces.
-
-### 4.2 Specific research questions that may remain open
-
-#### A. Plan-difference-directed experiment selection
-
-The input is a set of semantically valid `M/L/E` plans, not a flat configuration. The system identifies which shared representation, operator, replica, or network-path terms can change their ranking, then selects a component benchmark, materialization sample, or child-plan canary.
-
-This is a domain-structured extension of iTuned, Ernest, and Bayesian optimization, not an entirely new experiment-design paradigm.
-
-#### B. Experiment as a physical-state transition
-
-An experiment may create an adoptable immutable representation shard, NVMe replica, or validated transform output. Selection must consider both information value and the effect on later state:
+The full probe cost is:
 
 ```text
-experiment_value =
-  expected plan-decision improvement
-  + expected reusable-artifact value
-  - measurement cost
-  - disruption
-  - non-reusable transition cost
+forward transition
++ probe execution
++ foreground degradation
++ restoration
+- defensible reusable-artifact value
 ```
 
-Comparison with UDO-style heavy-parameter scheduling must show that partial artifact reuse in the DAG leads to different ordering or measurable gains.
+Canary isolation limits blast radius but does not make this cost zero.
 
-#### C. Semantic intervention space
+### 4.3 Safe deployment and exploration are different sequences
 
-Lineage, randomness, model or tokenizer version, and quality contracts first determine which experiments are legal. Learned models or LLMs may rank valid child plans but cannot bypass correctness by observing good performance.
+The certified safe sequence contains only committed designs. Reveal executions
+are exploratory excursions and require separate loss and safety reporting.
+Restoring `D_safe` after a probe does not retroactively make probe foreground
+loss part of a no-regression guarantee.
 
-#### D. Multi-job resource externalities
+### 4.4 Some uncertainty is not probeable
 
-A candidate materialization consumes shared CPU, NVMe, and network resources and may evict another job's valuable representation. Telemetry must separate candidate benefit, background contention, and negative externalities imposed on other jobs.
+OED must expose:
 
-## 5. Implication for the Physical System
+- `G_cert`: candidates that can be conservatively evaluated;
+- `G_probe`: candidates reachable by an allowed bounded probe; and
+- `G_other`: candidates outside the current certificate and intervention set.
 
-A central controller with per-node Data Agents is a sensible implementation, but not an independent research contribution:
+Ordinary probes cannot justify a global claim while `G_other` is hidden.
+Escalation may expand the observation or candidate space, or the system may
+Hold.
 
-- the controller, catalog, plan registry, and evidence store form a familiar automated-experiment control plane;
-- per-node agents, candidate namespaces, plan epochs, and fallback implement safe execution;
-- immutable shards, fingerprints, and replica state connect D4 semantics to D3 placement; and
-- child plans differ from ordinary canaries only if they support plan-difference experiments and reusable artifact adoption.
+### 4.5 Reveal resolution is indexed by predeclared price levels
 
-Implementation should first establish repeatable Plans A/B/C and complete the G0 interaction study. If the physical planner has no close decisions that an analytical model cannot resolve, an Autoresearch layer is unnecessary.
+For each task-class/representation pair, declare before the run:
 
-## 6. Required Evaluation Baselines
+```text
+P_qv = { p_qv(D) : D in D_gov and p_qv(D) is within the access gate }
+```
 
-Compare from the same initial plan and evidence state:
+The general Reveal-resolution bound is `sum_{q,v} |P_qv|`. It becomes
+`|Q||V|` only if every executed Reveal is pair-canonical, and becomes `|V|`
+only if every executed Reveal is simultaneously canonical for all affording
+classes. The selection policy should therefore prefer:
 
-1. analytical-only planning with no active experiments;
-2. passive trace collection;
-3. random plan trials;
-4. plan-level Bayesian optimization or a CherryPick-style method;
-5. optimal-design/component sampling without `M/L/E` plan differences;
-6. UDO-style heavy/light trial ordering;
-7. structured plan search with traces but random experiment selection;
-8. full structured Autoresearch; and
-9. an oracle with all trial outcomes on a reduced instance.
+1. simultaneously canonical Reveals;
+2. pair-canonical Reveals; and
+3. any remaining budget-feasible Reveal.
 
-All methods must share the same legal plan space, measurement and disruption budget, initial artifacts, transition-cost accounting, artifact-adoption rules, workload slice, and background concurrency.
+The recorded tier is part of the theorem audit. A uniform affordability gate
+does not by itself justify the smaller bounds.
 
-Key metrics are:
+### 4.6 Quote sufficiency is a gate; exogeneity is a schedule contract
 
-- validated plan quality versus cumulative total experiment cost;
-- wall-clock time and foreground disruption to reach the target plan;
-- useless, stranded, and invalid materialization bytes;
-- fraction of trial artifacts adopted by later plans;
-- stopping and refusal accuracy; and
-- plan-ranking accuracy and consequences of wrong decisions.
+The current AWM assumes the response can be written as `eta(p(D))` and
+`rho(p(D))`. A factorial experiment must hold the quote fixed while varying
+felt latency. If the conditional effect is material, either reserve latency
+tightly per quote or expand the response model; until then, scalar-price
+certificates and Reveal counts are invalid.
 
-## 7. Implication for This Project
+Queued sessions impose the exogeneity needed by the current theory. This is
+not an empirical falsification gate. Instead, evaluation should deliberately
+introduce re-arrivals or other feedback and report how quickly the guarantees
+and decisions degrade outside the imposed scope.
 
-Adding explicit Autoresearch makes the thesis clearer but harder. Related work already covers active sampling, optimal experiment design, automated infrastructure, safe production flighting, continuous physical design, expensive-trial scheduling, and rollback.
+## 5. Defensible OED/Autoresearch Boundary
 
-The most credible current statement is:
+The proposed increment is not "AI runs experiments." It is:
 
-> We study structured Autoresearch for versioned multimodal `M/L/E` physical planning. The system uses plan differences and a representation DAG to select decision-relevant experiments, while treating reusable representation artifacts created by trials as part of subsequent physical state.
+> Given a coupled ambiguity set for design-induced agent behavior and a
+> stateful representation path, select a Commit, Reveal, or Hold action while
+> accounting for transition, restoration, and reusable probe artifacts.
 
-This remains a gap assessment, not a formal first-of-its-kind result. If plan-difference selection and artifact-aware scheduling do not beat Bayesian optimization, generic optimal design, and UDO-style baselines at equal budget, Autoresearch should become an implementation mechanism and the paper should center on representation-aware joint physical planning.
+The following elements must jointly matter:
+
+- task-class and affordability structure;
+- substitution-aware AWM bounds;
+- candidate differences over `M/L/E`;
+- fixed, class-specific executable price-level sets `P_qv`;
+- candidate-relative certificates;
+- restoration to `D_safe`; and
+- artifact-aware probe cost.
+
+If a standard bandit or Bayesian tuner performs equally well, these additional
+mechanisms are not justified.
+
+## 6. Escalation Ladder
+
+When AWM bounds are too wide and no ordinary Reveal has positive robust value,
+Pathfinder may:
+
+1. run an operator or path microbenchmark;
+2. partially materialize a representation;
+3. widen the task/session sample;
+4. use another predeclared access profile;
+5. refine a task class or substitution group;
+6. expand candidate generation; or
+7. request external resolution of a semantic or policy ambiguity.
+
+Every escalation must name the decision bound it can change. Otherwise it is
+generic measurement and should be refused.
+
+## 7. Required Baselines and Metrics
+
+Compare from the same `D_safe`, history, artifacts, candidate space, and full
+budget:
+
+1. fixed analytical planning;
+2. passive observation;
+3. random feasible probes;
+4. plan-level Bayesian optimization;
+5. contextual/combinatorial bandits;
+6. UDO-style heavy/light ordering;
+7. AWM without active Reveal;
+8. OED without artifact reuse;
+9. full AWM + OED + escalation; and
+10. a reduced exhaustive oracle.
+
+Report:
+
+- safe design value versus cumulative full exploration cost;
+- Commit/Reveal/Hold and escalation counts;
+- simultaneously canonical, pair-canonical, and fallback Reveal counts;
+- resolved `P_qv` levels and the applicable Reveal bound;
+- false-safe and false-hopeless decisions;
+- bound coverage and width;
+- candidate-value, incumbent-value, and transition-cost contributions to
+  `delta_t`;
+- forward, foreground, and restoration costs;
+- quoted `p_qv`, felt latency, realized cost, and their conditional effects;
+- safe-sequence regressions;
+- retained observations and adopted probe artifacts; and
+- the fraction and oracle value of `G_other`.
+
+## 8. Main Takeaway
+
+Automated experiments, canaries, rollback, safe tuning, and transition-aware
+trial ordering are mature. Pathfinder's possible increment is a Reveal policy
+for censored endogenous demand under coupled ambiguity, where probes alter a
+costly representation graph and certificates are explicitly limited to the
+modeled candidate pools.

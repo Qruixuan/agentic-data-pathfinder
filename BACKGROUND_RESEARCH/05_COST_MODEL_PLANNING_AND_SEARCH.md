@@ -1,125 +1,199 @@
-# Subdirection D5: Cost Models, Physical Planning, and Search
+# D5. Cost Models, Physical Planning, and Search
 
 ## 1. Scope
 
-This subdirection represents system choices as physical plans, estimates their time and resource costs, and selects executable plans under capacity, correctness, and service constraints. Techniques include dynamic programming, ILP, heuristic search, Bayesian optimization, reinforcement learning, and learned performance models.
+This subdirection represents system choices as physical designs and selects
+executable designs under capacity, correctness, and service constraints.
+Pathfinder uses:
 
-This project is not a generic knob tuner. It searches a structured plan `P = (M, L, E)`: a representation DAG constrains materialization `M`; capacity and topology constrain locations `L`; and operator dependencies and compatibility constrain execution paths `E`. Preserving this structure is the principal distinction from black-box configuration tuning.
+```text
+D = (M, L, E)
+```
+
+where a representation DAG constrains materialization `M`, topology and
+capacity constrain layout `L`, and operator dependencies constrain execution
+and delivery `E`.
+
+Conventional physical design normally evaluates candidates against an observed
+or forecast workload. Pathfinder adds a second layer: the agentic portion of
+the workload is induced by the design, `W(D)`. D5 supplies the physical state
+and transition model; D8 supplies the endogenous-workload model.
 
 ## 2. Representative Work
 
-| Work | Planning Capability | Implication and Boundary |
+| Work | Established capability | Boundary for Pathfinder |
 |---|---|---|
-| [KeystoneML, ICDE 2017](https://shivaram.org/publications/keystoneml-icde17.pdf) | Selects ML pipeline physical operators and intermediate materializations using end-to-end computation and communication costs | Proves database-style physical planning for ML workflows; this project must add distributed, versioned representation replicas and continuous adaptation |
-| [JellyBean, PVLDB 2023](https://users.cs.duke.edu/~ml579/papers/jellybean_vldb23.pdf) | Selects model variants and worker allocations across edge, local, and cloud resources under compute, network, cost, and accuracy constraints | Provides heterogeneous operator/model placement without long-lived materialization and cross-job caching |
-| [HyCache, ATC 2025](https://www.usenix.org/conference/atc25/presentation/jha) | Profiles preprocessing stages and optimizes the cached stage plus DRAM/SSD tier | Strong precedent for `M` and part of `L`, but primarily local and without a global transformation path |
-| [Seneca, FAST 2026](https://www.usenix.org/conference/fast26/presentation/desai) | Uses performance models and online samples to allocate cache among encoded, decoded, and augmented forms | Close to representation-aware caching, but with a more fixed topology and execution structure |
-| [Blaze, EuroSys 2024](https://doi.org/10.1145/3627703.3629558) | Unifies cache, eviction, memory/disk placement, and recovery for iterative computation | Shows the benefit of unified planning, but targets Spark state rather than multimodal versions and transformation boundaries |
-| [Compression-Aware Physical Database Design, PVLDB 2011](https://www.vldb.org/pvldb/vol4/p657-kimura.pdf) | Jointly selects indexes and compression and shows that staged decisions can be suboptimal | Direct precedent for interacting physical-design choices; this project must demonstrate a different object and mechanism for `M/L/E` coupling |
-| [Online Physical Design Tuning, ICDE 2007](https://www.microsoft.com/en-us/research/publication/an-online-approach-to-physical-design-tuning/) | Continuously monitors workloads, creates or drops indexes, and balances future benefit, creation cost, and anti-thrashing safeguards | Establishes continuous physical design, transition costs, and do-no-harm principles |
-| [Budget-Conscious Fine-Grained Configuration, PVLDB 2022](https://www.vldb.org/pvldb/vol15/p4079-richly.pdf) | Jointly optimizes compression, sorting, indexing, and tiering with reconfiguration cost and workload robustness | Strong multidimensional physical-design precedent for relational partitions rather than distributed representation paths |
-| [Automatic Indexing in Oracle, PVLDB 2025](https://www.vldb.org/pvldb/vol18/p4924-chakkappen.pdf) | Automates candidate discovery, isolation, validation, creation, deployment, regression protection, and reclamation | Shows that production-safe validation, incremental deployment, and accountability are mature |
-| [UDO, PVLDB 2021](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf) | Distinguishes expensive and cheap database parameters and orders trials to amortize expensive transitions | Directly motivates experiment scheduling for materialization and migration, but searches a DBMS configuration space |
-| [LlamaTune, PVLDB 2022](https://www.vldb.org/pvldb/vol15/p2953-kanellis.pdf) | Uses domain knowledge and search-space reduction to improve DBMS tuning sample efficiency | Reinforces the value of structural priors; this project should prune with a representation DAG before applying a generic tuner |
+| [KeystoneML, ICDE 2017](https://shivaram.org/publications/keystoneml-icde17.pdf) | Cost-based ML-pipeline operators and intermediate materialization | Does not model distributed, persistent representations that change agent access |
+| [JellyBean, PVLDB 2023](https://users.cs.duke.edu/~ml579/papers/jellybean_vldb23.pdf) | Heterogeneous model/operator placement under compute, network, cost, and quality constraints | No long-lived representation DAG or endogenous task response |
+| [HyCache, ATC 2025](https://www.usenix.org/conference/atc25/presentation/jha) | Chooses cached preprocessing stage and DRAM/SSD allocation | Strong representation-cache baseline; topology and demand response are narrower |
+| [Seneca, FAST 2026](https://www.usenix.org/conference/fast26/presentation/desai) | Allocates cache among encoded, decoded, and augmented forms using models and samples | Close representation-aware adaptation without the same cross-node access feedback |
+| [Blaze, EuroSys 2024](https://doi.org/10.1145/3627703.3629558) | Unifies cache, eviction, tier placement, and recovery for iterative computation | Targets iterative compute state rather than agent-affordable multimodal paths |
+| [Compression-Aware Physical Design, PVLDB 2011](https://www.vldb.org/pvldb/vol4/p657-kimura.pdf) | Shows coupled compression/index decisions can defeat staged optimization | Strong precedent: multiple interacting physical decisions are not themselves new |
+| [Budget-Conscious Physical Design, PVLDB 2022](https://www.vldb.org/pvldb/vol15/p4079-richly.pdf) | Joint compression, sorting, indexing, tiering, and reconfiguration cost | Strong transition-aware joint-design baseline for relational partitions |
+| [Online Physical Design Tuning, ICDE 2007](https://www.microsoft.com/en-us/research/publication/an-online-approach-to-physical-design-tuning/) | Continuous index create/drop with benefit, creation cost, and anti-thrashing | Continuous and transition-aware physical design are established |
+| [UDO, PVLDB 2021](https://www.vldb.org/pvldb/vol14/p3402-wang.pdf) | Orders expensive and cheap trials to reuse transition work | Direct baseline for stateful experiment ordering |
+| [Oracle Automatic Indexing, PVLDB 2025](https://www.vldb.org/pvldb/vol18/p4924-chakkappen.pdf) | Candidate discovery, isolation, validation, deployment, regression protection, and cleanup | Production-safe physical-structure lifecycle is established |
+| [DBA Bandits, ICDE 2021](https://renata.borovica-gajic.com/data/2021_icde.pdf) | Learns online index value through direct exploration with safety guarantees | Workload evolves but is not modeled as caused by representation affordability |
+| [HMAB, PVLDB 2022](https://www.vldb.org/pvldb/vol16/p216-perera.pdf) | Hierarchical bandits for integrated index/materialized-view design | Strong combinatorial exploration baseline |
 
 ## 3. State of the Art
 
-### 3.1 Database-style physical planning for ML pipelines already exists
+### 3.1 Joint physical design is established
 
-KeystoneML jointly optimizes physical operators, computation, communication, and intermediate materialization. JellyBean maps ML operators and model variants onto heterogeneous locations. “The first cost-based optimizer for an ML dataflow” is therefore not a defensible claim.
+Prior work already jointly selects operators, intermediate results, caches,
+compression, indexes, tiering, and placement. Pathfinder cannot claim novelty
+from the tuple `D=(M,L,E)` alone.
 
-The new abstraction must lead to different plans: multiple physical representations persist across jobs; transformations change network bytes; and one representation may have replicas across tiers and nodes. If these properties do not change optimal choices in evaluation, the problem collapses to established workflow placement.
+The narrower physical distinction is a distributed representation path:
+transformations may expand then contract bytes, one parent can serve several
+tasks or workload modes, and layout changes both transform resources and the
+access profile offered to an agent.
 
-### 3.2 Joint physical design and transition-aware tuning have strong prior art
+### 3.2 Transition-aware continuous control is established
 
-HyCache, Seneca, and Blaze show that performance models combined with constrained combinatorial optimization are viable when candidates and capacities are measurable. Relational physical-design work further shows that compression, indexing, sorting, and tiering can be solved jointly and that decoupled selection can perform poorly.
+Creation cost, switching cost, trial ordering, protected rollout, rollback, and
+anti-thrashing all have strong precedents. Pathfinder should reuse them.
 
-Budget-Conscious Physical Design includes reconfiguration cost. Online Physical Design balances creation cost, future benefit, and thrashing. Thus, neither “jointly optimize multiple physical decisions” nor “include transition cost” is a standalone contribution. The project must demonstrate a genuinely different state space in which transform placement determines the materialized object, representations are reusable across jobs, and replicas span nodes.
+The additional state is that a Reveal can create a representation shard that
+remains useful after restoration. Transition cost is therefore a function of
+the current valid artifact graph, not only a scalar assigned to a pair of
+configurations.
 
-### 3.3 Generic black-box tuning is crowded and poorly matched to structured plans
+### 3.3 Bandits and generic tuners are necessary baselines
 
-UDO, LlamaTune, and many system tuners optimize numerical and categorical settings. Flattening `M/L/E` into booleans and enums for Bayesian optimization or RL would produce:
+Flattening the problem into booleans and categories risks illegal encodings and
+poor transfer, but black-box, Bayesian, contextual-bandit, and combinatorial-
+bandit approaches remain strong equal-budget baselines. Pathfinder needs to
+show that representation/task structure improves identification or reduces
+exploration cost.
 
-- many illegal or semantically incorrect combinations;
-- redundant encodings of the same logical path;
-- poor transfer to new DAG sizes or cluster topologies;
-- weak treatment of one-time materialization and migration effects; and
-- little explanation of why joint plans outperform local policies.
+### 3.4 Conventional planners assume an exogenous objective
 
-Generic tuners are valuable equal-budget baselines, but should not be the core architecture.
+Even adaptive physical-design systems typically optimize performance for
+queries that arrive independently of the selected physical structures. They
+may handle drift in the observed workload without modeling the design as the
+cause of that workload.
 
-### 3.4 Reconfiguration costs and trial order should be inherited
-
-UDO orders expensive configuration trials so related candidates share transition work. Online Physical Design and Oracle Automatic Indexing provide direct precedents for continuous monitoring, candidate isolation, protected deployment, and anti-thrashing. The objective must compare not only steady-state performance but also the cost of moving from the current state into a candidate plan.
-
-## 4. Recommended Planning Framework
-
-### 4.1 Layered search
-
-```text
-semantic validation
-  -> enumerate compatible representation and transform paths
-  -> enumerate feasible locations and replica counts
-  -> rank with analytical models and constrained optimization
-  -> run a small number of trials for uncertain close candidates
-  -> deploy after accounting for transition cost
-```
-
-The layers are:
-
-1. **Legality:** lineage, determinism, versions, quality, and operator dependencies.
-2. **Candidate generation:** remove dominated representations and locations.
-3. **Static planning:** estimate CPU, storage, network, and reuse benefit under budgets.
-4. **Empirical correction:** measure only candidates whose rankings are both consequential and uncertain.
-5. **Deployment:** evaluate `transition_cost(P_old -> P_new)` and support gradual switching and rollback.
-
-### 4.2 Interpretable cost decomposition
-
-For reuse horizon `H`:
+Pathfinder's objective instead separates:
 
 ```text
-Total(P, H) = Transition(P_old, P)
-            + Materialize(P, H)
-            + Read(P, H)
-            + Transform(P, H)
-            + Transfer(P, H)
-            + QueueingCorrection(P, observed_state)
+Phi(D) = session value under W(D)
+
+Gain(D_t -> D') =
+  Phi(D') - Phi(D_t) - Transition(D_t, D')
 ```
 
-Sizes, operator service times, and path bandwidths come from representation metadata and profiles. Trace-guided corrections handle shared-resource queues, skew, and cache interference. The first prototype should minimize total completion time over the horizon while treating monetary cost and capacity as constraints, avoiding premature multi-objective weighting.
+The first term is not reliably estimable from an incumbent trace when access
+to a candidate representation is censored.
 
-### 4.3 Separate decision timescales
+## 4. Recommended Planning Decomposition
 
-- **Slow:** large representation materialization, cross-node migration, and replica topology.
-- **Medium:** transform-worker placement and task-to-replica mapping.
-- **Fast:** prefetch, parallelism, batch, and chunk parameters.
+```text
+semantic and governance feasibility
+  -> structured candidate generation
+  -> physical cost and transition model
+  -> AWM lower/upper session-value bounds
+  -> OED Commit / Reveal / Hold
+  -> deployment, restoration, or escalation
+```
 
-The first paper should focus on slow and medium decisions while delegating fast knobs to existing loaders or local controllers. This keeps the search space manageable and follows UDO's distinction between expensive and cheap changes.
+The physical model should include:
 
-## 5. Remaining Research Gaps
+- materialization and reuse;
+- read, transform, transfer, and queueing cost;
+- placement and capacity;
+- transition, foreground disruption, and restoration;
+- valid reusable state left by previous probes; and
+- fixed training/analytics contributions.
 
-### 5.1 Unified versioned representation, location, and transform-path planning
+The access model must expose a class-specific quoted access-price matrix
+`p_qv(D)`: the same representation can be local to one consumer and remote to
+another. It must also keep felt latency and realized resource cost separate
+from that quote. The former may change behavior; the latter is used for
+resource accounting and must not be silently substituted for the signal that
+caused the access decision.
 
-Prior work covers many pairwise combinations. In the reviewed literature, a planner that simultaneously treats a versioned representation DAG as the physical-design object, globally chooses cross-node and cross-tier replicas, and selects transformation or delivery split points remains a plausible gap. This is a literature-based assessment, not yet a formal “first” claim.
+Before a run, the candidate generator must induce and freeze the executable
+price-level universe:
 
-### 5.2 Coupling created by data expansion and contraction
+```text
+P_qv = { p_qv(D) : D in D_gov and p_qv(D) is within the access gate }
+```
 
-Ordinary placement models count communication and ordinary caches count object size. Here, a cache choice changes the representation that crosses the next link, and one upstream materialization can serve multiple downstream paths. The cost model and experiments must explicitly expose this interaction rather than merely adding more decision variables.
+This is a property of the declared design domain, not a list reconstructed
+from prices encountered during exploration.
 
-### 5.3 Artifact-aware transition graphs
+## 5. Remaining Gaps
 
-Transition-aware planning itself is established. A more specific possible increment is that experiments create versioned representation shards; a losing candidate may leave a legal parent representation that a later plan can adopt; and replication, transformation, and location changes can share part of a transition.
+### G5.1 Performative representation-path planning
 
-The system should model generation, replication, migration, warm-up, adoption, invalidation, and cleanup in one artifact-aware transition graph, and compare this with assigning each configuration switch an independent scalar cost.
+Jointly choose `M/L/E` when the design changes agent access and hence the
+workload used to value the design.
 
-### 5.4 Plan-difference-directed targeted experiments
+### G5.2 Coupled physical and behavioral uncertainty
 
-Analytical models struggle with shared links and CPU queues, while pure black-box trials are expensive. Active sampling, optimal design, and Bayesian optimization are already established. The narrower opportunity is to derive uncertain terms from differences among candidate `M/L/E` plans, choose a component, materialization, or canary experiment that resolves their ranking, and account for reusable artifacts created by that experiment.
+The same design changes availability, quote, latency, contention, and task
+success. Bounds must respect shared task and substitution constraints rather
+than combine independent worst-case endpoints.
 
-This approach should be compared at equal budget with analytical-only planning, plan-level Bayesian optimization, generic optimal design, and UDO-style ordering.
+The current scalar-price response model additionally assumes quoted-price
+sufficiency: conditional on `p(D)`, changing felt latency does not materially
+change access or success. This assumption requires a factorial quote/latency
+test. If it fails, the physical layer must tightly reserve latency for each
+quote or AWM must expand to a response such as `eta(p, latency)` and
+`rho(p, latency)`; the scalar-price Reveal-count result then no longer applies.
 
-## 6. Implication for This Project
+### G5.3 Artifact-aware exploration transitions
 
-The most suitable technical path is structured, database-style physical planning with limited empirical calibration, not an undifferentiated “AI tunes the system” story. KeystoneML, JellyBean, HyCache, and Blaze are close data-path precedents; relational physical-design and tuning work closes off broad claims about joint design, switching cost, and continuous deployment.
+A losing probe can leave reusable state. The controller must decide what to
+retain, promote, restore, or delete and compare against UDO-style heavy/light
+ordering and scalar switch-cost models.
 
-The planner is research-worthy only if representation graphs and `M/L/E` coupling systematically make local methods choose the wrong plan. The contribution should center on cross-node representation-transformation paths and reusable transition artifacts, not on relabeling the established autonomous physical-design lifecycle.
+### G5.4 Candidate-relative certification
+
+Candidate generation is part of the guarantee. The system must distinguish
+certified candidates, probeable candidates, and `G_other`, and quantify the
+opportunity excluded by the latter. Reveal resolution is price-level indexed:
+the general bound is `sum_{q,v} |P_qv|`; it reduces to `|Q||V|` only when every
+Reveal is pair-canonical, and to `|V|` only when every Reveal is simultaneously
+canonical for all classes that can afford the representation. Uniform access
+gates alone do not imply either reduced bound.
+
+### G5.5 Robust switching under physical-cost uncertainty
+
+Commit and anti-thrashing tests must handle time-uniform confidence sets for
+candidate value, incumbent value, and transition cost. The stability margin
+therefore includes all three widths:
+
+```text
+delta_t =
+  candidate-value width
+  + incumbent-value width
+  + transition-cost width
+```
+
+Termination should follow from a finite legal design domain and the fixed
+finite `P_qv` sets. A finite exploration purse limits exposure, but is not a
+proof of termination; neither is an assumed positive minimum excursion cost.
+
+## 6. Required Counterfactuals
+
+The physical-planning part is justified only if:
+
+1. joint `M/L/E` beats strong independent and sequential methods using the same
+   primitives;
+2. fixed-workload planning selects an inferior design because it misses
+   design-induced access;
+3. AWM/OED improves on bandit and black-box exploration at equal full cost;
+4. artifact-aware transition reasoning changes useful decisions; and
+5. quote-only and physical interventions agree after matching on `p_qv`, and
+   quoted-price sufficiency survives a direct felt-latency intervention; and
+6. the result survives materialization, probe, restoration, bounded
+   cost-confidence, and telemetry accounting.
+
+## 7. Main Takeaway
+
+Pathfinder is not the first joint, online, transition-aware, or empirically
+calibrated physical designer. The possible gap is the optimization of a
+distributed representation path whose physical access changes the agentic
+workload itself, combined with partial identification and stateful probes.
