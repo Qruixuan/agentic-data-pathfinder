@@ -1,0 +1,1 @@
+PATHFINDER FIXTURE ONLY: nearest event at 00:17 is red_car_enters_tunnel.

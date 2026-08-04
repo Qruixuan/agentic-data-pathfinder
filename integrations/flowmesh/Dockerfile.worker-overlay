@@ -1,0 +1,9 @@
+ARG FLOWMESH_WORKER_IMAGE
+FROM ${FLOWMESH_WORKER_IMAGE}
+
+USER root
+COPY agent_configs/pathfinder_video.yaml \
+    /app/worker/executors/agent/configs/agents/pathfinder_video.yaml
+RUN chown appuser:appuser \
+    /app/worker/executors/agent/configs/agents/pathfinder_video.yaml
+USER appuser

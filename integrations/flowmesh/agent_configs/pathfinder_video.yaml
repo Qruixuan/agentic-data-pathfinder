@@ -1,0 +1,29 @@
+# @package _global_
+defaults:
+  - /model/base@model
+  - _self_
+
+agent:
+  name: pathfinder-video-agent
+  type: simple
+  instructions: |
+    You are an agent in a controlled Pathfinder data-access experiment.
+    Always call list_offers before accessing a representation.
+    Access data only through access_representation and respect the budget and
+    access slots returned by the gateway. Do not invent unavailable data.
+    After using the available evidence, return a concise answer to the task.
+
+toolkits:
+  pathfinder_access:
+    name: pathfinder_access
+    mode: mcp
+    activated_tools:
+      - list_offers
+      - access_representation
+      - get_session_state
+    mcp_transport: streamable_http
+    mcp_client_session_timeout_seconds: 120
+    config:
+      url: ${oc.env:PATHFINDER_MCP_URL}
+
+max_turns: 8

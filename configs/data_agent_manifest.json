@@ -1,0 +1,79 @@
+{
+  "schema_version": "pathfinder.data-agent-manifest/v1alpha1",
+  "node_id": "pathfinder-fixture-node",
+  "require_plan_binding": true,
+  "representations": {
+    "compressed_video": {
+      "kind": "artifact_uri",
+      "media_type": "application/octet-stream",
+      "path": "../data/fixtures/compressed_video_fixture.bin",
+      "default_binding": {
+        "minimum_latency_ms": 0,
+        "realized_cost": 0,
+        "cache_hit": null
+      },
+      "plan_bindings": {
+        "D_structured_digest": {
+          "location": "object_store",
+          "minimum_latency_ms": 180,
+          "realized_cost": 0.45,
+          "cache_hit": false
+        }
+      }
+    },
+    "sampled_frames": {
+      "kind": "artifact_uri",
+      "media_type": "application/json",
+      "path": "../data/fixtures/sampled_frames_fixture.json",
+      "default_binding": {
+        "minimum_latency_ms": 0,
+        "realized_cost": 0,
+        "cache_hit": null
+      },
+      "plan_bindings": {
+        "D_structured_digest": {
+          "location": "shared_nvme",
+          "minimum_latency_ms": 75,
+          "realized_cost": 0.35,
+          "cache_hit": true
+        }
+      }
+    },
+    "embeddings": {
+      "kind": "inline_text",
+      "media_type": "text/plain",
+      "path": "../data/fixtures/embeddings_fixture.txt",
+      "default_binding": {
+        "minimum_latency_ms": 0,
+        "realized_cost": 0,
+        "cache_hit": null
+      },
+      "plan_bindings": {
+        "D_structured_digest": {
+          "location": "shared_nvme",
+          "minimum_latency_ms": 55,
+          "realized_cost": 0.25,
+          "cache_hit": true
+        }
+      }
+    },
+    "multimodal_digest": {
+      "kind": "inline_text",
+      "media_type": "text/plain",
+      "path": "../data/fixtures/multimodal_digest_fixture.txt",
+      "default_binding": {
+        "minimum_latency_ms": 0,
+        "realized_cost": 0,
+        "cache_hit": null
+      },
+      "plan_bindings": {
+        "D_structured_digest": {
+          "location": "remote_digest_service",
+          "minimum_latency_ms": 210,
+          "realized_cost": 1.6,
+          "cache_hit": false
+        }
+      }
+    }
+  }
+}

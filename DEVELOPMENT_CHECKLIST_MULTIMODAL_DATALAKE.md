@@ -80,6 +80,36 @@ physical design and an agent session.
 - [ ] Select catalog, RPC, transfer, and telemetry interfaces.
 - [ ] Record every unverified infrastructure assumption and fallback.
 
+### Current FlowMesh Coupling Status
+
+- [x] Add a public-SDK adapter for submitting one FlowMesh `AgentTask`,
+  waiting for its terminal state, and retrieving the result.
+- [x] Add a Pathfinder-owned MCP gateway for class-specific offers,
+  representation access, budget enforcement, and agent-visible session state.
+- [x] Persist runner/gateway session state and hidden access telemetry in an
+  MVP SQLite store.
+- [x] Keep quoted price, felt latency, and hidden realized cost separate at
+  the FlowMesh boundary.
+- [x] Add a thin worker-image overlay that installs the Pathfinder agent
+  configuration without changing the FlowMesh source tree.
+- [x] Add a versioned, idempotent HTTP `DataAgentClient`, typed payload
+  descriptors, observed round-trip latency, and a remote gateway backend.
+- [x] Add Gateway configuration for selecting a remote Data Agent without
+  changing FlowMesh.
+- [x] Cover submission, result parsing, offer visibility, budget rejection,
+  and access-count rejection with fake-client integration tests.
+- [ ] Run the live Linux FlowMesh smoke test with model credentials and verify
+  worker-to-MCP network reachability.
+- [ ] Replace the emulated representation backend before collecting scientific
+  results.
+- [x] Implement the Data Agent server-side `/v1/access` contract, persistent
+  idempotency, controlled latency, and a local-filesystem backend.
+- [x] Add stable object IDs, an object-aware local representation catalog, and
+  artifact-download byte/time telemetry joined to the originating session.
+- [ ] Add object-store access and deterministic transform execution.
+- [ ] Replace SQLite with distributed transactional state before using multiple
+  gateway replicas.
+
 ### Recommended Code Boundaries
 
 ```text

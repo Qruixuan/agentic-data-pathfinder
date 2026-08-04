@@ -1050,15 +1050,52 @@ FlowMesh control and execution plane
 Pathfinder PPD planner, AWM, and OED controller
 ```
 
-Before implementation, FlowMesh's actual interfaces and current capabilities
-must be verified. This document lists an intended integration, not an assertion
-that all hooks already exist.
+Source-level inspection of the current FlowMesh checkout confirms two narrow
+extension points that are sufficient for the first real-agent slice:
+
+- the public Python SDK can submit and wait for a native `AgentTask`, then
+  retrieve its result; and
+- the UTU-backed `AgentExecutor` can load a Hydra agent configuration with a
+  Streamable HTTP MCP toolkit.
+
+The first coupling layer therefore stays entirely in Pathfinder:
+
+```text
+Pathfinder session runner
+    -> FlowMesh public SDK
+    -> FlowMesh AgentExecutor and UTU agent
+    -> Pathfinder MCP AccessGateway
+    -> representation backend
+```
+
+The runner creates a session and places its opaque `session_id` in the agent
+task. The MCP gateway is the sole interface through which that agent can list
+offers, access a representation, or inspect its remaining budget. A shared
+SQLite store connects the runner process and gateway process for the
+single-machine MVP. The FlowMesh worker receives only an additional agent
+configuration through a thin overlay image; the FlowMesh source tree is not
+modified.
+
+This source-level compatibility is covered by fake-client integration tests.
+The coupling now also includes a versioned HTTP DataAgentClient and a
+single-node, manifest-backed local-filesystem Data Agent server with persistent
+idempotency, stable object-aware catalog lookup, signed artifact delivery, and
+post-download byte/time telemetry attributed by `access_id`. The FlowMesh
+session runner reconciles completed transfer telemetry into the corresponding
+Gateway access event. A live Linux deployment is still required to verify
+worker placement, network reachability, model credentials, lifecycle
+propagation, and the exact deployed result envelope. SQLite state, fixture
+data, and single-endpoint routing are MVP components, not the final distributed
+design.
 
 FlowMesh remains responsible for workflow dependencies, worker allocation, and
 task lifecycle. The new system owns representation identity, physical replica
 state, data-path bindings, trial provenance, and optimization decisions. This
 boundary prevents the research prototype from becoming a replacement workflow
 scheduler.
+
+The implementation and deployment procedure are documented in
+[`integrations/flowmesh/README.md`](integrations/flowmesh/README.md).
 
 ## Minimum Implementation Slice
 

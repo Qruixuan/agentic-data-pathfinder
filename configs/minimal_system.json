@@ -1,0 +1,350 @@
+{
+  "schema_version": "1.0",
+  "price_universe_version": "minimal-video-v1",
+  "objective": {
+    "resource_cost_weight": 1.0
+  },
+  "representations": [
+    {
+      "id": "compressed_video",
+      "description": "Compressed source video read through the selected path.",
+      "size_bytes": 20000000,
+      "task_quality": {
+        "video_qa": 0.35,
+        "event_search": 0.25
+      }
+    },
+    {
+      "id": "sampled_frames",
+      "description": "Deterministically sampled RGB frames.",
+      "size_bytes": 8000000,
+      "task_quality": {
+        "video_qa": 0.7,
+        "event_search": 0.65
+      }
+    },
+    {
+      "id": "embeddings",
+      "description": "Reusable frame and clip embeddings.",
+      "size_bytes": 2000000,
+      "task_quality": {
+        "video_qa": 0.62,
+        "event_search": 0.9
+      }
+    },
+    {
+      "id": "multimodal_digest",
+      "description": "Expensive structured digest with temporal events and captions.",
+      "size_bytes": 1000000,
+      "task_quality": {
+        "video_qa": 0.95,
+        "event_search": 0.85
+      }
+    }
+  ],
+  "task_classes": [
+    {
+      "id": "video_qa",
+      "description": "Answer a question requiring evidence from the video.",
+      "candidate_representations": [
+        "compressed_video",
+        "sampled_frames",
+        "embeddings",
+        "multimodal_digest"
+      ],
+      "access_budget": 6,
+      "max_accesses": 1,
+      "task_value": 10,
+      "quality_weight": 9,
+      "price_weight": 1.0,
+      "outside_option_utility": 2.0,
+      "choice_noise": 0.35,
+      "success_midpoint": 0.6,
+      "success_temperature": 0.12,
+      "latency_reference_ms": 250,
+      "latency_success_penalty_per_ms": 0.0
+    },
+    {
+      "id": "event_search",
+      "description": "Locate a temporal event in a video collection.",
+      "candidate_representations": [
+        "compressed_video",
+        "sampled_frames",
+        "embeddings",
+        "multimodal_digest"
+      ],
+      "access_budget": 5,
+      "max_accesses": 1,
+      "task_value": 8,
+      "quality_weight": 8.5,
+      "price_weight": 0.9,
+      "outside_option_utility": 2.0,
+      "choice_noise": 0.35,
+      "success_midpoint": 0.58,
+      "success_temperature": 0.13,
+      "latency_reference_ms": 250,
+      "latency_success_penalty_per_ms": 0.0
+    }
+  ],
+  "price_universes": {
+    "video_qa": {
+      "compressed_video": [1, 2],
+      "sampled_frames": [1, 2, 4],
+      "embeddings": [2, 3, 5],
+      "multimodal_digest": [2, 4, 6, 8]
+    },
+    "event_search": {
+      "compressed_video": [1, 2],
+      "sampled_frames": [1, 2, 4],
+      "embeddings": [1, 2, 3, 5],
+      "multimodal_digest": [2, 4, 5, 8]
+    }
+  },
+  "physical_designs": [
+    {
+      "id": "A_origin",
+      "description": "Origin video with remote decode and expensive derived access.",
+      "paths": {
+        "compressed_video": {
+          "available": true,
+          "location": "object_store",
+          "latency_ms": 180,
+          "latency_jitter_ms": 15,
+          "realized_cost": 0.45,
+          "quotes": {
+            "video_qa": 1,
+            "event_search": 1
+          }
+        },
+        "sampled_frames": {
+          "available": true,
+          "location": "remote_transform",
+          "latency_ms": 320,
+          "latency_jitter_ms": 25,
+          "realized_cost": 1.2,
+          "quotes": {
+            "video_qa": 4,
+            "event_search": 4
+          }
+        },
+        "embeddings": {
+          "available": true,
+          "location": "remote_service",
+          "latency_ms": 260,
+          "latency_jitter_ms": 20,
+          "realized_cost": 0.9,
+          "quotes": {
+            "video_qa": 5,
+            "event_search": 5
+          }
+        },
+        "multimodal_digest": {
+          "available": false,
+          "location": "absent",
+          "latency_ms": 0,
+          "latency_jitter_ms": 0,
+          "realized_cost": 0,
+          "quotes": {}
+        }
+      }
+    },
+    {
+      "id": "B_shared_nvme",
+      "description": "Shared sampled frames and embeddings materialized on NVMe.",
+      "paths": {
+        "compressed_video": {
+          "available": true,
+          "location": "object_store",
+          "latency_ms": 180,
+          "latency_jitter_ms": 15,
+          "realized_cost": 0.45,
+          "quotes": {
+            "video_qa": 1,
+            "event_search": 1
+          }
+        },
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {
+            "video_qa": 2,
+            "event_search": 2
+          }
+        },
+        "embeddings": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 55,
+          "latency_jitter_ms": 6,
+          "realized_cost": 0.25,
+          "quotes": {
+            "video_qa": 3,
+            "event_search": 3
+          }
+        },
+        "multimodal_digest": {
+          "available": false,
+          "location": "absent",
+          "latency_ms": 0,
+          "latency_jitter_ms": 0,
+          "realized_cost": 0,
+          "quotes": {}
+        }
+      }
+    },
+    {
+      "id": "C_consumer_transform",
+      "description": "Shared parent with consumer-local transform execution.",
+      "paths": {
+        "compressed_video": {
+          "available": true,
+          "location": "consumer_nvme",
+          "latency_ms": 95,
+          "latency_jitter_ms": 10,
+          "realized_cost": 0.38,
+          "quotes": {
+            "video_qa": 1,
+            "event_search": 1
+          }
+        },
+        "sampled_frames": {
+          "available": true,
+          "location": "consumer_transform",
+          "latency_ms": 120,
+          "latency_jitter_ms": 12,
+          "realized_cost": 0.52,
+          "quotes": {
+            "video_qa": 2,
+            "event_search": 2
+          }
+        },
+        "embeddings": {
+          "available": true,
+          "location": "consumer_gpu",
+          "latency_ms": 90,
+          "latency_jitter_ms": 9,
+          "realized_cost": 0.55,
+          "quotes": {
+            "video_qa": 2,
+            "event_search": 2
+          }
+        },
+        "multimodal_digest": {
+          "available": false,
+          "location": "absent",
+          "latency_ms": 0,
+          "latency_jitter_ms": 0,
+          "realized_cost": 0,
+          "quotes": {}
+        }
+      }
+    },
+    {
+      "id": "D_structured_digest",
+      "description": "All shared representations plus a structured multimodal digest.",
+      "paths": {
+        "compressed_video": {
+          "available": true,
+          "location": "object_store",
+          "latency_ms": 180,
+          "latency_jitter_ms": 15,
+          "realized_cost": 0.45,
+          "quotes": {
+            "video_qa": 1,
+            "event_search": 1
+          }
+        },
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {
+            "video_qa": 2,
+            "event_search": 2
+          }
+        },
+        "embeddings": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 55,
+          "latency_jitter_ms": 6,
+          "realized_cost": 0.25,
+          "quotes": {
+            "video_qa": 3,
+            "event_search": 3
+          }
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "remote_digest_service",
+          "latency_ms": 210,
+          "latency_jitter_ms": 18,
+          "realized_cost": 1.6,
+          "quotes": {
+            "video_qa": 6,
+            "event_search": 5
+          }
+        }
+      }
+    }
+  ],
+  "quote_profiles": [
+    {
+      "id": "as_designed",
+      "description": "Use the class-specific quotes attached to the physical design.",
+      "overrides": {}
+    },
+    {
+      "id": "digest_low",
+      "description": "Quote intervention that makes the digest inexpensive.",
+      "overrides": {
+        "video_qa": {
+          "multimodal_digest": 2
+        },
+        "event_search": {
+          "multimodal_digest": 2
+        }
+      }
+    },
+    {
+      "id": "digest_high",
+      "description": "Quote intervention that puts the digest above both access budgets.",
+      "overrides": {
+        "video_qa": {
+          "multimodal_digest": 8
+        },
+        "event_search": {
+          "multimodal_digest": 8
+        }
+      }
+    }
+  ],
+  "pilot": {
+    "design_ids": [
+      "A_origin",
+      "B_shared_nvme",
+      "C_consumer_transform",
+      "D_structured_digest"
+    ],
+    "task_class_ids": [
+      "video_qa",
+      "event_search"
+    ],
+    "quote_profile_ids": [
+      "as_designed",
+      "digest_low",
+      "digest_high"
+    ],
+    "latency_multipliers": [
+      1.0,
+      2.0
+    ],
+    "trials_per_cell": 20,
+    "base_seed": 1000
+  }
+}

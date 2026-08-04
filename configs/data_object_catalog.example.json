@@ -1,0 +1,25 @@
+{
+  "schema_version": "pathfinder.data-object-catalog/v1alpha1",
+  "catalog_version": "fixture-catalog-v1",
+  "objects": {
+    "fixture-video-001": {
+      "representations": {
+        "compressed_video": {
+          "path": "../data/fixtures/compressed_video_fixture.bin",
+          "plan_paths": {
+            "D_structured_digest": "../data/fixtures/compressed_video_fixture.bin"
+          }
+        },
+        "sampled_frames": {
+          "path": "../data/fixtures/sampled_frames_fixture.json"
+        },
+        "embeddings": {
+          "path": "../data/fixtures/embeddings_fixture.txt"
+        },
+        "multimodal_digest": {
+          "path": "../data/fixtures/multimodal_digest_fixture.txt"
+        }
+      }
+    }
+  }
+}
