@@ -796,10 +796,20 @@ class HttpDataAgentClient:
         """
         if not isinstance(access_id, str) or not access_id.strip():
             raise ValueError("Data Agent access_id cannot be empty")
-        if quiescence_timeout_seconds < 0:
-            raise ValueError(
-                "quiescence_timeout_seconds cannot be negative"
-            )
+        # Both are checked even when not waiting, so a bad value is reported
+        # by the call that passed it rather than by some later caller that
+        # happens to be the first to set wait_for_quiescence.
+        quiescence_timeout_seconds = validated_timing_seconds(
+            quiescence_timeout_seconds,
+            "quiescence_timeout_seconds",
+            allow_zero=True,
+        )
+        # A zero or negative poll interval would spin without ever yielding.
+        quiescence_poll_seconds = validated_timing_seconds(
+            quiescence_poll_seconds,
+            "quiescence_poll_seconds",
+            allow_zero=False,
+        )
         headers = {
             "Accept": "application/json",
             "User-Agent": "pathfinder-data-agent-client/0.1",
@@ -882,8 +892,11 @@ class HttpDataAgentClient:
                 message.strip() or exc.reason,
             ) from exc
         except (URLError, TimeoutError, socket.timeout) as exc:
+            # The URL that actually failed, not the access endpoint: a
+            # telemetry read that cannot connect must not be reported as an
+            # access failure, or the operator debugs the wrong route.
             raise DataAgentUnavailableError(
-                f"cannot reach Data Agent at {self._access_url}: {exc}"
+                f"cannot reach Data Agent at {request.full_url}: {exc}"
             ) from exc
 
         if len(raw) > self.settings.max_response_bytes:
@@ -912,6 +925,38 @@ def _nonnegative_number(
             f"Data Agent telemetry.{name} is required"
         )
     return _validated_nonnegative_number(mapping[name], name)
+
+
+def validated_timing_seconds(
+    value: Any,
+    name: str,
+    *,
+    allow_zero: bool,
+) -> float:
+    """Validate a caller-supplied duration in seconds.
+
+    Bad timing arguments do not fail loudly on their own, which is why they
+    are rejected here rather than diagnosed later from a stuck session:
+    ``nan`` makes every deadline comparison false, so a bounded poll loop
+    never exits; ``inf`` turns the same bounded wait into an unbounded one.
+    Either one silently removes the timeout that the fail-closed telemetry
+    contract depends on. ``True`` is likewise refused, because ``bool`` is an
+    ``int`` and would otherwise pass as a one-second duration.
+
+    Raises ``ValueError``: this is a caller bug, not a Data Agent protocol
+    violation.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a number, not {type(value).__name__}")
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError(f"{name} must be finite, not {value!r}")
+    if allow_zero:
+        if numeric < 0:
+            raise ValueError(f"{name} cannot be negative")
+    elif numeric <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return numeric
 
 
 def _validated_nonnegative_number(value: Any, name: str) -> float:

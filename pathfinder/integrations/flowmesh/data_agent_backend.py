@@ -6,6 +6,7 @@ from ...data_agent_client import (
     DataAgentAccessRequest,
     DataAgentAccessTelemetry,
     DataAgentClientProtocol,
+    validated_timing_seconds,
 )
 from ...models import SystemConfig
 from .gateway import BackendAccessResult, GatewaySession
@@ -20,13 +21,13 @@ class RemoteDataAgentBackend:
         *,
         telemetry_quiescence_timeout_seconds: float = 5.0,
     ):
-        if telemetry_quiescence_timeout_seconds < 0:
-            raise ValueError(
-                "telemetry_quiescence_timeout_seconds cannot be negative"
-            )
         self.client = client
-        self.telemetry_quiescence_timeout_seconds = (
-            telemetry_quiescence_timeout_seconds
+        # Same rule as the client's own bound, applied here so a nan or inf
+        # cannot reach a reconciliation wait through the backend instead.
+        self.telemetry_quiescence_timeout_seconds = validated_timing_seconds(
+            telemetry_quiescence_timeout_seconds,
+            "telemetry_quiescence_timeout_seconds",
+            allow_zero=True,
         )
 
     def access(

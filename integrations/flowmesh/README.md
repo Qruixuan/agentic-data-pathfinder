@@ -146,11 +146,14 @@ Equivalent environment variables are `PATHFINDER_FLOWMESH_WORKER_ID` and
 
 Prefer the alias. FlowMesh reassigns worker IDs when a worker restarts, so the
 alias is the durable name; Pathfinder resolves it to the current ID through
-`workers.list(alias=...)` immediately before submission. Resolution must match
-**exactly one** worker — zero or several matches raise
-`FlowMeshPinningError` and nothing is submitted. Pathfinder never falls back to
-an unpinned run, because that would place an experiment task on an arbitrary
-shared worker and silently invalidate the session.
+`workers.list(alias=..., stale=False)` immediately before submission. The
+`stale=False` filter matters: a restarted worker leaves its previous
+registration behind under the same alias, so an unfiltered lookup either
+returns two matches or hands back a dead ID. Resolution must match **exactly
+one current** worker — zero or several matches raise `FlowMeshPinningError` and
+nothing is submitted. Pathfinder never falls back to an unpinned run, because
+that would place an experiment task on an arbitrary shared worker and silently
+invalidate the session.
 
 ### Why every workflow is a one-node graph
 

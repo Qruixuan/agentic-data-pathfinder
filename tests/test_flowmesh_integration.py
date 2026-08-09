@@ -18,13 +18,17 @@ from pathfinder.data_agent_client import (
     DataAgentPayload,
     DataAgentTelemetryQuiescenceError,
 )
+from pathfinder.integrations.flowmesh import adapter as adapter_module
 from pathfinder.integrations.flowmesh.adapter import (
     FlowMeshAgentAdapter,
     FlowMeshPinningError,
     FlowMeshRunError,
     extract_agent_answer,
 )
-from pathfinder.integrations.flowmesh.client import WorkerResolutionError
+from pathfinder.integrations.flowmesh.client import (
+    SdkFlowMeshClient,
+    WorkerResolutionError,
+)
 from pathfinder.integrations.flowmesh.contracts import (
     FlowMeshAgentRunRequest,
     FlowMeshSettings,
@@ -240,6 +244,69 @@ class AccessingFlowMeshClient(FakeFlowMeshClient):
         return super().wait(workflow_id, poll_interval_seconds)
 
 
+class StubWorker:
+    def __init__(self, worker_id: str) -> None:
+        self.id = worker_id
+
+
+class RecordingWorkersApi:
+    """Records the keyword filters the SDK adapter sends."""
+
+    def __init__(self, workers: list[StubWorker]) -> None:
+        self._workers = workers
+        self.calls: list[dict[str, Any]] = []
+
+    def list(self, **filters: Any) -> list[StubWorker]:
+        self.calls.append(dict(filters))
+        return self._workers
+
+
+class StubSdk:
+    def __init__(self, workers: list[StubWorker]) -> None:
+        self.workers = RecordingWorkersApi(workers)
+
+
+class SdkWorkerResolutionTest(unittest.TestCase):
+    """Alias resolution must consider only workers FlowMesh calls current."""
+
+    def build(self, worker_ids: list[str]) -> SdkFlowMeshClient:
+        # Bypass __init__: it imports the optional FlowMesh SDK, which is not
+        # installed here, and the behaviour under test is the query it sends.
+        client = SdkFlowMeshClient.__new__(SdkFlowMeshClient)
+        client._client = StubSdk([StubWorker(w) for w in worker_ids])
+        return client
+
+    def test_alias_lookup_filters_out_stale_workers(self) -> None:
+        client = self.build(["wkr-16"])
+        self.assertEqual("wkr-16", client.resolve_worker_alias("pathfinder-a"))
+        # The regression this guards: without stale=False a restarted worker
+        # is returned twice under one alias, or the single ID handed back is
+        # a dead registration the scheduler will never dispatch to.
+        self.assertEqual(
+            [{"alias": "pathfinder-a", "stale": False}],
+            client._client.workers.calls,
+        )
+
+    def test_no_current_worker_fails_closed(self) -> None:
+        client = self.build([])
+        with self.assertRaises(WorkerResolutionError) as context:
+            client.resolve_worker_alias("pathfinder-a")
+        self.assertIn("matched no current worker", str(context.exception))
+        self.assertEqual(
+            [{"alias": "pathfinder-a", "stale": False}],
+            client._client.workers.calls,
+        )
+
+    def test_multiple_current_workers_fail_closed(self) -> None:
+        client = self.build(["wkr-16", "wkr-17"])
+        with self.assertRaises(WorkerResolutionError) as context:
+            client.resolve_worker_alias("pathfinder-a")
+        message = str(context.exception)
+        self.assertIn("matched 2 current workers", message)
+        self.assertIn("wkr-16", message)
+        self.assertIn("wkr-17", message)
+
+
 class AdapterTelemetryReconciliationTest(unittest.TestCase):
     """End-to-end adapter path: access, terminate, reconcile, finish."""
 
@@ -332,6 +399,97 @@ class AdapterTelemetryReconciliationTest(unittest.TestCase):
         self.assertEqual(0.0, events[0].artifact_transfer_latency_ms)
         self.assertEqual(0, events[0].artifact_download_request_count)
         self.assertEqual(0, events[0].artifact_full_download_count)
+
+    def test_workflow_build_failure_fails_the_registered_session(
+        self,
+    ) -> None:
+        """The gap this closes: a throw between register and submit.
+
+        Workflow construction used to sit outside the failure handler, so a
+        builder error left a registered session stuck in its initial state --
+        never finished, never failed, and therefore counted as neither in
+        analysis.
+        """
+        client, _, gateway = self.build(settles_after=0)
+
+        def exploding_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("workflow builder regression")
+
+        original = adapter_module.build_agent_workflow
+        adapter_module.build_agent_workflow = exploding_builder
+        self.addCleanup(
+            setattr,
+            adapter_module,
+            "build_agent_workflow",
+            original,
+        )
+
+        registered: list[str] = []
+        real_register = gateway.register_session
+
+        def spy(request: FlowMeshAgentRunRequest) -> Any:
+            session = real_register(request)
+            registered.append(session.session_id)
+            return session
+
+        gateway.register_session = spy  # type: ignore[method-assign]
+        self.addCleanup(delattr, gateway, "register_session")
+
+        adapter = FlowMeshAgentAdapter(client, gateway, FlowMeshSettings())
+        with self.assertRaises(RuntimeError) as context:
+            adapter.run(self.request())
+        self.assertIn("workflow builder regression", str(context.exception))
+
+        self.assertIsNone(client.submitted_workflow)
+        self.assertEqual([], client.validated_workflows)
+        self.assertEqual(1, len(registered))
+        self.assertEqual(
+            "FAILED",
+            self.store.get_session(registered[0]).status,
+        )
+
+    def test_pin_guard_failure_fails_the_registered_session(self) -> None:
+        """The pin guard now reports through the same handler as the rest."""
+        client, _, gateway = self.build(settles_after=0)
+
+        def unpinning_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            kwargs.pop("selected_worker_id", None)
+            return build_agent_workflow(*args, **kwargs)
+
+        original = adapter_module.build_agent_workflow
+        adapter_module.build_agent_workflow = unpinning_builder
+        self.addCleanup(
+            setattr,
+            adapter_module,
+            "build_agent_workflow",
+            original,
+        )
+
+        registered: list[str] = []
+        real_register = gateway.register_session
+
+        def spy(request: FlowMeshAgentRunRequest) -> Any:
+            session = real_register(request)
+            registered.append(session.session_id)
+            return session
+
+        gateway.register_session = spy  # type: ignore[method-assign]
+        self.addCleanup(delattr, gateway, "register_session")
+
+        adapter = FlowMeshAgentAdapter(
+            client,
+            gateway,
+            FlowMeshSettings(worker_id="wkr-16"),
+        )
+        with self.assertRaises(FlowMeshPinningError):
+            adapter.run(self.request())
+
+        self.assertIsNone(client.submitted_workflow)
+        self.assertEqual(1, len(registered))
+        self.assertEqual(
+            "FAILED",
+            self.store.get_session(registered[0]).status,
+        )
 
 
 class FlowMeshIntegrationTest(unittest.TestCase):

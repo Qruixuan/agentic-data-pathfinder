@@ -67,31 +67,32 @@ class FlowMeshAgentAdapter:
         return resolved.strip()
 
     def run(self, request: FlowMeshAgentRunRequest) -> FlowMeshAgentRun:
+        # Resolved before registration on purpose: an unresolvable alias
+        # means nothing ran, so there is no session to record as failed.
         selected_worker_id = self.resolve_selected_worker()
         session = self.gateway.register_session(request)
-        workflow = build_agent_workflow(
-            session.session_id,
-            request,
-            self.settings,
-            selected_worker_id=selected_worker_id,
-        )
-        # Guard against a builder regression quietly dropping the pin: an
-        # unpinned run on a shared deployment would break experiment
-        # isolation without any visible error.
-        if self.settings.pinning_requested:
-            emitted = workflow_selected_worker(workflow)
-            if emitted != selected_worker_id:
-                self.gateway.store.finish_session(
-                    session.session_id,
-                    status="FAILED",
-                    final_answer=None,
-                )
-                raise FlowMeshPinningError(
-                    "Pathfinder requested a worker pin but the generated "
-                    f"workflow carries {emitted!r} instead of "
-                    f"{selected_worker_id!r}"
-                )
+        # Everything from here on is inside the handler. Once a session row
+        # exists, every exit must be a recorded one -- a session left in its
+        # initial state is indistinguishable from one still running, and
+        # would be counted as neither a success nor a failure in analysis.
         try:
+            workflow = build_agent_workflow(
+                session.session_id,
+                request,
+                self.settings,
+                selected_worker_id=selected_worker_id,
+            )
+            # Guard against a builder regression quietly dropping the pin: an
+            # unpinned run on a shared deployment would break experiment
+            # isolation without any visible error.
+            if self.settings.pinning_requested:
+                emitted = workflow_selected_worker(workflow)
+                if emitted != selected_worker_id:
+                    raise FlowMeshPinningError(
+                        "Pathfinder requested a worker pin but the generated "
+                        f"workflow carries {emitted!r} instead of "
+                        f"{selected_worker_id!r}"
+                    )
             if self.settings.validate_before_submit:
                 self._validate(workflow)
             submitted = self.client.submit(workflow)

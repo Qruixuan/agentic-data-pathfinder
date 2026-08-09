@@ -85,11 +85,16 @@ class SdkFlowMeshClient:
         FlowMesh reassigns worker IDs across restarts, so the alias is
         resolved immediately before submission. Anything other than exactly
         one match raises: pinning must never degrade into an unpinned run.
+
+        ``stale=False`` excludes workers FlowMesh no longer considers live.
+        Stale entries linger after a restart under the same alias, so without
+        the filter a restarted worker looks like two matches and pinning
+        fails, or the single match returned is a dead ID.
         """
         if not isinstance(alias, str) or not alias.strip():
             raise ValueError("FlowMesh worker alias cannot be empty")
         alias = alias.strip()
-        matches = self._client.workers.list(alias=alias)
+        matches = self._client.workers.list(alias=alias, stale=False)
         worker_ids = [
             worker_id
             for worker_id in (
@@ -99,13 +104,14 @@ class SdkFlowMeshClient:
         ]
         if not worker_ids:
             raise WorkerResolutionError(
-                f"FlowMesh worker alias '{alias}' matched no worker; refusing "
-                "to submit an unpinned Pathfinder workflow"
+                f"FlowMesh worker alias '{alias}' matched no current worker; "
+                "refusing to submit an unpinned Pathfinder workflow"
             )
         if len(worker_ids) > 1:
             raise WorkerResolutionError(
                 f"FlowMesh worker alias '{alias}' matched "
-                f"{len(worker_ids)} workers ({', '.join(sorted(worker_ids))}); "
+                f"{len(worker_ids)} current workers "
+                f"({', '.join(sorted(worker_ids))}); "
                 "a Pathfinder session must pin exactly one worker"
             )
         return worker_ids[0]

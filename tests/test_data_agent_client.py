@@ -8,6 +8,7 @@ from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.error import URLError
 
 from pathfinder.config import load_config
 from pathfinder.data_agent_client import (
@@ -20,6 +21,7 @@ from pathfinder.data_agent_client import (
     DataAgentProtocolError,
     DataAgentTelemetryQuiescenceError,
     DataAgentTelemetryUnsupportedError,
+    DataAgentUnavailableError,
     HttpDataAgentClient,
 )
 from pathfinder.integrations.flowmesh.contracts import (
@@ -302,6 +304,66 @@ class ScriptedTelemetryOpener:
         return FakeHTTPResponse(json.dumps(payload).encode("utf-8"))
 
 
+class UnreachableOpener:
+    """Fails every request the way a dead endpoint does."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    def __call__(self, request: Any, timeout: float | None = None) -> Any:
+        self.urls.append(request.full_url)
+        raise URLError("connection refused")
+
+
+class ConnectionErrorReportingTest(unittest.TestCase):
+    """A connection failure must name the endpoint that actually failed."""
+
+    def build(self) -> tuple[HttpDataAgentClient, UnreachableOpener]:
+        opener = UnreachableOpener()
+        client = HttpDataAgentClient(
+            DataAgentClientSettings(
+                base_url="http://127.0.0.1:9",
+                timeout_seconds=0.5,
+                max_retries=0,
+            ),
+            opener=opener,
+            sleep=lambda _seconds: None,
+        )
+        return client, opener
+
+    def test_telemetry_failure_names_the_telemetry_url(self) -> None:
+        client, opener = self.build()
+        with self.assertRaises(DataAgentUnavailableError) as context:
+            client.get_access_telemetry("artifact-access")
+        message = str(context.exception)
+        self.assertIn("/v1/accesses/artifact-access/telemetry", message)
+        # The bug this pins: reporting the access endpoint for every failure
+        # sends the operator to debug a route that was never contacted.
+        self.assertNotIn("/v1/access:", message)
+        self.assertEqual([opener.urls[0]], opener.urls)
+        self.assertTrue(opener.urls[0].endswith("/telemetry"))
+
+    def test_access_failure_still_names_the_access_url(self) -> None:
+        client, _ = self.build()
+        with self.assertRaises(DataAgentUnavailableError) as context:
+            client.access(
+                DataAgentAccessRequest(
+                    access_id="a-1",
+                    session_id="s-1",
+                    trial_id="t-1",
+                    plan_id="D_structured_digest",
+                    plan_epoch=0,
+                    task_class_id="video_qa",
+                    representation_id="multimodal_digest",
+                    event_index=0,
+                    latency_multiplier=1.0,
+                    binding={"location": "remote_digest_service"},
+                )
+            )
+        self.assertIn("/v1/access", str(context.exception))
+        self.assertNotIn("/telemetry", str(context.exception))
+
+
 class TelemetryQuiescenceTest(unittest.TestCase):
     """The fail-closed contract for post-workflow telemetry reconciliation."""
 
@@ -488,6 +550,122 @@ class TelemetryQuiescenceTest(unittest.TestCase):
         # first read; it must not burn the whole timeout.
         self.assertEqual(1, opener.call_count)
         self.assertEqual([], slept)
+
+
+class TelemetryTimingArgumentTest(unittest.TestCase):
+    """Timing arguments are rejected at the boundary, not after they hang.
+
+    ``nan`` is the dangerous one: every comparison against it is false, so
+    ``time.monotonic() >= deadline`` never fires and the fail-closed wait
+    silently becomes an infinite loop. ``inf`` does the same thing openly.
+    Neither raises on its own, so nothing catches them but an explicit check.
+    """
+
+    ACCESS_ID = "artifact-access"
+
+    #: Values that must never reach a deadline computation. Booleans are in
+    #: the list because ``isinstance(True, int)`` is true.
+    BAD_VALUES = {
+        "nan": float("nan"),
+        "positive infinity": float("inf"),
+        "negative infinity": float("-inf"),
+        "True": True,
+        "False": False,
+        "negative": -1.0,
+    }
+
+    def build(self) -> tuple[HttpDataAgentClient, ScriptedTelemetryOpener]:
+        opener = ScriptedTelemetryOpener(
+            [COMMITTED_FRAME] * 4,
+            self.ACCESS_ID,
+        )
+        client = HttpDataAgentClient(
+            DataAgentClientSettings(
+                base_url="http://127.0.0.1:9",
+                timeout_seconds=2.0,
+                max_retries=0,
+            ),
+            opener=opener,
+            sleep=lambda _seconds: None,
+        )
+        return client, opener
+
+    def test_timeout_rejects_non_finite_and_negative_values(self) -> None:
+        for label, value in self.BAD_VALUES.items():
+            with self.subTest(timeout=label):
+                client, opener = self.build()
+                with self.assertRaises(ValueError) as context:
+                    client.get_access_telemetry(
+                        self.ACCESS_ID,
+                        wait_for_quiescence=True,
+                        quiescence_timeout_seconds=value,
+                    )
+                self.assertIn(
+                    "quiescence_timeout_seconds",
+                    str(context.exception),
+                )
+                # Rejected before the wire, so a bad argument cannot leave a
+                # half-issued request behind.
+                self.assertEqual(0, opener.call_count)
+
+    def test_poll_interval_rejects_non_finite_negative_and_zero(self) -> None:
+        # Zero is additionally invalid here: a zero-interval poll would spin
+        # against the Data Agent without ever yielding.
+        for label, value in {**self.BAD_VALUES, "zero": 0.0}.items():
+            with self.subTest(poll=label):
+                client, opener = self.build()
+                with self.assertRaises(ValueError) as context:
+                    client.get_access_telemetry(
+                        self.ACCESS_ID,
+                        wait_for_quiescence=True,
+                        quiescence_poll_seconds=value,
+                    )
+                self.assertIn(
+                    "quiescence_poll_seconds",
+                    str(context.exception),
+                )
+                self.assertEqual(0, opener.call_count)
+
+    def test_arguments_are_checked_even_without_waiting(self) -> None:
+        """The caller that passed the bad value is the one that hears it."""
+        client, opener = self.build()
+        with self.assertRaises(ValueError):
+            client.get_access_telemetry(
+                self.ACCESS_ID,
+                quiescence_timeout_seconds=float("nan"),
+            )
+        self.assertEqual(0, opener.call_count)
+
+    def test_zero_timeout_is_valid_and_allows_one_attempt(self) -> None:
+        """A zero deadline is a legitimate 'check once, do not wait'."""
+        client, opener = self.build()
+        result = client.get_access_telemetry(
+            self.ACCESS_ID,
+            wait_for_quiescence=True,
+            quiescence_timeout_seconds=0.0,
+        )
+        self.assertTrue(result.telemetry_complete)
+        self.assertEqual(1, opener.call_count)
+
+    def test_backend_rejects_non_finite_and_negative_timeouts(self) -> None:
+        for label, value in self.BAD_VALUES.items():
+            with self.subTest(timeout=label):
+                with self.assertRaises(ValueError) as context:
+                    RemoteDataAgentBackend(
+                        FakeDataAgentClient(),
+                        telemetry_quiescence_timeout_seconds=value,
+                    )
+                self.assertIn(
+                    "telemetry_quiescence_timeout_seconds",
+                    str(context.exception),
+                )
+
+    def test_backend_accepts_a_zero_timeout(self) -> None:
+        backend = RemoteDataAgentBackend(
+            FakeDataAgentClient(),
+            telemetry_quiescence_timeout_seconds=0,
+        )
+        self.assertEqual(0.0, backend.telemetry_quiescence_timeout_seconds)
 
 
 class DataAgentClientTest(unittest.TestCase):
