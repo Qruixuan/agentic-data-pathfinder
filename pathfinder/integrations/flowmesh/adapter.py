@@ -9,11 +9,15 @@ from .contracts import (
     FlowMeshSettings,
 )
 from .gateway import AccessGateway
-from .workflow import build_agent_workflow
+from .workflow import build_agent_workflow, workflow_selected_worker
 
 
 class FlowMeshRunError(RuntimeError):
     """Raised when FlowMesh cannot complete a Pathfinder Agent session."""
+
+
+class FlowMeshPinningError(FlowMeshRunError):
+    """Raised when a requested worker pin cannot be applied."""
 
 
 class FlowMeshAgentAdapter:
@@ -29,14 +33,67 @@ class FlowMeshAgentAdapter:
         self.gateway = gateway
         self.settings = settings
 
+    def resolve_selected_worker(self) -> str | None:
+        """Return the concrete worker ID this session must run on.
+
+        Returns None only when no pin was requested. A requested pin that
+        cannot be resolved raises instead of falling back to free scheduling.
+        """
+        if self.settings.worker_id is not None:
+            return self.settings.worker_id.strip()
+        if self.settings.worker_alias is None:
+            return None
+        resolver = getattr(self.client, "resolve_worker_alias", None)
+        if not callable(resolver):
+            raise FlowMeshPinningError(
+                "FlowMesh client cannot resolve worker aliases, so the "
+                f"requested pin to alias '{self.settings.worker_alias}' "
+                "cannot be honoured"
+            )
+        try:
+            resolved = resolver(self.settings.worker_alias)
+        except FlowMeshRunError:
+            raise
+        except Exception as exc:
+            raise FlowMeshPinningError(
+                "Cannot resolve FlowMesh worker alias "
+                f"'{self.settings.worker_alias}': {exc}"
+            ) from exc
+        if not isinstance(resolved, str) or not resolved.strip():
+            raise FlowMeshPinningError(
+                f"FlowMesh worker alias '{self.settings.worker_alias}' "
+                "resolved to an empty worker ID"
+            )
+        return resolved.strip()
+
     def run(self, request: FlowMeshAgentRunRequest) -> FlowMeshAgentRun:
+        selected_worker_id = self.resolve_selected_worker()
         session = self.gateway.register_session(request)
         workflow = build_agent_workflow(
             session.session_id,
             request,
             self.settings,
+            selected_worker_id=selected_worker_id,
         )
+        # Guard against a builder regression quietly dropping the pin: an
+        # unpinned run on a shared deployment would break experiment
+        # isolation without any visible error.
+        if self.settings.pinning_requested:
+            emitted = workflow_selected_worker(workflow)
+            if emitted != selected_worker_id:
+                self.gateway.store.finish_session(
+                    session.session_id,
+                    status="FAILED",
+                    final_answer=None,
+                )
+                raise FlowMeshPinningError(
+                    "Pathfinder requested a worker pin but the generated "
+                    f"workflow carries {emitted!r} instead of "
+                    f"{selected_worker_id!r}"
+                )
         try:
+            if self.settings.validate_before_submit:
+                self._validate(workflow)
             submitted = self.client.submit(workflow)
             if len(submitted.task_ids) != 1:
                 raise FlowMeshRunError(
@@ -87,6 +144,19 @@ class FlowMeshAgentAdapter:
             access_events=events,
             raw_result=raw_result,
         )
+
+    def _validate(self, workflow: dict[str, Any]) -> None:
+        validator = getattr(self.client, "validate", None)
+        if not callable(validator):
+            raise FlowMeshRunError(
+                "FlowMesh client does not support workflow validation"
+            )
+        validation = validator(workflow)
+        if not validation.ok:
+            detail = "; ".join(validation.errors) or "no detail reported"
+            raise FlowMeshRunError(
+                f"FlowMesh rejected the Pathfinder workflow: {detail}"
+            )
 
 
 def extract_agent_answer(payload: dict[str, Any]) -> str:

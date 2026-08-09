@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -13,6 +14,7 @@ from pathfinder.data_agent_client import (
     DataAgentAccessRequest,
     DataAgentClientSettings,
     DataAgentHTTPError,
+    DataAgentTelemetryQuiescenceError,
     HttpDataAgentClient,
 )
 from pathfinder.data_agent_manifest import (
@@ -22,9 +24,20 @@ from pathfinder.data_agent_manifest import (
     load_data_agent_manifest,
 )
 from pathfinder.data_agent_server import (
+    DataAgentArtifactDownload,
     DataAgentServerSettings,
+    SQLiteDataAgentOperationStore,
     create_data_agent_http_server,
 )
+
+# Response deadline for ordinary functional tests against the loopback server.
+# These tests assert behaviour, not latency: nothing here checks how long a
+# request takes, so the timeout only exists to stop a hung server from wedging
+# the run. It is set generously because a loaded shared host can stall a disk
+# write for seconds, and a slow response is not a functional failure. Tests
+# that do assert timeout behaviour pass their own explicit short deadlines so
+# they stay deterministic; this value must never be used for those.
+FUNCTIONAL_TIMEOUT_SECONDS = 10.0
 
 
 class DataAgentServerTest(unittest.TestCase):
@@ -133,6 +146,10 @@ class DataAgentServerTest(unittest.TestCase):
         )
         self.thread = threading.Thread(
             target=self.server.serve_forever,
+            # serve_forever() defaults to a 0.5s poll interval, so every
+            # shutdown() blocks for up to half a second. With one server per
+            # test that teardown latency dominates the module's runtime.
+            kwargs={"poll_interval": 0.01},
             daemon=True,
         )
         self.thread.start()
@@ -143,15 +160,33 @@ class DataAgentServerTest(unittest.TestCase):
             DataAgentClientSettings(
                 base_url=self.base_url,
                 token="control-token",
-                timeout_seconds=2,
+                timeout_seconds=FUNCTIONAL_TIMEOUT_SECONDS,
                 max_retries=0,
             )
         )
 
     def _stop_server(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
+        # server_close() must run even if shutdown() raises, or the listening
+        # socket leaks into the next test.
+        try:
+            self.server.shutdown()
+        finally:
+            self.server.server_close()
+            self.thread.join(timeout=5)
+        self.assertFalse(
+            self.thread.is_alive(),
+            "Data Agent server thread outlived its test",
+        )
+
+    def patch_store_method(self, name: str, replacement: object) -> None:
+        """Shadow one store method for the duration of this test.
+
+        The replacement is set as an instance attribute and removed on
+        cleanup, so the class method is restored even if the test fails.
+        """
+        store = self.server.service.store
+        setattr(store, name, replacement)
+        self.addCleanup(delattr, store, name)
 
     def request(
         self,
@@ -267,16 +302,22 @@ class DataAgentServerTest(unittest.TestCase):
         self.assertEqual("artifact_uri", result.payload.kind)
         artifact_url = result.payload.value
         self.assertIsInstance(artifact_url, str)
-        with urlopen(artifact_url, timeout=2) as response:
+        with urlopen(artifact_url, timeout=FUNCTIONAL_TIMEOUT_SECONDS) as response:
             self.assertEqual(self.artifact_bytes, response.read())
         range_request = Request(
             artifact_url,
             headers={"Range": "bytes=2-5"},
         )
-        with urlopen(range_request, timeout=2) as response:
+        with urlopen(range_request, timeout=FUNCTIONAL_TIMEOUT_SECONDS) as response:
             self.assertEqual(206, response.status)
             self.assertEqual(b"2345", response.read())
-        telemetry = self.client.get_access_telemetry("artifact-access")
+        # Transfers are recorded after the response body is written, so an
+        # immediate read can race the server. Ask for a quiescent summary.
+        telemetry = self.client.get_access_telemetry(
+            "artifact-access",
+            wait_for_quiescence=True,
+        )
+        self.assertEqual(0, telemetry.in_flight_request_count)
         self.assertEqual(2, telemetry.download_request_count)
         self.assertEqual(2, telemetry.completed_request_count)
         self.assertEqual(1, telemetry.full_download_count)
@@ -288,6 +329,266 @@ class DataAgentServerTest(unittest.TestCase):
         self.assertGreaterEqual(telemetry.transfer_latency_ms, 0.0)
         self.assertIsNotNone(telemetry.latest_completed_at)
 
+    def _download(
+        self,
+        access_id: str,
+        *,
+        bytes_sent: int = 10,
+    ) -> DataAgentArtifactDownload:
+        now = time.time()
+        return DataAgentArtifactDownload(
+            access_id=access_id,
+            range_start=0,
+            range_end=bytes_sent - 1,
+            bytes_sent=bytes_sent,
+            duration_ms=4.0,
+            completed=True,
+            full_artifact=True,
+            started_at=now,
+            completed_at=now,
+        )
+
+    def test_telemetry_blocks_until_the_transfer_record_is_committed(
+        self,
+    ) -> None:
+        self.client.access(
+            self.request("compressed_video", access_id="committing-access")
+        )
+        service = self.server.service
+        # Reserve before streaming, exactly as the artifact handler does.
+        service.begin_artifact_download("committing-access")
+        self.assertEqual(
+            1,
+            service.in_flight_download_count("committing-access"),
+        )
+
+        def commit_after_delay() -> None:
+            time.sleep(0.1)
+            service.record_artifact_download(
+                self._download("committing-access")
+            )
+
+        thread = threading.Thread(target=commit_after_delay, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+
+        telemetry = self.client.get_access_telemetry(
+            "committing-access",
+            wait_for_quiescence=True,
+            quiescence_timeout_seconds=5.0,
+        )
+        # Returning at all proves the wait outlasted the pending transfer,
+        # and the committed bytes prove the record landed before the counter
+        # was released.
+        self.assertTrue(telemetry.telemetry_complete)
+        self.assertEqual(0, telemetry.in_flight_request_count)
+        self.assertEqual(10, telemetry.bytes_sent)
+        self.assertEqual(1, telemetry.completed_request_count)
+        self.assertEqual(1, telemetry.full_download_count)
+
+    def test_telemetry_times_out_while_a_transfer_is_in_flight(self) -> None:
+        self.client.access(
+            self.request("compressed_video", access_id="stalled-access")
+        )
+        service = self.server.service
+        service.begin_artifact_download("stalled-access")
+        self.addCleanup(
+            service.record_artifact_download,
+            self._download("stalled-access"),
+        )
+
+        with self.assertRaises(DataAgentTelemetryQuiescenceError) as context:
+            self.client.get_access_telemetry(
+                "stalled-access",
+                wait_for_quiescence=True,
+                quiescence_timeout_seconds=0.05,
+            )
+        self.assertEqual("stalled-access", context.exception.access_id)
+        self.assertEqual(1, context.exception.in_flight_request_count)
+
+        # The provisional summary is still readable, but self-reports as
+        # incomplete so it cannot be mistaken for a final observation.
+        provisional = self.client.get_access_telemetry("stalled-access")
+        self.assertFalse(provisional.telemetry_complete)
+        self.assertEqual(0, provisional.bytes_sent)
+        self.assertEqual(0, provisional.download_request_count)
+
+    def test_zero_downloads_with_no_in_flight_requests_is_complete(
+        self,
+    ) -> None:
+        self.client.access(
+            self.request("multimodal_digest", access_id="inline-no-download")
+        )
+        telemetry = self.client.get_access_telemetry(
+            "inline-no-download",
+            wait_for_quiescence=True,
+            quiescence_timeout_seconds=5.0,
+        )
+        self.assertTrue(telemetry.telemetry_complete)
+        self.assertEqual(0, telemetry.in_flight_request_count)
+        self.assertEqual(0, telemetry.download_request_count)
+        self.assertEqual(0, telemetry.completed_request_count)
+        self.assertEqual(0, telemetry.bytes_sent)
+        self.assertEqual(0.0, telemetry.transfer_latency_ms)
+        self.assertIsNone(telemetry.latest_completed_at)
+
+    def test_transfer_state_is_isolated_between_tests(self) -> None:
+        """Reservations and generations must not survive into another test.
+
+        Every test builds its own service, so the counters start empty. These
+        are the access IDs the racing tests deliberately poison; if fixture
+        state ever leaked, this would fail.
+        """
+        service = self.server.service
+        for access_id in (
+            "racing-access",
+            "window-access",
+            "stalled-access",
+            "poisoned-access",
+        ):
+            self.assertEqual(
+                (0, 0),
+                service.transfer_watermark(access_id),
+                f"leaked transfer state for {access_id}",
+            )
+        self.assertEqual(
+            SQLiteDataAgentOperationStore.artifact_download_summary,
+            type(service.store).artifact_download_summary,
+        )
+        self.assertNotIn(
+            "artifact_download_summary",
+            vars(service.store),
+            "a store monkeypatch leaked out of an earlier test",
+        )
+
+    def test_transfer_starting_during_the_summary_read_is_not_complete(
+        self,
+    ) -> None:
+        """A transfer born inside the snapshot window must be detected."""
+        self.client.access(
+            self.request("compressed_video", access_id="racing-access")
+        )
+        service = self.server.service
+        original = service.store.artifact_download_summary
+        raced: list[bool] = []
+
+        def racing_summary(access_id: str) -> dict:
+            if not raced:
+                raced.append(True)
+                # Reserved after the first watermark, still in flight when
+                # the durable summary is taken.
+                service.begin_artifact_download(access_id)
+            return original(access_id)
+
+        self.patch_store_method("artifact_download_summary", racing_summary)
+        # The reservation is left deliberately held by this test; release it
+        # so teardown does not depend on the poisoned state persisting.
+        self.addCleanup(
+            service.record_artifact_download,
+            self._download("racing-access"),
+        )
+
+        with self.assertRaises(DataAgentTelemetryQuiescenceError) as context:
+            self.client.get_access_telemetry(
+                "racing-access",
+                wait_for_quiescence=True,
+                quiescence_timeout_seconds=0.0,
+            )
+        self.assertTrue(raced)
+        self.assertEqual(1, context.exception.in_flight_request_count)
+        self.assertFalse(context.exception.telemetry.telemetry_complete)
+
+    def test_transfer_committing_inside_the_window_is_not_complete(
+        self,
+    ) -> None:
+        """The case both counter reads miss.
+
+        The transfer reserves, the summary is taken without it, and the
+        commit lands before the second watermark. Both watermarks therefore
+        read zero in flight, and only the generation reveals that the
+        summary is stale.
+        """
+        self.client.access(
+            self.request("compressed_video", access_id="window-access")
+        )
+        service = self.server.service
+        original = service.store.artifact_download_summary
+        raced: list[bool] = []
+
+        def racing_summary(access_id: str) -> dict:
+            if raced:
+                return original(access_id)
+            raced.append(True)
+            service.begin_artifact_download(access_id)
+            summary = original(access_id)  # taken before the commit
+            service.record_artifact_download(self._download(access_id))
+            return summary
+
+        self.patch_store_method("artifact_download_summary", racing_summary)
+
+        with self.assertRaises(DataAgentTelemetryQuiescenceError) as context:
+            self.client.get_access_telemetry(
+                "window-access",
+                wait_for_quiescence=True,
+                quiescence_timeout_seconds=0.0,
+            )
+        self.assertTrue(raced)
+        # Both counters read zero, so the counter alone would have called
+        # this complete while the summary was missing a transfer.
+        self.assertEqual(0, context.exception.in_flight_request_count)
+        self.assertEqual(0, context.exception.telemetry.bytes_sent)
+        self.assertFalse(context.exception.telemetry.telemetry_complete)
+
+        # The next read is stable and shows the transfer that the raced
+        # snapshot would have silently dropped.
+        settled = self.client.get_access_telemetry(
+            "window-access",
+            wait_for_quiescence=True,
+            quiescence_timeout_seconds=5.0,
+        )
+        self.assertTrue(settled.telemetry_complete)
+        self.assertEqual(10, settled.bytes_sent)
+        self.assertEqual(1, settled.download_request_count)
+
+    def test_quiescent_snapshot_reports_server_side_completeness(
+        self,
+    ) -> None:
+        self.client.access(
+            self.request("compressed_video", access_id="settled-access")
+        )
+        telemetry = self.client.get_access_telemetry(
+            "settled-access",
+            wait_for_quiescence=True,
+            quiescence_timeout_seconds=5.0,
+        )
+        # The Data Agent publishes an explicit verdict, not just a counter.
+        self.assertIs(True, telemetry.server_reported_complete)
+        self.assertTrue(telemetry.telemetry_complete)
+
+    def test_failed_commit_keeps_the_access_permanently_non_quiescent(
+        self,
+    ) -> None:
+        """The counter drops only after the row is durable, never before."""
+        service = self.server.service
+        service.begin_artifact_download("poisoned-access")
+
+        def failing_record(
+            download: DataAgentArtifactDownload,
+        ) -> None:
+            raise RuntimeError("simulated commit failure")
+
+        self.patch_store_method("record_artifact_download", failing_record)
+        with self.assertRaises(RuntimeError):
+            service.record_artifact_download(
+                self._download("poisoned-access")
+            )
+        # The reservation is deliberately still held, so no reader can ever
+        # see this access as quiescent and accept its truncated summary.
+        self.assertEqual(
+            1,
+            service.in_flight_download_count("poisoned-access"),
+        )
+
     def test_artifact_uri_rejects_tampered_signature(self) -> None:
         result = self.client.access(
             self.request("compressed_video", access_id="signed-access")
@@ -297,14 +598,14 @@ class DataAgentServerTest(unittest.TestCase):
             "0" if artifact_url[-1] != "0" else "1"
         )
         with self.assertRaises(HTTPError) as context:
-            urlopen(tampered, timeout=2)
+            urlopen(tampered, timeout=FUNCTIONAL_TIMEOUT_SECONDS)
         self.assertEqual(401, context.exception.code)
 
     def test_control_endpoint_requires_bearer_token(self) -> None:
         unauthenticated = HttpDataAgentClient(
             DataAgentClientSettings(
                 base_url=self.base_url,
-                timeout_seconds=2,
+                timeout_seconds=FUNCTIONAL_TIMEOUT_SECONDS,
                 max_retries=0,
             )
         )
@@ -315,7 +616,10 @@ class DataAgentServerTest(unittest.TestCase):
         self.assertEqual(401, context.exception.status_code)
 
     def test_health_endpoint_reports_manifest(self) -> None:
-        with urlopen(f"{self.base_url}/healthz", timeout=2) as response:
+        with urlopen(
+            f"{self.base_url}/healthz",
+            timeout=FUNCTIONAL_TIMEOUT_SECONDS,
+        ) as response:
             payload = json.load(response)
         self.assertEqual("ok", payload["status"])
         self.assertEqual(DATA_AGENT_API_VERSION, payload["api_version"])

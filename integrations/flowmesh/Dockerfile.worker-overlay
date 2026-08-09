@@ -1,6 +1,24 @@
 ARG FLOWMESH_WORKER_IMAGE
 FROM ${FLOWMESH_WORKER_IMAGE}
 
+# FlowMesh v0.1.8-rc.1 builds worker container environments from a fixed,
+# closed set of DockerWorkerConfig fields (see
+# src/server/supervisor/adapters/base.py::_base_environment). There is no
+# arbitrary-environment passthrough, so PATHFINDER_MCP_URL cannot be injected
+# from the worker config and must be baked in here instead. Override it at
+# build time:
+#
+#   docker build -f Dockerfile.worker-overlay \
+#     --build-arg FLOWMESH_WORKER_IMAGE=<agent-capable-worker-image> \
+#     --build-arg PATHFINDER_MCP_URL=http://127.0.0.1:8765/mcp \
+#     -t <registry>/flowmesh_worker:<version>-cpu .
+#
+# The image tag must follow FlowMesh's naming convention
+# <registry>/flowmesh_worker:<version>-cpu|gpu, because the supervisor derives
+# the image name from the worker config's docker_registry and version fields.
+ARG PATHFINDER_MCP_URL="http://127.0.0.1:8765/mcp"
+ENV PATHFINDER_MCP_URL=${PATHFINDER_MCP_URL}
+
 USER root
 COPY agent_configs/pathfinder_video.yaml \
     /app/worker/executors/agent/configs/agents/pathfinder_video.yaml

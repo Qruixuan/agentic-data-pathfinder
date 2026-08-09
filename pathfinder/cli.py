@@ -95,6 +95,26 @@ def _parser() -> argparse.ArgumentParser:
     flowmesh_session.add_argument("--agent-config")
     flowmesh_session.add_argument("--task-timeout", type=int, default=600)
     flowmesh_session.add_argument("--poll-interval", type=float, default=2.0)
+    pin = flowmesh_session.add_mutually_exclusive_group()
+    pin.add_argument(
+        "--worker-id",
+        help=(
+            "pin this session to an exact FlowMesh worker ID, e.g. wkr-16; "
+            "falls back to PATHFINDER_FLOWMESH_WORKER_ID"
+        ),
+    )
+    pin.add_argument(
+        "--worker-alias",
+        help=(
+            "pin this session to the worker currently holding this stable "
+            "alias; falls back to PATHFINDER_FLOWMESH_WORKER_ALIAS"
+        ),
+    )
+    flowmesh_session.add_argument(
+        "--validate-workflow",
+        action="store_true",
+        help="validate the workflow through FlowMesh before submitting it",
+    )
     flowmesh_session.add_argument(
         "--data-agent-url",
         help=(
@@ -254,6 +274,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 agent_config_name=args.agent_config,
                 task_timeout_seconds=args.task_timeout,
                 poll_interval_seconds=args.poll_interval,
+                worker_id=args.worker_id,
+                worker_alias=args.worker_alias,
+                validate_before_submit=(
+                    True if args.validate_workflow else None
+                ),
             )
             resolved_data_agent_url = (
                 args.data_agent_url

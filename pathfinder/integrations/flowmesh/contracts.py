@@ -5,6 +5,13 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Protocol
 
 
+def _bool_from_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class FlowMeshSettings:
     base_url: str = "http://127.0.0.1:8000"
@@ -13,6 +20,17 @@ class FlowMeshSettings:
     owner: str = "pathfinder"
     task_timeout_seconds: int = 600
     poll_interval_seconds: float = 2.0
+    worker_id: str | None = None
+    """Pin the session to this exact FlowMesh worker ID, e.g. ``wkr-16``."""
+    worker_alias: str | None = None
+    """Pin the session to the worker currently holding this stable alias.
+
+    FlowMesh worker IDs are reassigned when a worker restarts, so an alias is
+    the durable way to name the Pathfinder worker across runs. It is resolved
+    to a concrete ID immediately before submission.
+    """
+    validate_before_submit: bool = False
+    """Validate the workflow through FlowMesh before submitting it."""
 
     def __post_init__(self) -> None:
         if not self.base_url.strip():
@@ -23,6 +41,19 @@ class FlowMeshSettings:
             raise ValueError("FlowMesh task_timeout_seconds must be positive")
         if self.poll_interval_seconds <= 0:
             raise ValueError("FlowMesh poll_interval_seconds must be positive")
+        if self.worker_id is not None and self.worker_alias is not None:
+            raise ValueError(
+                "FlowMesh worker_id and worker_alias are mutually exclusive; "
+                "set at most one to pin a Pathfinder session"
+            )
+        if self.worker_id is not None and not self.worker_id.strip():
+            raise ValueError("FlowMesh worker_id cannot be blank")
+        if self.worker_alias is not None and not self.worker_alias.strip():
+            raise ValueError("FlowMesh worker_alias cannot be blank")
+
+    @property
+    def pinning_requested(self) -> bool:
+        return self.worker_id is not None or self.worker_alias is not None
 
     @classmethod
     def from_environment(
@@ -32,8 +63,26 @@ class FlowMeshSettings:
         agent_config_name: str | None = None,
         task_timeout_seconds: int | None = None,
         poll_interval_seconds: float | None = None,
+        worker_id: str | None = None,
+        worker_alias: str | None = None,
+        validate_before_submit: bool | None = None,
     ) -> "FlowMeshSettings":
         return cls(
+            worker_id=(
+                worker_id
+                or os.getenv("PATHFINDER_FLOWMESH_WORKER_ID")
+                or None
+            ),
+            worker_alias=(
+                worker_alias
+                or os.getenv("PATHFINDER_FLOWMESH_WORKER_ALIAS")
+                or None
+            ),
+            validate_before_submit=(
+                validate_before_submit
+                if validate_before_submit is not None
+                else _bool_from_env("PATHFINDER_FLOWMESH_VALIDATE", False)
+            ),
             base_url=base_url
             or os.getenv("FLOWMESH_BASE_URL")
             or "http://127.0.0.1:8000",
@@ -94,9 +143,24 @@ class FlowMeshAgentRun:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class WorkflowValidation:
+    ok: bool
+    errors: tuple[str, ...] = ()
+
+
 class FlowMeshClientProtocol(Protocol):
     def submit(self, workflow: Mapping[str, Any]) -> SubmittedWorkflow:
         """Submit one workflow and return its IDs."""
+
+    def validate(self, workflow: Mapping[str, Any]) -> WorkflowValidation:
+        """Validate one workflow without submitting or executing it."""
+
+    def resolve_worker_alias(self, alias: str) -> str:
+        """Return the current worker ID for a stable alias.
+
+        Must raise unless exactly one worker matches.
+        """
 
     def wait(
         self,

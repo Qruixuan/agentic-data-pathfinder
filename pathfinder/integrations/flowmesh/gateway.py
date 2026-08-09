@@ -27,6 +27,46 @@ class SessionNotFoundError(GatewayError):
     """Raised when a FlowMesh tool references an unknown session."""
 
 
+class TelemetryIncompleteError(GatewayError):
+    """Raised when transfer telemetry is not final at reconciliation time.
+
+    Byte and latency figures are only research observations once every
+    transfer attributed to the access is durably counted. A backend that hands
+    back a summary with transfers still in flight is reporting a lower bound,
+    not a measurement, so the gateway refuses to persist it.
+    """
+
+    def __init__(
+        self,
+        access_id: str,
+        in_flight_request_count: int | None,
+        *,
+        missing_fields: tuple[str, ...] = (),
+    ):
+        if missing_fields:
+            detail = (
+                "the backend cannot report completeness (missing "
+                f"{', '.join(missing_fields)}), so the summary may be "
+                "truncated without saying so"
+            )
+        elif in_flight_request_count is None:
+            detail = "the backend did not report an in-flight transfer count"
+        elif in_flight_request_count == 0:
+            detail = (
+                "no transfer is in flight now, but transfer activity changed "
+                "while the summary was read, so it is not a stable snapshot"
+            )
+        else:
+            detail = f"{in_flight_request_count} transfer(s) still in flight"
+        super().__init__(
+            f"Data Agent telemetry for access {access_id} is not final: "
+            f"{detail}"
+        )
+        self.access_id = access_id
+        self.in_flight_request_count = in_flight_request_count
+        self.missing_fields = missing_fields
+
+
 @dataclass(frozen=True)
 class GatewaySession:
     session_id: str
@@ -740,14 +780,60 @@ class AccessGateway:
         self,
         session_id: str,
     ) -> list[GatewayAccessEvent]:
+        """Fold final Data Agent transfer telemetry into the session events.
+
+        Collection is fully separated from persistence. Every access is read
+        and validated first, so an incomplete or mismatched summary for any
+        one access aborts before a single event is written; no telemetry
+        failure can leave some events carrying reconciled figures and others
+        carrying zeros.
+
+        That all-or-nothing property covers telemetry completeness only. The
+        write-back loop is one transaction per event rather than one per
+        session, so a store failure part way through it can still leave
+        earlier events updated.
+
+        Raises :class:`TelemetryIncompleteError` when a summary still has
+        transfers in flight or cannot report whether it does, and propagates
+        whatever the backend raises when it cannot obtain a final summary at
+        all.
+        """
         self.store.get_session(session_id)
         getter = getattr(self.backend, "get_access_telemetry", None)
         if not callable(getter):
             return self.store.list_events(session_id)
+
+        pending: list[tuple[int, Any]] = []
         for event in self.store.list_events(session_id):
             if event.event_id is None or event.data_agent_access_id is None:
                 continue
             telemetry = getter(event.data_agent_access_id)
+            # Checked here as well as in the client, because the gateway is
+            # the component that actually writes the research observation and
+            # must not depend on some other backend having enforced this.
+            # A backend that cannot answer the question is treated as
+            # incomplete: unverifiable completeness is not completeness, and
+            # a legacy summary that merely looks settled is exactly the silent
+            # under-count this contract exists to prevent.
+            missing = getattr(
+                telemetry,
+                "missing_completeness_fields",
+                ("in_flight_request_count", "telemetry_complete"),
+            )
+            if missing:
+                raise TelemetryIncompleteError(
+                    event.data_agent_access_id,
+                    getattr(telemetry, "in_flight_request_count", None),
+                    missing_fields=tuple(missing),
+                )
+            # Use the combined verdict, not the raw counter: a transfer that
+            # started and finished while the Data Agent was reading its own
+            # summary leaves the counter at zero but the snapshot unstable.
+            if getattr(telemetry, "telemetry_complete", None) is not True:
+                raise TelemetryIncompleteError(
+                    event.data_agent_access_id,
+                    getattr(telemetry, "in_flight_request_count", None),
+                )
             if (
                 telemetry.object_id != event.object_id
                 or telemetry.representation_id != event.representation_id
@@ -758,8 +844,11 @@ class AccessGateway:
                     "Data Agent telemetry does not match the gateway event: "
                     f"{event.data_agent_access_id}"
                 )
+            pending.append((event.event_id, telemetry))
+
+        for event_id, telemetry in pending:
             self.store.update_artifact_telemetry(
-                event.event_id,
+                event_id,
                 bytes_sent=telemetry.bytes_sent,
                 transfer_latency_ms=telemetry.transfer_latency_ms,
                 download_request_count=telemetry.download_request_count,

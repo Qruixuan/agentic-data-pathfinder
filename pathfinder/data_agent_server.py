@@ -165,9 +165,12 @@ class SQLiteDataAgentOperationStore:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
+        # journal_mode is a persistent property of the database file, so it
+        # is set once at initialization rather than re-asserted on every
+        # connection: switching journal mode takes a lock and can itself
+        # block on disk, which put avoidable I/O on the request hot path.
         connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode = WAL")
         try:
             yield connection
             connection.commit()
@@ -179,6 +182,7 @@ class SQLiteDataAgentOperationStore:
 
     def _initialize(self) -> None:
         with self._connection() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS data_agent_operations (
@@ -394,6 +398,13 @@ class DataAgentService:
         self.public_base_url = public_base_url.rstrip("/")
         self._sleep = sleep
         self._locks = _AccessLockPool()
+        self._in_flight_downloads: dict[str, int] = {}
+        # Monotonic per access, bumped on every reservation and never reset.
+        # A zero in-flight count alone cannot prove that no transfer existed
+        # during a telemetry read, because a transfer can start and finish
+        # entirely inside that window; a changed generation reveals it.
+        self._download_generations: dict[str, int] = {}
+        self._in_flight_lock = threading.Lock()
 
     def authorize_control(self, authorization: str | None) -> None:
         if self.settings.token is None:
@@ -591,11 +602,68 @@ class DataAgentService:
             size_bytes=size,
         )
 
+    def begin_artifact_download(self, access_id: str) -> None:
+        """Reserve one artifact transfer before any byte is written.
+
+        The transfer is only durably recorded once the response body has been
+        written, so a consumer that reads telemetry immediately after its
+        download completes can otherwise observe a summary that does not yet
+        include that transfer. Publishing the in-flight count lets the consumer
+        wait for a consistent snapshot instead of silently under-counting.
+
+        The generation is bumped under the same lock so that a reader can tell
+        that a transfer existed even if it both started and finished between
+        two observations.
+        """
+        with self._in_flight_lock:
+            self._in_flight_downloads[access_id] = (
+                self._in_flight_downloads.get(access_id, 0) + 1
+            )
+            self._download_generations[access_id] = (
+                self._download_generations.get(access_id, 0) + 1
+            )
+
     def record_artifact_download(
         self,
         download: DataAgentArtifactDownload,
     ) -> None:
+        """Commit one transfer, then release its in-flight reservation.
+
+        The order matters and is the whole basis of the quiescence contract:
+        the row is durable before the counter drops, so a reader that observes
+        zero in-flight transfers and *then* reads the summary cannot miss a
+        finished transfer.
+
+        If the commit fails the reservation is deliberately NOT released. The
+        transfer really happened but will never appear in the summary, so the
+        access must never look quiescent again; readers time out and fail the
+        session instead of recording silently truncated bytes and latency.
+        """
         self.store.record_artifact_download(download)
+        with self._in_flight_lock:
+            remaining = self._in_flight_downloads.get(
+                download.access_id, 0
+            ) - 1
+            if remaining > 0:
+                self._in_flight_downloads[download.access_id] = remaining
+            else:
+                self._in_flight_downloads.pop(download.access_id, None)
+
+    def in_flight_download_count(self, access_id: str) -> int:
+        with self._in_flight_lock:
+            return self._in_flight_downloads.get(access_id, 0)
+
+    def transfer_watermark(self, access_id: str) -> tuple[int, int]:
+        """Atomically sample the in-flight count and the transfer generation.
+
+        Both values must come from one critical section; sampling them
+        separately would reintroduce the very window this exists to detect.
+        """
+        with self._in_flight_lock:
+            return (
+                self._in_flight_downloads.get(access_id, 0),
+                self._download_generations.get(access_id, 0),
+            )
 
     def access_telemetry(self, access_id: str) -> dict[str, Any]:
         operation = self.store.get(access_id)
@@ -609,6 +677,30 @@ class DataAgentService:
                 f"stored request is invalid for access {access_id}"
             )
         request = DataAgentAccessRequest.from_dict(request_payload)
+        # Bracket the durable read with two watermarks. Reading the counter
+        # once before the summary is NOT enough: a transfer that starts after
+        # that read and has not committed by the time the summary is taken is
+        # invisible to both, so the snapshot would claim completeness while
+        # under-counting. The summary is only final when no transfer was in
+        # flight at either edge AND no transfer was reserved in between --
+        # the generation catches one that started and finished inside the
+        # window, which the counters alone cannot see.
+        before_in_flight, before_generation = self.transfer_watermark(
+            access_id
+        )
+        artifact_download = self.store.artifact_download_summary(access_id)
+        after_in_flight, after_generation = self.transfer_watermark(access_id)
+
+        stable = (
+            before_in_flight == 0
+            and after_in_flight == 0
+            and before_generation == after_generation
+        )
+        # Report the count truthfully and carry the verdict separately, so a
+        # transfer that began and ended inside the window is still flagged
+        # incomplete even though both counts read zero.
+        artifact_download["in_flight_request_count"] = after_in_flight
+        artifact_download["telemetry_complete"] = stable
         return {
             "api_version": DATA_AGENT_API_VERSION,
             "status": "succeeded",
@@ -616,9 +708,7 @@ class DataAgentService:
             "object_id": request.object_id,
             "representation_id": request.representation_id,
             "object_catalog_version": self._object_catalog_version(),
-            "artifact_download": self.store.artifact_download_summary(
-                access_id
-            ),
+            "artifact_download": artifact_download,
         }
 
     def _object_catalog_version(self) -> str | None:
@@ -883,6 +973,9 @@ class DataAgentHTTPRequestHandler(BaseHTTPRequestHandler):
         started = time.perf_counter()
         bytes_sent = 0
         completed = False
+        # Registered before any byte reaches the client, so a telemetry read
+        # issued after the download cannot miss this transfer.
+        self.service.begin_artifact_download(artifact.access_id)
         try:
             self.send_response(
                 HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK
@@ -913,22 +1006,32 @@ class DataAgentHTTPRequestHandler(BaseHTTPRequestHandler):
             completed = remaining == 0
         finally:
             completed_at = time.time()
-            self.service.record_artifact_download(
-                DataAgentArtifactDownload(
-                    access_id=artifact.access_id,
-                    range_start=start,
-                    range_end=end,
-                    bytes_sent=bytes_sent,
-                    duration_ms=(time.perf_counter() - started) * 1_000.0,
-                    completed=completed,
-                    full_artifact=(
-                        artifact.size_bytes == 0
-                        or (start == 0 and end == artifact.size_bytes - 1)
-                    ),
-                    started_at=started_at,
-                    completed_at=completed_at,
+            try:
+                self.service.record_artifact_download(
+                    DataAgentArtifactDownload(
+                        access_id=artifact.access_id,
+                        range_start=start,
+                        range_end=end,
+                        bytes_sent=bytes_sent,
+                        duration_ms=(time.perf_counter() - started) * 1_000.0,
+                        completed=completed,
+                        full_artifact=(
+                            artifact.size_bytes == 0
+                            or (start == 0 and end == artifact.size_bytes - 1)
+                        ),
+                        started_at=started_at,
+                        completed_at=completed_at,
+                    )
                 )
-            )
+            except Exception:
+                # The reservation stays held on purpose, so telemetry for this
+                # access can never report quiescence and no downstream reader
+                # will treat the truncated summary as a complete observation.
+                logger.exception(
+                    "Data Agent could not record the artifact transfer for "
+                    "access %s; its telemetry is permanently incomplete",
+                    artifact.access_id,
+                )
 
     def _parse_range(self, size: int) -> tuple[int, int]:
         if size == 0:

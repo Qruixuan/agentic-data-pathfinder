@@ -13,6 +13,13 @@ authentication, controlled minimum latency, and signed artifact downloads.
 The included manifest and data files are connectivity fixtures only. They are
 not real multimodal research data.
 
+The two values below are **placeholders**. Like the LLM credentials and the
+FlowMesh PAT, the bearer token and artifact signing secret must come from a
+repository-external permission-restricted configuration file or the
+deployment's approved secret manager, and must not appear in Git, command
+arguments, logs, shell history, or AI output — see
+[Credential Handling](../flowmesh/README.md#credential-handling).
+
 ```powershell
 $env:PATHFINDER_DATA_AGENT_TOKEN = "<gateway-to-data-agent-token>"
 $env:PATHFINDER_DATA_AGENT_ARTIFACT_SECRET = "<artifact-signing-secret>"
@@ -144,7 +151,9 @@ returns measurements joined by `access_id`:
     "full_download_count": 1,
     "bytes_sent": 1048580,
     "transfer_latency_ms": 21.4,
-    "latest_completed_at": 1770000000.0
+    "latest_completed_at": 1770000000.0,
+    "in_flight_request_count": 0,
+    "telemetry_complete": true
   }
 }
 ```
@@ -153,6 +162,98 @@ returns measurements joined by `access_id`:
 that access. `full_download_count` counts completed requests that covered the
 entire artifact in one response. The FlowMesh runner reconciles this summary
 into the corresponding Gateway event after the workflow terminates.
+
+### Reading a final summary
+
+A transfer's bytes and duration are only known once its response body has been
+written, so the Data Agent records the row *after* the last byte reaches the
+client. A consumer that reads telemetry the instant its download finishes can
+therefore observe a summary that does not yet include that transfer — the
+counts silently read low rather than raising.
+
+`in_flight_request_count` reports transfers that have started but are not yet
+durably recorded. **A summary read while it is above zero is not final.**
+
+A zero count alone is not sufficient either. A transfer that both starts and
+finishes while the server is reading its own durable summary leaves the counter
+at zero on both sides of that read, yet the summary may not include it. The
+server therefore brackets the read with a monotonic per-access *transfer
+generation*: it samples `(in_flight, generation)` atomically, reads the
+summary, samples again, and reports `telemetry_complete: true` only when both
+samples show zero in flight **and** an unchanged generation. Otherwise the
+summary is published as-is with `telemetry_complete: false` so the caller keeps
+polling. `in_flight_request_count` stays truthful and independent of that
+verdict; consumers must gate on `telemetry_complete`, not on the counter.
+
+`HttpDataAgentClient.get_access_telemetry` accepts `wait_for_quiescence=True`
+to poll until the snapshot is stable:
+
+```python
+telemetry = client.get_access_telemetry(
+    access_id,
+    wait_for_quiescence=True,          # bounded; default 5s
+    quiescence_timeout_seconds=5.0,
+)
+```
+
+The wait is bounded, and it **fails closed**: on timeout the client raises
+`DataAgentTelemetryQuiescenceError` rather than returning the provisional
+summary. The provisional figures are attached to the exception for diagnostics
+only. Failing the Pathfinder session is preferred over silently recording
+under-counted bytes and latency as if they were complete observations.
+`AccessGateway` applies the same rule and raises `TelemetryIncompleteError`; a
+backend that cannot answer the question at all is treated as incomplete, since
+unverifiable completeness is not completeness.
+
+`RemoteDataAgentBackend` requests quiescence unconditionally, because Gateway
+reconciliation writes the realized byte and latency figures used for analysis
+and must not under-count.
+
+Data Agents predating this contract omit `in_flight_request_count`,
+`telemetry_complete`, or both. Absence is kept distinct from an explicit `0` or
+`true` all the way through: the payload still parses, but the missing field
+reads as `None` and is **never** inferred from the other one. Such a summary can
+look perfectly settled while hiding a transfer in progress, so it is rejected
+rather than trusted:
+
+- `get_access_telemetry(wait_for_quiescence=True)` raises
+  `DataAgentTelemetryUnsupportedError` on the **first** response, without
+  waiting — polling cannot make a field appear that the server never sends.
+- `AccessGateway` checks for the same missing fields itself, before any write,
+  and raises `TelemetryIncompleteError` with `missing_fields` populated.
+
+Reading without `wait_for_quiescence` still returns the parsed summary, with
+`telemetry_supported` false and `telemetry_complete` false. An explicit
+`in_flight_request_count: 0` with `telemetry_complete: true` remains a valid
+result: a session that downloaded nothing reconciles to zeros normally.
+
+#### What `telemetry_complete: true` does and does not certify
+
+It certifies a **stable, per-process, point-in-time snapshot**. Because the
+generation is monotonic and is bumped under the same lock that reserves an
+in-flight slot, two matching samples prove that no transfer was reserved during
+the window and none was outstanding at its edges; because the durable row is
+committed *before* the counter is decremented, every transfer this process
+began had already been committed before the window opened. The summary is
+therefore valid at every instant in the window — a linearizable point-in-time
+snapshot.
+
+It does **not**:
+
+- **Seal the access.** It certifies the past, not the future. Artifact URLs are
+  signed with a TTL and validated on signature and expiry alone; the Data Agent
+  has no knowledge of workflow state, so a late, retried, or duplicated `GET`
+  can start a new transfer immediately after a complete snapshot is returned.
+  Bytes transferred after reconciliation are simply not counted.
+- **Coordinate multiple Data Agent processes.** The counter and generation live
+  in one process's memory. A second server process sharing the same operation
+  DB has its own state, and neither can certify the other's transfers.
+
+Both gaps are **explicit follow-up requirements, not current guarantees**:
+access sealing (revoking or refusing artifact URLs once a session is
+reconciled) and cross-process coordination (distributed leases over the shared
+operation DB). Until they exist, a run must be interpreted as reconciled with
+respect to one Data Agent process at one instant.
 
 The Gateway persists `realized_cost` but removes it from the tool response
 shown to the FlowMesh agent.
@@ -285,6 +386,28 @@ Gateway round-trip latency still covers only access admission, file hashing,
 and descriptor generation. Artifact transfer bytes and duration are now
 recorded separately and reconciled by `access_id`; analyses must use those
 fields rather than interpreting the initial round-trip as full-video latency.
+Reconciliation must also read a quiescent summary (see
+[Reading a final summary](#reading-a-final-summary)), because transfers are
+recorded after their response body is written.
+
+The in-flight counter and transfer generation are per server process and held
+in memory. They are sufficient for the current single-process Data Agent but do
+not coordinate several server processes sharing one operation DB; that needs
+the same distributed leases already listed above.
+
+Two named follow-up requirements remain open, and neither is a guarantee today:
+
+- **Access sealing.** `telemetry_complete: true` certifies a point-in-time
+  snapshot; it does not stop a further download. Signed artifact URLs stay
+  valid for their TTL regardless of session or workflow state, so a transfer
+  arriving after reconciliation is uncounted. Sealing an access at the end of
+  reconciliation is future work.
+- **Multi-process telemetry coordination.** Completeness is certified per
+  process. Running several Data Agent processes over one operation DB is not
+  supported for telemetry purposes until the distributed-lease work lands.
+
+See [Reading a final summary](#reading-a-final-summary) for the exact
+guarantee.
 
 The distributed version will let the compiled physical binding select a Data
 Agent endpoint per representation shard. That routing belongs in the

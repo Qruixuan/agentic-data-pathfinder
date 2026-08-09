@@ -144,8 +144,18 @@ The coupling layer includes:
 - a public-SDK client and one-agent workflow adapter;
 - an MCP access gateway with persistent session state;
 - atomic budget and access-count checks for the local MVP;
+- worker pinning by exact ID or stable alias, so a session cannot run on an
+  unrelated worker of a shared deployment;
+- workflow validation that does not submit or execute a task;
 - a FlowMesh agent configuration and thin worker-image overlay; and
-- fake-client integration tests that do not require a running FlowMesh stack.
+- fake-client integration tests that do not require a running FlowMesh stack,
+  plus compatibility tests run against a real FlowMesh source tree when one is
+  available.
+
+The integration targets FlowMesh **v0.1.8-rc.1**. Two constraints of that
+version shape the generated workflow: Pathfinder provenance must be nested
+under `metadata.annotations.custom`, and the Agent task must be wrapped in a
+one-node `spec.graph` for worker pinning to take effect at all.
 
 See
 [`integrations/flowmesh/README.md`](integrations/flowmesh/README.md)
@@ -159,6 +169,20 @@ post-download byte/time attribution while keeping realized cost hidden from
 the FlowMesh agent. See
 [`integrations/data_agent/README.md`](integrations/data_agent/README.md)
 for the server-side protocol contract.
+
+Post-workflow reconciliation is fail-closed: byte and latency figures are
+accepted only when the Data Agent reports `telemetry_complete=true`, and an
+unstable or unanswerable snapshot fails the session rather than recording
+under-counted values. That flag certifies a stable, per-process, point-in-time
+snapshot. It does **not** prevent downloads after reconciliation and does not
+coordinate multiple Data Agent processes; access sealing and multi-process
+coordination are explicit follow-up requirements, not current guarantees.
+
+All credentials — LLM keys, the FlowMesh PAT, and the Data Agent bearer token
+and artifact signing secret — come from a repository-external
+permission-restricted configuration file or the deployment's approved secret
+manager. Committed examples in this repository contain placeholders only; see
+[Credential Handling](integrations/flowmesh/README.md#credential-handling).
 
 ## Configuration Contract
 

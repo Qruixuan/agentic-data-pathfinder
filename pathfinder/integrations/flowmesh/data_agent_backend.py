@@ -14,8 +14,20 @@ from .gateway import BackendAccessResult, GatewaySession
 class RemoteDataAgentBackend:
     """Adapts the generic DataAgentClient to the FlowMesh access gateway."""
 
-    def __init__(self, client: DataAgentClientProtocol):
+    def __init__(
+        self,
+        client: DataAgentClientProtocol,
+        *,
+        telemetry_quiescence_timeout_seconds: float = 5.0,
+    ):
+        if telemetry_quiescence_timeout_seconds < 0:
+            raise ValueError(
+                "telemetry_quiescence_timeout_seconds cannot be negative"
+            )
         self.client = client
+        self.telemetry_quiescence_timeout_seconds = (
+            telemetry_quiescence_timeout_seconds
+        )
 
     def access(
         self,
@@ -71,4 +83,20 @@ class RemoteDataAgentBackend:
         self,
         access_id: str,
     ) -> DataAgentAccessTelemetry:
-        return self.client.get_access_telemetry(access_id)
+        # Reconciliation runs after the workflow terminates and writes the
+        # realized byte and latency figures used for analysis, so it must see
+        # a final summary rather than one missing a just-finished transfer.
+        # The initial access() deliberately does not wait: at that point the
+        # Agent may not have started downloading at all, so there is nothing
+        # to become quiescent and waiting would only add latency.
+        #
+        # DataAgentTelemetryQuiescenceError is intentionally not caught. A
+        # session whose transfers cannot be accounted for must fail rather
+        # than yield a partial research observation.
+        return self.client.get_access_telemetry(
+            access_id,
+            wait_for_quiescence=True,
+            quiescence_timeout_seconds=(
+                self.telemetry_quiescence_timeout_seconds
+            ),
+        )

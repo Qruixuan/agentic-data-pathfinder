@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import socket
@@ -15,6 +16,8 @@ from urllib.request import Request, urlopen
 
 
 DATA_AGENT_API_VERSION = "pathfinder.data-agent/v1alpha1"
+
+logger = logging.getLogger("pathfinder.data_agent_client")
 
 
 class DataAgentClientError(RuntimeError):
@@ -37,6 +40,77 @@ class DataAgentHTTPError(DataAgentClientError):
 
 class DataAgentProtocolError(DataAgentClientError):
     """Raised when the Data Agent returns an invalid protocol response."""
+
+
+def _incompleteness_detail(in_flight_request_count: int | None) -> str:
+    """Explain *why* a summary is not final, for humans reading a failure.
+
+    A zero count is the confusing case: it does not mean nothing happened, it
+    means the Data Agent saw the transfer generation move while it was reading
+    the summary, so the numbers do not describe any single instant.
+    """
+    if in_flight_request_count is None:
+        return (
+            "the Data Agent did not report the fields required to prove "
+            "completeness"
+        )
+    if in_flight_request_count == 0:
+        return (
+            "no transfer is in flight now, but transfer activity changed "
+            "while the summary was being read, so the snapshot is not a "
+            "stable point in time"
+        )
+    return f"{in_flight_request_count} transfer(s) are still in flight"
+
+
+class DataAgentTelemetryQuiescenceError(DataAgentClientError):
+    """Raised when transfer telemetry never reaches a final state.
+
+    Research observations are only meaningful when every transfer attributed
+    to an access has been durably recorded. Returning the provisional summary
+    instead would silently under-report bytes and latency, so the wait fails
+    closed and the caller is expected to discard the session.
+    """
+
+    def __init__(
+        self,
+        access_id: str,
+        in_flight_request_count: int | None,
+        timeout_seconds: float,
+        telemetry: "DataAgentAccessTelemetry",
+    ):
+        super().__init__(
+            f"Data Agent telemetry for access {access_id} did not become "
+            f"final within {timeout_seconds:.3f}s: "
+            f"{_incompleteness_detail(in_flight_request_count)}"
+        )
+        self.access_id = access_id
+        self.in_flight_request_count = in_flight_request_count
+        self.timeout_seconds = timeout_seconds
+        self.telemetry = telemetry
+
+
+class DataAgentTelemetryUnsupportedError(DataAgentProtocolError):
+    """Raised when a Data Agent cannot prove its telemetry is final.
+
+    A server that omits ``in_flight_request_count`` or ``telemetry_complete``
+    predates the quiescence contract. Its summary may be perfectly accurate,
+    but nothing in the response distinguishes that from one truncated by a
+    transfer still being written, and polling cannot help because the missing
+    field will never appear. Treating silence as completeness is exactly the
+    silent under-count the contract exists to prevent, so the wait fails
+    immediately instead.
+    """
+
+    def __init__(self, access_id: str, missing_fields: tuple[str, ...]):
+        super().__init__(
+            f"Data Agent telemetry for access {access_id} omits "
+            f"{', '.join(missing_fields)}, so its completeness cannot be "
+            "verified; upgrade the Data Agent to one that reports transfer "
+            "quiescence"
+        )
+        self.access_id = access_id
+        self.missing_fields = missing_fields
 
 
 @dataclass(frozen=True)
@@ -460,6 +534,59 @@ class DataAgentAccessTelemetry:
     bytes_sent: int
     transfer_latency_ms: float
     latest_completed_at: float | None = None
+    in_flight_request_count: int | None = None
+    """Transfers started but not yet durably recorded.
+
+    A summary read while this is above zero is not final. ``None`` means the
+    Data Agent did not report the field at all, which is deliberately *not*
+    the same as an explicit zero: zero is a measurement, absence is silence.
+    """
+    server_reported_complete: bool | None = None
+    """The Data Agent's own stability verdict for this snapshot.
+
+    The counter alone cannot express a transfer that both started and finished
+    while the durable summary was being read: it reads zero at both edges. The
+    Data Agent brackets the read with a generation check and publishes the
+    verdict here. ``None`` means the Data Agent predates the field.
+    """
+
+    @property
+    def missing_completeness_fields(self) -> tuple[str, ...]:
+        """Names of the fields this response needed but did not carry."""
+        missing = []
+        if self.in_flight_request_count is None:
+            missing.append("in_flight_request_count")
+        if self.server_reported_complete is None:
+            missing.append("telemetry_complete")
+        return tuple(missing)
+
+    @property
+    def telemetry_supported(self) -> bool:
+        """Whether the Data Agent can answer the completeness question at all.
+
+        False for a server predating the quiescence contract. Such a summary
+        is still parsed and readable, but it can never be treated as a final
+        research observation, because nothing in it distinguishes an accurate
+        total from one truncated by a transfer still being written.
+        """
+        return not self.missing_completeness_fields
+
+    @property
+    def telemetry_complete(self) -> bool:
+        """Whether every transfer that process handled is already counted.
+
+        Fails closed on silence. Both signals must be present and must agree:
+        the Data Agent increments the in-flight counter before the first byte
+        is written and decrements it only after the transfer row is committed,
+        and it separately confirms that no transfer was reserved while the
+        summary was being read. A server that supplies neither signal is
+        reported as incomplete rather than trusted by default.
+        """
+        if not self.telemetry_supported:
+            return False
+        if self.in_flight_request_count != 0:
+            return False
+        return bool(self.server_reported_complete)
 
     @classmethod
     def from_dict(
@@ -522,6 +649,28 @@ class DataAgentAccessTelemetry:
                     "non-negative integer"
                 )
             integer_fields[name] = value
+        # Absent stays None rather than collapsing to zero: a legacy server
+        # that says nothing must not be indistinguishable from a current one
+        # reporting that nothing is in flight.
+        in_flight = downloads.get("in_flight_request_count")
+        if in_flight is not None and (
+            not isinstance(in_flight, int)
+            or isinstance(in_flight, bool)
+            or in_flight < 0
+        ):
+            raise DataAgentProtocolError(
+                "Data Agent artifact_download.in_flight_request_count must be "
+                "a non-negative integer or absent"
+            )
+        server_reported_complete = downloads.get("telemetry_complete")
+        if server_reported_complete is not None and not isinstance(
+            server_reported_complete,
+            bool,
+        ):
+            raise DataAgentProtocolError(
+                "Data Agent artifact_download.telemetry_complete must be a "
+                "boolean or absent"
+            )
         latest_completed_at = downloads.get("latest_completed_at")
         if latest_completed_at is not None:
             latest_completed_at = _validated_nonnegative_number(
@@ -542,6 +691,8 @@ class DataAgentAccessTelemetry:
                 "transfer_latency_ms",
             ),
             latest_completed_at=latest_completed_at,
+            in_flight_request_count=in_flight,
+            server_reported_complete=server_reported_complete,
         )
 
 
@@ -555,6 +706,9 @@ class DataAgentClientProtocol(Protocol):
     def get_access_telemetry(
         self,
         access_id: str,
+        *,
+        wait_for_quiescence: bool = False,
+        quiescence_timeout_seconds: float = 5.0,
     ) -> DataAgentAccessTelemetry:
         """Return transfer telemetry attributed to one access."""
 
@@ -618,9 +772,34 @@ class HttpDataAgentClient:
     def get_access_telemetry(
         self,
         access_id: str,
+        *,
+        wait_for_quiescence: bool = False,
+        quiescence_timeout_seconds: float = 5.0,
+        quiescence_poll_seconds: float = 0.02,
     ) -> DataAgentAccessTelemetry:
+        """Return transfer telemetry attributed to one access.
+
+        Artifact transfers are recorded after the response body is written, so
+        a summary read immediately after a download can omit that transfer.
+        With ``wait_for_quiescence`` the client polls until the Data Agent
+        reports no in-flight transfers, yielding a final summary.
+
+        The wait is bounded, and it fails closed: on timeout this raises
+        :class:`DataAgentTelemetryQuiescenceError` instead of returning the
+        provisional summary. A stalled transfer must fail the Pathfinder
+        session rather than contribute silently under-counted bytes and
+        latency to the research record.
+
+        A Data Agent that omits the completeness fields altogether raises
+        :class:`DataAgentTelemetryUnsupportedError` on the first response,
+        without waiting; its summary cannot be verified at any timeout.
+        """
         if not isinstance(access_id, str) or not access_id.strip():
             raise ValueError("Data Agent access_id cannot be empty")
+        if quiescence_timeout_seconds < 0:
+            raise ValueError(
+                "quiescence_timeout_seconds cannot be negative"
+            )
         headers = {
             "Accept": "application/json",
             "User-Agent": "pathfinder-data-agent-client/0.1",
@@ -632,15 +811,43 @@ class HttpDataAgentClient:
             self.settings.base_url.rstrip("/") + "/",
             f"v1/accesses/{quote(access_id, safe='')}/telemetry",
         )
-        payload = self._send_with_retries(
-            Request(telemetry_url, headers=headers, method="GET")
-        )
-        result = DataAgentAccessTelemetry.from_dict(payload)
-        if result.access_id != access_id:
-            raise DataAgentProtocolError(
-                "Data Agent telemetry access_id does not match the request"
+        deadline = time.monotonic() + quiescence_timeout_seconds
+        while True:
+            payload = self._send_with_retries(
+                Request(telemetry_url, headers=headers, method="GET")
             )
-        return result
+            result = DataAgentAccessTelemetry.from_dict(payload)
+            if result.access_id != access_id:
+                raise DataAgentProtocolError(
+                    "Data Agent telemetry access_id does not match the request"
+                )
+            if not wait_for_quiescence:
+                return result
+            if not result.telemetry_supported:
+                # Polling cannot help: the field will never appear. Fail now
+                # rather than burning the timeout to reach the same verdict.
+                raise DataAgentTelemetryUnsupportedError(
+                    access_id,
+                    result.missing_completeness_fields,
+                )
+            if result.telemetry_complete:
+                return result
+            if time.monotonic() >= deadline:
+                logger.error(
+                    "Data Agent telemetry for access %s did not become final "
+                    "within %.3fs (%s); refusing to return a provisional "
+                    "summary",
+                    access_id,
+                    quiescence_timeout_seconds,
+                    _incompleteness_detail(result.in_flight_request_count),
+                )
+                raise DataAgentTelemetryQuiescenceError(
+                    access_id,
+                    result.in_flight_request_count,
+                    quiescence_timeout_seconds,
+                    result,
+                )
+            self._sleep(quiescence_poll_seconds)
 
     def _send_with_retries(self, request: Request) -> Mapping[str, Any]:
         for attempt in range(self.settings.max_retries + 1):
