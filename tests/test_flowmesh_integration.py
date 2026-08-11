@@ -608,6 +608,55 @@ class FlowMeshIntegrationTest(unittest.TestCase):
         self.assertIn("session-123", spec["task"])
         self.assertIn("list_offers", spec["task"])
 
+    def test_workflow_requests_http_result_delivery(self) -> None:
+        """Guard the fix for results.retrieve() answering 404 result not found.
+
+        A local destination leaves results.json on the worker and uploads
+        nothing, so the Root Server never holds a result to return.
+        """
+        for selected_worker_id in (None, "wkr-16"):
+            with self.subTest(selected_worker=selected_worker_id):
+                workflow = build_agent_workflow(
+                    "session-123",
+                    self.request(),
+                    FlowMeshSettings(),
+                    selected_worker_id=selected_worker_id,
+                )
+                destination = agent_spec_of(workflow)["output"]["destination"]
+                self.assertEqual("http", destination["type"])
+                self.assertNotEqual("local", destination["type"])
+                # url, method, and headers must stay absent: the worker fills
+                # in FLOWMESH_BASE_URL + /api/v1/results and attaches its own
+                # bearer token. Setting them here would hard-code a deployment
+                # address or carry a credential inside the workflow document.
+                self.assertEqual({"type"}, set(destination))
+
+    def test_no_workflow_variant_uses_a_local_destination(self) -> None:
+        variants = [
+            build_agent_workflow(
+                "session-123", self.request(), FlowMeshSettings()
+            ),
+            build_agent_workflow(
+                "session-123",
+                self.request(),
+                FlowMeshSettings(),
+                selected_worker_id="wkr-16",
+            ),
+            build_agent_workflow(
+                "session-123",
+                FlowMeshAgentRunRequest(
+                    question="When does the red car enter the tunnel?",
+                    design_id="D_structured_digest",
+                    task_class_id="video_qa",
+                    trial_id="local-destination-guard",
+                    object_id="video-001",
+                ),
+                FlowMeshSettings(agent_config_name="pathfinder_video"),
+            ),
+        ]
+        for workflow in variants:
+            self.assertNotIn('"local"', json.dumps(workflow))
+
     def test_workflow_is_a_single_node_graph(self) -> None:
         workflow = build_agent_workflow(
             "session-123",
@@ -908,6 +957,27 @@ class DeployedParserCompatibilityTest(unittest.TestCase):
             PATHFINDER_GRAPH_NODE_NAME,
             parsed.tasks[0].graph_node_name,
         )
+
+    def test_deployed_parser_reads_an_http_result_destination(self) -> None:
+        """The deployed parser must accept http delivery with no url.
+
+        On v0.1.8-rc.1 the worker resolves an http destination whose url is
+        absent to FLOWMESH_BASE_URL + /api/v1/results and attaches its own
+        auth headers, which is why Pathfinder omits both. A local destination
+        instead keeps results.json on the worker, and results.retrieve()
+        against the Root Server then answers 404 result not found.
+        """
+        workflow = build_agent_workflow(
+            "session-abcdef123456",
+            self.request(),
+            FlowMeshSettings(),
+            selected_worker_id="wkr-16",
+        )
+        parsed = self.parse(workflow)
+        destination = parsed.tasks[0].task.spec.output.destination
+        self.assertEqual("http", destination.type)
+        self.assertIsNone(destination.url)
+        self.assertIsNone(destination.headers)
 
     def test_annotations_directly_under_annotations_are_rejected(
         self,

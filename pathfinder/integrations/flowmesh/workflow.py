@@ -92,8 +92,20 @@ def build_agent_workflow(
             }
         },
         "agent": {"timeout": settings.task_timeout_seconds},
+        # A local destination leaves results.json on the worker and uploads
+        # nothing, so results.retrieve() against the Root Server answers
+        # 404 result not found. Requesting http delivery makes the worker
+        # POST the result to the server Pathfinder then reads it from.
+        #
+        # url, method, and headers are deliberately omitted. On FlowMesh
+        # v0.1.8-rc.1 an http destination with no url resolves to
+        # FLOWMESH_BASE_URL + /api/v1/results inside the worker, and the
+        # worker attaches its own bearer token because that URL matches its
+        # configured FlowMesh origin. Setting url here would hard-code a
+        # deployment address, and setting headers would mean carrying a
+        # credential in the workflow document.
         "output": {
-            "destination": {"type": "local"},
+            "destination": {"type": "http"},
             "artifacts": ["agent_output.txt"],
         },
     }
