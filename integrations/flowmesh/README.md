@@ -52,8 +52,12 @@ published SDK:
 ```powershell
 python -m pip install -e .
 python -m pip install -e /path/to/FlowMesh/sdk
-python -m pip install "mcp>=1.23.0"
+python -m pip install "mcp==1.28.1"
 ```
+
+The MCP version is pinned to the version already present in the deployed
+FlowMesh worker image. Host and worker must use the same protocol package for
+the smoke-test environment.
 
 ## 2. Start the Pathfinder Tool Gateway
 
@@ -83,6 +87,21 @@ $env:PATHFINDER_DATA_AGENT_TOKEN = "<optional-bearer-token>"
 
 The Gateway-to-Data-Agent protocol is documented in
 [`../data_agent/README.md`](../data_agent/README.md).
+
+The Agent-visible tools are `list_offers`, `access_representation`,
+`fetch_artifact`, and `get_session_state`. Inline representations are returned
+directly by `access_representation`. For an `artifact_uri`, the Gateway removes
+the signed URL and returns a random opaque `artifact_handle`. The Agent must
+pass that handle and the same session ID to `fetch_artifact`; it cannot supply
+an arbitrary URL.
+
+`fetch_artifact` resolves the handle to the original accepted access event,
+replays the same idempotent Data Agent request to obtain a fresh signed URL,
+and downloads it inside the trusted Gateway process. It rejects cross-session
+handles, redirects, unexpected origins or paths, oversized responses,
+unsupported binary media, invalid UTF-8/JSON, and checksum mismatches. Only
+bounded JSON and UTF-8 text are returned to the Agent. The signed URL is never
+stored in Gateway SQLite state or included in an MCP response.
 
 Use `http://host.docker.internal:8765/mcp` when a Docker Desktop FlowMesh
 worker needs to reach a gateway on the host. For a remote or native-Linux
@@ -247,7 +266,8 @@ python -m pathfinder run-flowmesh-session `
 
 The runner registers the session before submitting the FlowMesh workflow. The
 agent receives the opaque session ID in its task prompt and uses it when
-calling `list_offers`, `access_representation`, and `get_session_state`.
+calling `list_offers`, `access_representation`, `fetch_artifact`, and
+`get_session_state`.
 When a remote Data Agent is configured, the runner also queries completed
 artifact-transfer telemetry and attributes it to the matching Gateway access
 event before returning the session result.
@@ -299,6 +319,9 @@ Rotate through the secret manager, not by editing files in this repository.
 - The HTTP `DataAgentClient`, remote backend adapter, and single-node
   local-filesystem Data Agent server are implemented. Object storage,
   transforms, and multi-node routing remain future work.
+- `fetch_artifact` intentionally returns only bounded JSON or UTF-8 text.
+  Video, image, and other binary media require a future representation-aware
+  consumer rather than embedding binary bytes in an MCP tool response.
 - The integration is pinned to FlowMesh `v0.1.8-rc.1` (`flowmesh-sdk==0.1.8rc1`).
   The `annotations.custom` nesting, the one-node graph requirement, and the
   absence of worker-environment passthrough were all verified against that

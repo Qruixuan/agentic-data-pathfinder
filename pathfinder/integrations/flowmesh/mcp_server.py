@@ -72,6 +72,14 @@ def build_mcp_server(
         return gateway.access_representation(session_id, representation_id)
 
     @server.tool()
+    def fetch_artifact(
+        session_id: str,
+        artifact_handle: str,
+    ) -> dict[str, Any]:
+        """Fetch bounded text or JSON using a session-bound artifact handle."""
+        return gateway.fetch_artifact(session_id, artifact_handle)
+
+    @server.tool()
     def get_session_state(session_id: str) -> dict[str, Any]:
         """Return the current budget and access-event state."""
         return gateway.get_session_state(session_id)

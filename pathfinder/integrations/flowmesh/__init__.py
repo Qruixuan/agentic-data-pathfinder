@@ -15,6 +15,8 @@ from .contracts import (
 from .data_agent_backend import RemoteDataAgentBackend
 from .gateway import (
     AccessGateway,
+    ArtifactFetchUnsupportedError,
+    ArtifactHandleError,
     GatewayError,
     SQLiteSessionStore,
     TelemetryIncompleteError,
@@ -27,6 +29,8 @@ from .workflow import (
 
 __all__ = [
     "AccessGateway",
+    "ArtifactFetchUnsupportedError",
+    "ArtifactHandleError",
     "FlowMeshAgentAdapter",
     "FlowMeshAgentRun",
     "FlowMeshAgentRunRequest",

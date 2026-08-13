@@ -12,7 +12,7 @@ from hashlib import sha256
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 
 DATA_AGENT_API_VERSION = "pathfinder.data-agent/v1alpha1"
@@ -40,6 +40,30 @@ class DataAgentHTTPError(DataAgentClientError):
 
 class DataAgentProtocolError(DataAgentClientError):
     """Raised when the Data Agent returns an invalid protocol response."""
+
+
+class DataAgentArtifactError(DataAgentClientError):
+    """Base error for a rejected or failed artifact fetch."""
+
+
+class DataAgentArtifactSecurityError(DataAgentArtifactError):
+    """Raised when an artifact URL violates the configured trust boundary."""
+
+
+class DataAgentArtifactRedirectError(DataAgentArtifactSecurityError):
+    """Raised when the Data Agent attempts to redirect an artifact request."""
+
+
+class DataAgentArtifactTooLargeError(DataAgentArtifactError):
+    """Raised when an artifact exceeds the configured response bound."""
+
+
+class DataAgentArtifactUnsupportedError(DataAgentArtifactError):
+    """Raised when an artifact cannot be represented safely to the Agent."""
+
+
+class DataAgentArtifactIntegrityError(DataAgentArtifactError):
+    """Raised when downloaded bytes do not match the access response."""
 
 
 def _incompleteness_detail(in_flight_request_count: int | None) -> str:
@@ -120,6 +144,7 @@ class DataAgentClientSettings:
     timeout_seconds: float = 30.0
     max_retries: int = 1
     max_response_bytes: int = 4 * 1024 * 1024
+    max_artifact_bytes: int = 4 * 1024 * 1024
 
     def __post_init__(self) -> None:
         if not isinstance(self.base_url, str) or not self.base_url.strip():
@@ -161,6 +186,14 @@ class DataAgentClientSettings:
         ):
             raise ValueError(
                 "Data Agent max_response_bytes must be a positive integer"
+            )
+        if (
+            not isinstance(self.max_artifact_bytes, int)
+            or isinstance(self.max_artifact_bytes, bool)
+            or self.max_artifact_bytes <= 0
+        ):
+            raise ValueError(
+                "Data Agent max_artifact_bytes must be a positive integer"
             )
 
     @classmethod
@@ -356,6 +389,10 @@ class DataAgentPayload:
             raise DataAgentProtocolError(
                 "Data Agent inline_text payload.value must be a string"
             )
+        if kind == "artifact_uri" and not isinstance(value, str):
+            raise DataAgentProtocolError(
+                "Data Agent artifact_uri payload.value must be a string"
+            )
         digest = payload.get("sha256")
         if digest is not None and (
             not isinstance(digest, str)
@@ -520,6 +557,17 @@ class DataAgentAccessResult:
             object_id=object_id,
             object_catalog_version=object_catalog_version,
         )
+
+
+@dataclass(frozen=True)
+class DataAgentFetchedArtifact:
+    """A bounded, verified artifact safe to return through an Agent tool."""
+
+    access_id: str
+    media_type: str
+    content: Any
+    size_bytes: int
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -712,6 +760,27 @@ class DataAgentClientProtocol(Protocol):
     ) -> DataAgentAccessTelemetry:
         """Return transfer telemetry attributed to one access."""
 
+    def fetch_artifact(
+        self,
+        request: DataAgentAccessRequest,
+    ) -> DataAgentFetchedArtifact:
+        """Refresh and fetch one bounded artifact for an existing access."""
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Turn every redirect into an HTTPError instead of following it."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
 
 class HttpDataAgentClient:
     """Synchronous standard-library client for one Data Agent endpoint."""
@@ -723,10 +792,16 @@ class HttpDataAgentClient:
         settings: DataAgentClientSettings,
         *,
         opener: Callable[..., Any] = urlopen,
+        artifact_opener: Callable[..., Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.settings = settings
         self._opener = opener
+        self._artifact_opener = (
+            artifact_opener
+            if artifact_opener is not None
+            else build_opener(_RejectRedirects()).open
+        )
         self._sleep = sleep
         self._access_url = urljoin(
             settings.base_url.rstrip("/") + "/",
@@ -768,6 +843,183 @@ class HttpDataAgentClient:
                 "Data Agent response access_id does not match the request"
             )
         return replace(result, client_round_trip_ms=elapsed_ms)
+
+    def fetch_artifact(
+        self,
+        request: DataAgentAccessRequest,
+    ) -> DataAgentFetchedArtifact:
+        """Refresh, download, and validate one Data Agent artifact.
+
+        The caller supplies the original access request, never a URL. Replaying
+        that idempotent request lets the Data Agent issue a fresh signed URL
+        without persisting an expiring capability in Pathfinder. The URL stays
+        inside this client and is accepted only when it points to the exact
+        artifact route on the configured Data Agent origin.
+        """
+        refreshed = self.access(request)
+        payload = refreshed.payload
+        if payload.kind != "artifact_uri":
+            raise DataAgentArtifactUnsupportedError(
+                f"Data Agent access {request.access_id} does not refer to "
+                "a downloadable artifact"
+            )
+        artifact_url = self._validated_artifact_url(
+            payload.value,
+            request.access_id,
+        )
+        raw, response_media_type = self._download_artifact(artifact_url)
+        expected_media_type = _base_media_type(payload.media_type)
+        if response_media_type != expected_media_type:
+            raise DataAgentProtocolError(
+                "Data Agent artifact Content-Type does not match the access "
+                "response"
+            )
+
+        digest = sha256(raw).hexdigest()
+        if payload.sha256 is None:
+            raise DataAgentProtocolError(
+                "Data Agent artifact payload must include sha256"
+            )
+        if digest != payload.sha256:
+            raise DataAgentArtifactIntegrityError(
+                f"Data Agent artifact for access {request.access_id} failed "
+                "SHA-256 verification"
+            )
+
+        if _is_json_media_type(response_media_type):
+            try:
+                content = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise DataAgentProtocolError(
+                    "Data Agent artifact is not valid UTF-8 JSON"
+                ) from exc
+        elif response_media_type.startswith("text/"):
+            try:
+                content = raw.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise DataAgentProtocolError(
+                    "Data Agent text artifact is not valid UTF-8"
+                ) from exc
+        else:
+            raise DataAgentArtifactUnsupportedError(
+                "Data Agent artifact media type is not Agent-readable: "
+                f"{response_media_type}"
+            )
+        return DataAgentFetchedArtifact(
+            access_id=request.access_id,
+            media_type=response_media_type,
+            content=content,
+            size_bytes=len(raw),
+            sha256=digest,
+        )
+
+    def _validated_artifact_url(self, value: Any, access_id: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise DataAgentProtocolError(
+                "Data Agent artifact URL must be a non-empty string"
+            )
+        candidate = urlparse(value)
+        configured = urlparse(self.settings.base_url)
+        try:
+            same_origin = (
+                candidate.scheme.lower() == configured.scheme.lower()
+                and candidate.hostname == configured.hostname
+                and _effective_port(candidate) == _effective_port(configured)
+            )
+        except ValueError as exc:
+            raise DataAgentArtifactSecurityError(
+                "Data Agent artifact URL has an invalid port"
+            ) from exc
+        expected_url = urljoin(
+            self.settings.base_url.rstrip("/") + "/",
+            f"v1/artifacts/{quote(access_id, safe='')}",
+        )
+        expected_path = urlparse(expected_url).path
+        if (
+            candidate.scheme not in {"http", "https"}
+            or not candidate.netloc
+            or candidate.username is not None
+            or candidate.password is not None
+            or candidate.fragment
+            or not same_origin
+            or candidate.path != expected_path
+        ):
+            raise DataAgentArtifactSecurityError(
+                "Data Agent artifact URL is outside the configured artifact "
+                "endpoint"
+            )
+        return value
+
+    def _download_artifact(self, artifact_url: str) -> tuple[bytes, str]:
+        headers = {
+            "Accept": "application/json, text/*;q=0.9",
+            "User-Agent": "pathfinder-data-agent-client/0.1",
+            "X-Pathfinder-Protocol-Version": DATA_AGENT_API_VERSION,
+        }
+        if self.settings.token:
+            headers["Authorization"] = f"Bearer {self.settings.token}"
+        request = Request(artifact_url, headers=headers, method="GET")
+        try:
+            with self._artifact_opener(
+                request,
+                timeout=self.settings.timeout_seconds,
+            ) as response:
+                status = getattr(response, "status", None)
+                if status is None and hasattr(response, "getcode"):
+                    status = response.getcode()
+                if status != 200:
+                    raise DataAgentProtocolError(
+                        "Data Agent artifact response must use HTTP 200"
+                    )
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    try:
+                        declared_length = int(content_length)
+                    except ValueError as exc:
+                        raise DataAgentProtocolError(
+                            "Data Agent artifact Content-Length is invalid"
+                        ) from exc
+                    if declared_length < 0:
+                        raise DataAgentProtocolError(
+                            "Data Agent artifact Content-Length is invalid"
+                        )
+                    if declared_length > self.settings.max_artifact_bytes:
+                        raise DataAgentArtifactTooLargeError(
+                            "Data Agent artifact exceeds max_artifact_bytes"
+                        )
+                media_type = _base_media_type(
+                    response.headers.get("Content-Type", "")
+                )
+                raw = response.read(self.settings.max_artifact_bytes + 1)
+        except HTTPError as exc:
+            try:
+                status_code = exc.code
+            finally:
+                exc.close()
+            if 300 <= status_code < 400:
+                raise DataAgentArtifactRedirectError(
+                    "Data Agent artifact redirects are not allowed"
+                ) from None
+            raise DataAgentHTTPError(
+                status_code,
+                "artifact request failed",
+            ) from None
+        except (URLError, TimeoutError, socket.timeout) as exc:
+            # Never include the signed URL (and therefore its query
+            # capability) in an error, log, or Agent-visible tool response.
+            raise DataAgentUnavailableError(
+                "cannot reach the configured Data Agent artifact endpoint"
+            ) from None
+
+        if len(raw) > self.settings.max_artifact_bytes:
+            raise DataAgentArtifactTooLargeError(
+                "Data Agent artifact exceeds max_artifact_bytes"
+            )
+        if not media_type:
+            raise DataAgentProtocolError(
+                "Data Agent artifact Content-Type is required"
+            )
+        return raw, media_type
 
     def get_access_telemetry(
         self,
@@ -914,6 +1166,24 @@ class HttpDataAgentClient:
                 "Data Agent response must be a JSON object"
             )
         return payload
+
+
+def _base_media_type(value: str) -> str:
+    return value.split(";", 1)[0].strip().lower()
+
+
+def _is_json_media_type(media_type: str) -> bool:
+    return media_type == "application/json" or media_type.endswith("+json")
+
+
+def _effective_port(parsed: Any) -> int | None:
+    if parsed.port is not None:
+        return parsed.port
+    if parsed.scheme.lower() == "http":
+        return 80
+    if parsed.scheme.lower() == "https":
+        return 443
+    return None
 
 
 def _nonnegative_number(

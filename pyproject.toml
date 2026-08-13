@@ -14,7 +14,8 @@ dependencies = []
 flowmesh = [
     # Must match the deployed FlowMesh control plane (v0.1.8-rc.1).
     "flowmesh-sdk==0.1.8rc1",
-    "mcp>=1.23.0",
+    # Match the package baked into the deployed FlowMesh worker overlay.
+    "mcp==1.28.1",
 ]
 
 [project.scripts]

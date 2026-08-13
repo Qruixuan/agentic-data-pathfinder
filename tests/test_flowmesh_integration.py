@@ -5,16 +5,19 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
+from unittest.mock import patch
 
 from pathfinder.config import load_config
 from pathfinder.data_agent_client import (
     DataAgentAccessRequest,
     DataAgentAccessResult,
     DataAgentAccessTelemetry,
+    DataAgentFetchedArtifact,
     DataAgentPayload,
     DataAgentTelemetryQuiescenceError,
 )
@@ -41,9 +44,11 @@ from pathfinder.integrations.flowmesh.data_agent_backend import (
 )
 from pathfinder.integrations.flowmesh.gateway import (
     AccessGateway,
+    ArtifactHandleError,
     EmulatedRepresentationBackend,
     SQLiteSessionStore,
 )
+from pathfinder.integrations.flowmesh.mcp_server import build_mcp_server
 from pathfinder.integrations.flowmesh.workflow import (
     PATHFINDER_GRAPH_NODE_NAME,
     build_agent_workflow,
@@ -138,6 +143,7 @@ class StubDataAgentClient:
         self.settles_after = settles_after
         self.poll_counts: dict[str, int] = {}
         self.quiescence_requests: list[bool] = []
+        self.fetch_requests: list[DataAgentAccessRequest] = []
 
     def access(
         self,
@@ -147,9 +153,11 @@ class StubDataAgentClient:
             access_id=request.access_id,
             payload=DataAgentPayload(
                 kind="artifact_uri",
-                media_type="application/octet-stream",
+                media_type="application/json",
                 value=f"http://data-agent.invalid/v1/artifacts/{request.access_id}",
-                sha256=sha256(b"artifact").hexdigest(),
+                sha256=sha256(
+                    b'{"timestamp_seconds":17,"event":"red car"}'
+                ).hexdigest(),
             ),
             service_latency_ms=40.0,
             client_round_trip_ms=55.0,
@@ -158,6 +166,20 @@ class StubDataAgentClient:
             location="remote_digest_service",
             object_id=request.object_id,
             object_catalog_version="flowmesh-catalog-v1",
+        )
+
+    def fetch_artifact(
+        self,
+        request: DataAgentAccessRequest,
+    ) -> DataAgentFetchedArtifact:
+        self.fetch_requests.append(request)
+        raw = b'{"timestamp_seconds":17,"event":"red car"}'
+        return DataAgentFetchedArtifact(
+            access_id=request.access_id,
+            media_type="application/json",
+            content={"timestamp_seconds": 17, "event": "red car"},
+            size_bytes=len(raw),
+            sha256=sha256(raw).hexdigest(),
         )
 
     def get_access_telemetry(
@@ -226,6 +248,7 @@ class AccessingFlowMeshClient(FakeFlowMeshClient):
         super().__init__()
         self.gateway = gateway
         self.access_responses: list[dict[str, Any]] = []
+        self.fetch_responses: list[dict[str, Any]] = []
 
     def wait(
         self,
@@ -235,10 +258,15 @@ class AccessingFlowMeshClient(FakeFlowMeshClient):
         assert self.submitted_workflow is not None
         annotations = self.submitted_workflow["metadata"]["annotations"]
         session_id = annotations["custom"]["pathfinder_session_id"]
-        self.access_responses.append(
-            self.gateway.access_representation(
+        access = self.gateway.access_representation(
+            session_id,
+            "multimodal_digest",
+        )
+        self.access_responses.append(access)
+        self.fetch_responses.append(
+            self.gateway.fetch_artifact(
                 session_id,
-                "multimodal_digest",
+                access["artifact_handle"],
             )
         )
         return super().wait(workflow_id, poll_interval_seconds)
@@ -247,6 +275,18 @@ class AccessingFlowMeshClient(FakeFlowMeshClient):
 class StubWorker:
     def __init__(self, worker_id: str) -> None:
         self.id = worker_id
+
+
+class RecordingFastMCP:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.tools: dict[str, Any] = {}
+
+    def tool(self) -> Any:
+        def register(function: Any) -> Any:
+            self.tools[function.__name__] = function
+            return function
+
+        return register
 
 
 class RecordingWorkersApi:
@@ -356,7 +396,22 @@ class AdapterTelemetryReconciliationTest(unittest.TestCase):
         ).run(self.request())
 
         self.assertEqual("DONE", run.status)
-        self.assertTrue(client.access_responses[0]["ok"])
+        access_response = client.access_responses[0]
+        self.assertTrue(access_response["ok"])
+        self.assertEqual(
+            access_response["artifact_handle"],
+            access_response["payload"]["value"],
+        )
+        self.assertNotIn("http", json.dumps(access_response).lower())
+        self.assertEqual(
+            {"timestamp_seconds": 17, "event": "red car"},
+            client.fetch_responses[0]["content"],
+        )
+        self.assertEqual(1, len(data_agent.fetch_requests))
+        self.assertEqual(
+            data_agent.fetch_requests[0].access_id,
+            run.access_events[0]["data_agent_access_id"],
+        )
         # Reconciliation asked for a final summary, and only then.
         self.assertEqual([True], data_agent.quiescence_requests)
 
@@ -492,6 +547,86 @@ class AdapterTelemetryReconciliationTest(unittest.TestCase):
         )
 
 
+class ArtifactHandleBindingTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.config = load_config(CONFIG_PATH)
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        self.store = SQLiteSessionStore(
+            Path(self.temporary_directory.name) / "gateway.sqlite3"
+        )
+        self.data_agent = StubDataAgentClient()
+        self.gateway = AccessGateway(
+            self.config,
+            self.store,
+            RemoteDataAgentBackend(self.data_agent),
+        )
+
+    @staticmethod
+    def request(session_id: str) -> FlowMeshAgentRunRequest:
+        return FlowMeshAgentRunRequest(
+            question="When does the red car enter the tunnel?",
+            design_id="D_structured_digest",
+            task_class_id="video_qa",
+            quote_profile_id="digest_low",
+            seed=42,
+            trial_id=f"artifact-{session_id}",
+            session_id=session_id,
+            object_id="video-001",
+        )
+
+    def test_handle_is_opaque_persisted_and_bound_to_its_session(self) -> None:
+        owner = self.gateway.register_session(self.request("owner-session"))
+        other = self.gateway.register_session(self.request("other-session"))
+        access = self.gateway.access_representation(
+            owner.session_id,
+            "multimodal_digest",
+        )
+        handle = access["artifact_handle"]
+
+        self.assertIsInstance(handle, str)
+        self.assertGreaterEqual(len(handle), 24)
+        self.assertNotIn("http", json.dumps(access).lower())
+        event = self.store.list_events(owner.session_id)[0]
+        self.assertEqual(handle, event.artifact_handle)
+
+        fetched = self.gateway.fetch_artifact(owner.session_id, handle)
+        self.assertEqual(
+            {"timestamp_seconds": 17, "event": "red car"},
+            fetched["content"],
+        )
+        self.assertEqual(event.content_sha256, fetched["sha256"])
+        self.assertEqual(1, len(self.data_agent.fetch_requests))
+        replay = self.data_agent.fetch_requests[0]
+        self.assertEqual(event.data_agent_access_id, replay.access_id)
+        self.assertEqual(owner.session_id, replay.session_id)
+        self.assertEqual(event.event_index, replay.event_index)
+
+        for session_id, invalid_handle in (
+            (other.session_id, handle),
+            (owner.session_id, "unknown-handle"),
+        ):
+            with self.subTest(session_id=session_id):
+                with self.assertRaises(ArtifactHandleError) as context:
+                    self.gateway.fetch_artifact(
+                        session_id,
+                        invalid_handle,
+                    )
+                self.assertEqual(
+                    "artifact handle is invalid for this Pathfinder session",
+                    str(context.exception),
+                )
+        self.assertEqual(1, len(self.data_agent.fetch_requests))
+
+    def test_blank_and_oversized_handles_are_rejected_before_lookup(self) -> None:
+        session = self.gateway.register_session(self.request("bad-handles"))
+        for handle in ("", " " * 4, "x" * 257):
+            with self.subTest(length=len(handle)):
+                with self.assertRaises(ArtifactHandleError):
+                    self.gateway.fetch_artifact(session.session_id, handle)
+        self.assertEqual([], self.data_agent.fetch_requests)
+
+
 class FlowMeshIntegrationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_config(CONFIG_PATH)
@@ -607,6 +742,49 @@ class FlowMeshIntegrationTest(unittest.TestCase):
         self.assertEqual("pathfinder_video", spec["configName"])
         self.assertIn("session-123", spec["task"])
         self.assertIn("list_offers", spec["task"])
+
+    def test_mcp_server_registers_fetch_artifact(self) -> None:
+        mcp_module = types.ModuleType("mcp")
+        server_module = types.ModuleType("mcp.server")
+        fastmcp_module = types.ModuleType("mcp.server.fastmcp")
+        mcp_module.__path__ = []  # type: ignore[attr-defined]
+        server_module.__path__ = []  # type: ignore[attr-defined]
+        fastmcp_module.FastMCP = RecordingFastMCP  # type: ignore[attr-defined]
+        mcp_module.server = server_module  # type: ignore[attr-defined]
+        server_module.fastmcp = fastmcp_module  # type: ignore[attr-defined]
+        modules = {
+            "mcp": mcp_module,
+            "mcp.server": server_module,
+            "mcp.server.fastmcp": fastmcp_module,
+        }
+        with patch.dict(sys.modules, modules):
+            server = build_mcp_server(
+                config_path=CONFIG_PATH,
+                state_db=Path(self.temporary_directory.name)
+                / "mcp-gateway.sqlite3",
+                host="127.0.0.1",
+                port=8765,
+            )
+        self.assertEqual(
+            {
+                "list_offers",
+                "access_representation",
+                "fetch_artifact",
+                "get_session_state",
+            },
+            set(server.tools),
+        )
+
+    def test_worker_agent_config_activates_fetch_artifact(self) -> None:
+        agent_config = (
+            ROOT
+            / "integrations"
+            / "flowmesh"
+            / "agent_configs"
+            / "pathfinder_video.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("      - fetch_artifact\n", agent_config)
+        self.assertIn("Never construct or fetch", agent_config)
 
     def test_workflow_requests_http_result_delivery(self) -> None:
         """Guard the fix for results.retrieve() answering 404 result not found.

@@ -170,6 +170,13 @@ the FlowMesh agent. See
 [`integrations/data_agent/README.md`](integrations/data_agent/README.md)
 for the server-side protocol contract.
 
+Remote `artifact_uri` payloads are exposed to the FlowMesh Agent through a
+separate `fetch_artifact` tool. `access_representation` returns a random opaque
+handle rather than the signed Data Agent URL; the handle is bound to the
+originating session and access event. Pathfinder refreshes and downloads the
+artifact internally, rejects redirects and unexpected origins, enforces a
+response-size bound, verifies the digest, and returns only JSON or UTF-8 text.
+
 Post-workflow reconciliation is fail-closed: byte and latency figures are
 accepted only when the Data Agent reports `telemetry_complete=true`, and an
 unstable or unanswerable snapshot fails the session rather than recording

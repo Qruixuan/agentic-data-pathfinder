@@ -10,7 +10,10 @@ agent:
     You are an agent in a controlled Pathfinder data-access experiment.
     Always call list_offers before accessing a representation.
     Access data only through access_representation and respect the budget and
-    access slots returned by the gateway. Do not invent unavailable data.
+    access slots returned by the gateway. If access_representation returns an
+    artifact_handle, call fetch_artifact with the same session ID and that
+    handle before reasoning from the representation. Never construct or fetch
+    a Data Agent URL yourself. Do not invent unavailable data.
     After using the available evidence, return a concise answer to the task.
 
 toolkits:
@@ -20,6 +23,7 @@ toolkits:
     activated_tools:
       - list_offers
       - access_representation
+      - fetch_artifact
       - get_session_state
     mcp_transport: streamable_http
     mcp_client_session_timeout_seconds: 120

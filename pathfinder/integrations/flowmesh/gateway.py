@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import secrets
 import sqlite3
 import threading
 import time
@@ -25,6 +26,14 @@ class GatewayError(RuntimeError):
 
 class SessionNotFoundError(GatewayError):
     """Raised when a FlowMesh tool references an unknown session."""
+
+
+class ArtifactHandleError(GatewayError):
+    """Raised when an artifact handle is invalid for the named session."""
+
+
+class ArtifactFetchUnsupportedError(GatewayError):
+    """Raised when the configured backend cannot fetch remote artifacts."""
 
 
 class TelemetryIncompleteError(GatewayError):
@@ -107,6 +116,7 @@ class GatewayAccessEvent:
     artifact_download_request_count: int = 0
     artifact_full_download_count: int = 0
     object_catalog_version: str | None = None
+    artifact_handle: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -245,6 +255,7 @@ class SQLiteSessionStore:
                     artifact_download_request_count INTEGER NOT NULL DEFAULT 0,
                     artifact_full_download_count INTEGER NOT NULL DEFAULT 0,
                     object_catalog_version TEXT,
+                    artifact_handle TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(session_id)
                         REFERENCES gateway_sessions(session_id)
@@ -252,6 +263,7 @@ class SQLiteSessionStore:
 
                 CREATE INDEX IF NOT EXISTS idx_gateway_events_session
                     ON gateway_access_events(session_id, event_index);
+
                 """
             )
             session_columns = {
@@ -278,6 +290,7 @@ class SQLiteSessionStore:
                 "artifact_download_request_count": "INTEGER NOT NULL DEFAULT 0",
                 "artifact_full_download_count": "INTEGER NOT NULL DEFAULT 0",
                 "object_catalog_version": "TEXT",
+                "artifact_handle": "TEXT",
             }
             for name, declaration in migrations.items():
                 if name not in event_columns:
@@ -285,6 +298,12 @@ class SQLiteSessionStore:
                         f"ALTER TABLE gateway_access_events ADD COLUMN "
                         f"{name} {declaration}"
                     )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_gateway_artifact_handle "
+                "ON gateway_access_events(artifact_handle) "
+                "WHERE artifact_handle IS NOT NULL"
+            )
 
     def create_session(self, session: GatewaySession) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -400,8 +419,9 @@ class SQLiteSessionStore:
                     artifact_transfer_latency_ms,
                     artifact_download_request_count,
                     artifact_full_download_count, object_catalog_version,
+                    artifact_handle,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.session_id,
@@ -422,6 +442,7 @@ class SQLiteSessionStore:
                     event.artifact_download_request_count,
                     event.artifact_full_download_count,
                     event.object_catalog_version,
+                    event.artifact_handle,
                     event.created_at,
                 ),
             )
@@ -438,37 +459,65 @@ class SQLiteSessionStore:
                 """,
                 (session_id,),
             ).fetchall()
-        return [
-            GatewayAccessEvent(
-                event_id=row["event_id"],
-                session_id=row["session_id"],
-                event_index=row["event_index"],
-                representation_id=row["representation_id"],
-                quoted_price=row["quoted_price"],
-                accepted=bool(row["accepted"]),
-                rejection_reason=row["rejection_reason"],
-                felt_latency_ms=row["felt_latency_ms"],
-                realized_cost=row["realized_cost"],
-                bytes_read=row["bytes_read"],
-                location=row["location"],
-                content_sha256=row["content_sha256"],
-                created_at=row["created_at"],
-                object_id=row["object_id"],
-                data_agent_access_id=row["data_agent_access_id"],
-                artifact_bytes_sent=row["artifact_bytes_sent"],
-                artifact_transfer_latency_ms=row[
-                    "artifact_transfer_latency_ms"
-                ],
-                artifact_download_request_count=row[
-                    "artifact_download_request_count"
-                ],
-                artifact_full_download_count=row[
-                    "artifact_full_download_count"
-                ],
-                object_catalog_version=row["object_catalog_version"],
+        return [self._event_from_row(row) for row in rows]
+
+    def get_artifact_event(
+        self,
+        session_id: str,
+        artifact_handle: str,
+    ) -> GatewayAccessEvent:
+        """Resolve a handle only inside its owning session.
+
+        Cross-session and unknown handles intentionally produce the same
+        error, so the tool cannot be used to probe handles owned by another
+        experiment session.
+        """
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM gateway_access_events
+                WHERE session_id = ? AND artifact_handle = ?
+                  AND accepted = 1
+                """,
+                (session_id, artifact_handle),
+            ).fetchone()
+        if row is None:
+            raise ArtifactHandleError(
+                "artifact handle is invalid for this Pathfinder session"
             )
-            for row in rows
-        ]
+        return self._event_from_row(row)
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> GatewayAccessEvent:
+        return GatewayAccessEvent(
+            event_id=row["event_id"],
+            session_id=row["session_id"],
+            event_index=row["event_index"],
+            representation_id=row["representation_id"],
+            quoted_price=row["quoted_price"],
+            accepted=bool(row["accepted"]),
+            rejection_reason=row["rejection_reason"],
+            felt_latency_ms=row["felt_latency_ms"],
+            realized_cost=row["realized_cost"],
+            bytes_read=row["bytes_read"],
+            location=row["location"],
+            content_sha256=row["content_sha256"],
+            created_at=row["created_at"],
+            object_id=row["object_id"],
+            data_agent_access_id=row["data_agent_access_id"],
+            artifact_bytes_sent=row["artifact_bytes_sent"],
+            artifact_transfer_latency_ms=row[
+                "artifact_transfer_latency_ms"
+            ],
+            artifact_download_request_count=row[
+                "artifact_download_request_count"
+            ],
+            artifact_full_download_count=row[
+                "artifact_full_download_count"
+            ],
+            object_catalog_version=row["object_catalog_version"],
+            artifact_handle=row["artifact_handle"],
+        )
 
     def update_artifact_telemetry(
         self,
@@ -678,6 +727,16 @@ class AccessGateway:
             content_hash = result.content_sha256 or sha256(
                 result.content.encode("utf-8")
             ).hexdigest()
+            artifact_handle = None
+            if (
+                result.payload is not None
+                and result.payload.get("kind") == "artifact_handle"
+            ):
+                if result.data_agent_access_id is None:
+                    raise GatewayError(
+                        "artifact access did not return a Data Agent access ID"
+                    )
+                artifact_handle = secrets.token_urlsafe(24)
             event = self.store.append_event(
                 GatewayAccessEvent(
                     event_id=None,
@@ -696,6 +755,7 @@ class AccessGateway:
                     object_id=session.object_id,
                     data_agent_access_id=result.data_agent_access_id,
                     object_catalog_version=result.object_catalog_version,
+                    artifact_handle=artifact_handle,
                 )
             )
             updated_state = self.list_offers(session_id)
@@ -713,8 +773,68 @@ class AccessGateway:
                 "content": result.content,
             }
             if result.payload is not None:
-                response["payload"] = result.payload
+                response["payload"] = dict(result.payload)
+            if artifact_handle is not None:
+                response["artifact_handle"] = artifact_handle
+                response["payload"]["value"] = artifact_handle
             return response
+
+    def fetch_artifact(
+        self,
+        session_id: str,
+        artifact_handle: str,
+    ) -> dict[str, Any]:
+        """Fetch one previously accepted artifact through a bound handle."""
+        if not isinstance(artifact_handle, str) or not artifact_handle.strip():
+            raise ArtifactHandleError(
+                "artifact handle must be a non-empty string"
+            )
+        if len(artifact_handle) > 256:
+            raise ArtifactHandleError("artifact handle is too long")
+        with self._lock:
+            session = self.store.get_session(session_id)
+            if session.status not in {"CREATED", "RUNNING"}:
+                raise ArtifactHandleError(
+                    "artifact handle is not available after the session ends"
+                )
+            event = self.store.get_artifact_event(
+                session_id,
+                artifact_handle,
+            )
+            fetcher = getattr(self.backend, "fetch_artifact", None)
+            if not callable(fetcher):
+                raise ArtifactFetchUnsupportedError(
+                    "the configured representation backend cannot fetch "
+                    "artifacts"
+                )
+            artifact = fetcher(
+                config=self.config,
+                session=session,
+                event=event,
+            )
+
+        if artifact.access_id != event.data_agent_access_id:
+            raise GatewayError(
+                "fetched artifact does not match the gateway access event"
+            )
+        if (
+            event.content_sha256 is not None
+            and artifact.sha256 != event.content_sha256
+        ):
+            raise GatewayError(
+                "fetched artifact digest does not match the gateway event"
+            )
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "object_id": event.object_id,
+            "representation_id": event.representation_id,
+            "artifact_handle": artifact_handle,
+            "media_type": artifact.media_type,
+            "size_bytes": artifact.size_bytes,
+            "sha256": artifact.sha256,
+            "content": artifact.content,
+        }
 
     def _reject(
         self,

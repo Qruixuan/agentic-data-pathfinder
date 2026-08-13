@@ -53,6 +53,17 @@ class DataAgentServerTest(unittest.TestCase):
         self.artifact_bytes = b"0123456789"
         self.artifact_path = directory / "video.bin"
         self.artifact_path.write_bytes(self.artifact_bytes)
+        self.frames_content = {
+            "frames": [
+                {"timestamp_seconds": 17, "event": "red car enters tunnel"}
+            ]
+        }
+        self.frames_path = directory / "sampled-frames.json"
+        self.frames_bytes = json.dumps(
+            self.frames_content,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.frames_path.write_bytes(self.frames_bytes)
         self.object_catalog_path = directory / "object-catalog.json"
         self.object_catalog_path.write_text(
             json.dumps(
@@ -67,6 +78,9 @@ class DataAgentServerTest(unittest.TestCase):
                                 },
                                 "compressed_video": {
                                     "path": self.artifact_path.name,
+                                },
+                                "sampled_frames": {
+                                    "path": self.frames_path.name,
                                 },
                             }
                         }
@@ -124,6 +138,25 @@ class DataAgentServerTest(unittest.TestCase):
                                     "location": "node-1/nvme",
                                     "minimum_latency_ms": 0,
                                     "realized_cost": 0.5,
+                                    "cache_hit": True,
+                                }
+                            },
+                        },
+                        "sampled_frames": {
+                            "kind": "artifact_uri",
+                            "media_type": "application/json",
+                            "path": self.frames_path.name,
+                            "default_binding": {
+                                "location": "node-1/nvme",
+                                "minimum_latency_ms": 0,
+                                "realized_cost": 0.35,
+                                "cache_hit": True,
+                            },
+                            "plan_bindings": {
+                                "D_test": {
+                                    "location": "node-1/nvme",
+                                    "minimum_latency_ms": 0,
+                                    "realized_cost": 0.35,
                                     "cache_hit": True,
                                 }
                             },
@@ -328,6 +361,26 @@ class DataAgentServerTest(unittest.TestCase):
         )
         self.assertGreaterEqual(telemetry.transfer_latency_ms, 0.0)
         self.assertIsNotNone(telemetry.latest_completed_at)
+
+    def test_client_fetches_json_artifact_and_reconciles_transfer(self) -> None:
+        request = self.request(
+            "sampled_frames",
+            access_id="frames-access",
+        )
+
+        artifact = self.client.fetch_artifact(request)
+
+        self.assertEqual(self.frames_content, artifact.content)
+        self.assertEqual("application/json", artifact.media_type)
+        self.assertEqual(len(self.frames_bytes), artifact.size_bytes)
+        telemetry = self.client.get_access_telemetry(
+            "frames-access",
+            wait_for_quiescence=True,
+        )
+        self.assertTrue(telemetry.telemetry_complete)
+        self.assertEqual(1, telemetry.download_request_count)
+        self.assertEqual(1, telemetry.full_download_count)
+        self.assertEqual(len(self.frames_bytes), telemetry.bytes_sent)
 
     def _download(
         self,

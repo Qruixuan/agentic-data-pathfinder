@@ -134,7 +134,17 @@ Gateway uses that observed latency as `felt_latency_ms`, while the Data
 Agent's internal service and stage timings remain system telemetry.
 
 For `artifact_uri`, this first response necessarily precedes the actual
-download. After the consumer finishes, the authenticated telemetry endpoint
+download. The FlowMesh Agent never receives the URI itself.
+`RemoteDataAgentBackend`
+reduces the payload to safe media-type and digest metadata, and the Gateway
+returns a random session-bound `artifact_handle`. When the Agent calls
+`fetch_artifact`, Pathfinder replays the original idempotent access request to
+obtain a fresh URI, verifies that it targets the configured Data Agent's exact
+artifact route, refuses redirects, applies timeout and size bounds, verifies
+the SHA-256 digest, and returns only JSON or UTF-8 text. No signed URI is
+persisted in Gateway state or returned through MCP.
+
+After the trusted consumer finishes, the authenticated telemetry endpoint
 returns measurements joined by `access_id`:
 
 ```json
@@ -272,7 +282,11 @@ manifest. The other kinds are reserved for the next backend version.
 
 Large video, image sets, and vectors should not be embedded directly in the
 JSON or MCP response. The `value` should instead contain an authorized,
-short-lived artifact descriptor.
+short-lived artifact descriptor. In the FlowMesh integration that descriptor
+is consumed only inside the trusted Data Agent client and replaced with an
+opaque handle before the tool response reaches the Agent. Arbitrary binary
+artifacts are not yet Agent-readable through `fetch_artifact`; they need a
+future representation-aware consumer.
 
 ## Manifest
 

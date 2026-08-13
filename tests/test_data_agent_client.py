@@ -4,15 +4,22 @@ import json
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
+from io import BytesIO
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, ClassVar
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from pathfinder.config import load_config
 from pathfinder.data_agent_client import (
     DATA_AGENT_API_VERSION,
+    DataAgentArtifactIntegrityError,
+    DataAgentArtifactRedirectError,
+    DataAgentArtifactSecurityError,
+    DataAgentArtifactTooLargeError,
+    DataAgentArtifactUnsupportedError,
     DataAgentAccessRequest,
     DataAgentAccessResult,
     DataAgentAccessTelemetry,
@@ -362,6 +369,229 @@ class ConnectionErrorReportingTest(unittest.TestCase):
             )
         self.assertIn("/v1/access", str(context.exception))
         self.assertNotIn("/telemetry", str(context.exception))
+
+
+class ArtifactHTTPResponse:
+    def __init__(
+        self,
+        body: bytes,
+        media_type: str,
+        *,
+        declared_length: int | None = None,
+    ) -> None:
+        self._body = body
+        self.status = 200
+        self.headers = {
+            "Content-Type": media_type,
+            "Content-Length": str(
+                len(body) if declared_length is None else declared_length
+            ),
+        }
+
+    def read(self, amount: int | None = None) -> bytes:
+        if amount is None:
+            return self._body
+        return self._body[:amount]
+
+    def __enter__(self) -> "ArtifactHTTPResponse":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+
+class RecordingArtifactOpener:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.requests: list[Any] = []
+        self.timeouts: list[float | None] = []
+
+    def __call__(self, request: Any, timeout: float | None = None) -> Any:
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+
+class DataAgentArtifactFetchTest(unittest.TestCase):
+    ACCESS_ID = "artifact-access"
+    BASE_URL = "http://data-agent.test"
+
+    def request(self) -> DataAgentAccessRequest:
+        return DataAgentAccessRequest(
+            access_id=self.ACCESS_ID,
+            session_id="session-1",
+            trial_id="trial-1",
+            plan_id="D_structured_digest",
+            plan_epoch=0,
+            task_class_id="video_qa",
+            representation_id="sampled_frames",
+            event_index=0,
+            latency_multiplier=1.0,
+            binding={"location": "remote_frame_store"},
+            object_id="video-001",
+        )
+
+    def build(
+        self,
+        body: bytes,
+        media_type: str,
+        *,
+        artifact_url: str | None = None,
+        artifact_response: Any | None = None,
+        max_artifact_bytes: int = 1024,
+    ) -> tuple[HttpDataAgentClient, RecordingArtifactOpener]:
+        digest = sha256(body).hexdigest()
+        signed_url = artifact_url or (
+            f"{self.BASE_URL}/v1/artifacts/{self.ACCESS_ID}"
+            "?expires=9999999999&signature=do-not-expose"
+        )
+        access_response = {
+            "api_version": DATA_AGENT_API_VERSION,
+            "status": "succeeded",
+            "access_id": self.ACCESS_ID,
+            "object_id": "video-001",
+            "object_catalog_version": "test-catalog-v1",
+            "payload": {
+                "kind": "artifact_uri",
+                "media_type": media_type,
+                "value": signed_url,
+                "sha256": digest,
+            },
+            "telemetry": {
+                "service_latency_ms": 2.0,
+                "realized_cost": 0.5,
+                "bytes_read": len(body),
+                "location": "remote_frame_store",
+            },
+        }
+        artifact_opener = RecordingArtifactOpener(
+            artifact_response
+            if artifact_response is not None
+            else ArtifactHTTPResponse(body, media_type)
+        )
+        client = HttpDataAgentClient(
+            DataAgentClientSettings(
+                base_url=self.BASE_URL,
+                token="test-token",
+                timeout_seconds=2.0,
+                max_retries=0,
+                max_artifact_bytes=max_artifact_bytes,
+            ),
+            opener=lambda request, timeout=None: FakeHTTPResponse(
+                json.dumps(access_response).encode("utf-8")
+            ),
+            artifact_opener=artifact_opener,
+            sleep=lambda _seconds: None,
+        )
+        return client, artifact_opener
+
+    def test_fetches_bounded_json_without_returning_the_signed_url(self) -> None:
+        body = json.dumps({"frame": 17, "event": "red car"}).encode()
+        client, opener = self.build(body, "application/json; charset=utf-8")
+
+        result = client.fetch_artifact(self.request())
+
+        self.assertEqual({"frame": 17, "event": "red car"}, result.content)
+        self.assertEqual("application/json", result.media_type)
+        self.assertEqual(len(body), result.size_bytes)
+        self.assertEqual(sha256(body).hexdigest(), result.sha256)
+        self.assertFalse(hasattr(result, "url"))
+        self.assertEqual([2.0], opener.timeouts)
+        sent_headers = {
+            name.lower(): value
+            for name, value in opener.requests[0].header_items()
+        }
+        self.assertEqual("Bearer test-token", sent_headers["authorization"])
+
+    def test_fetches_utf8_text(self) -> None:
+        body = "frame 17: red car enters tunnel".encode()
+        client, _ = self.build(body, "text/plain")
+        result = client.fetch_artifact(self.request())
+        self.assertEqual(body.decode(), result.content)
+
+    def test_rejects_an_artifact_url_outside_the_configured_origin(self) -> None:
+        client, opener = self.build(
+            b"{}",
+            "application/json",
+            artifact_url=(
+                "https://attacker.invalid/v1/artifacts/artifact-access"
+                "?signature=secret"
+            ),
+        )
+        with self.assertRaises(DataAgentArtifactSecurityError) as context:
+            client.fetch_artifact(self.request())
+        self.assertEqual([], opener.requests)
+        self.assertNotIn("signature", str(context.exception))
+
+    def test_rejects_redirects_without_exposing_the_signed_url(self) -> None:
+        signed_url = (
+            f"{self.BASE_URL}/v1/artifacts/{self.ACCESS_ID}"
+            "?signature=secret-value"
+        )
+        redirect = HTTPError(
+            signed_url,
+            302,
+            "Found",
+            {"Location": "https://attacker.invalid/steal"},
+            BytesIO(b""),
+        )
+        client, _ = self.build(
+            b"{}",
+            "application/json",
+            artifact_url=signed_url,
+            artifact_response=redirect,
+        )
+        with self.assertRaises(DataAgentArtifactRedirectError) as context:
+            client.fetch_artifact(self.request())
+        self.assertNotIn("secret-value", str(context.exception))
+        self.assertNotIn("attacker.invalid", str(context.exception))
+        self.assertIsNone(context.exception.__cause__)
+
+    def test_rejects_declared_and_streamed_oversized_artifacts(self) -> None:
+        body = b'{"large":true}'
+        cases = {
+            "declared": ArtifactHTTPResponse(
+                body,
+                "application/json",
+                declared_length=10_000,
+            ),
+            "streamed": ArtifactHTTPResponse(
+                b"x" * 17,
+                "application/json",
+                declared_length=16,
+            ),
+        }
+        for label, response in cases.items():
+            with self.subTest(label):
+                client, _ = self.build(
+                    body,
+                    "application/json",
+                    artifact_response=response,
+                    max_artifact_bytes=16,
+                )
+                with self.assertRaises(DataAgentArtifactTooLargeError):
+                    client.fetch_artifact(self.request())
+
+    def test_rejects_unsupported_binary_content(self) -> None:
+        client, _ = self.build(b"binary", "application/octet-stream")
+        with self.assertRaises(DataAgentArtifactUnsupportedError) as context:
+            client.fetch_artifact(self.request())
+        self.assertIn("application/octet-stream", str(context.exception))
+
+    def test_rejects_a_checksum_mismatch(self) -> None:
+        expected = b'{"expected":true}'
+        client, _ = self.build(
+            expected,
+            "application/json",
+            artifact_response=ArtifactHTTPResponse(
+                b'{"different":true}',
+                "application/json",
+            ),
+        )
+        with self.assertRaises(DataAgentArtifactIntegrityError):
+            client.fetch_artifact(self.request())
 
 
 class TelemetryQuiescenceTest(unittest.TestCase):
@@ -791,6 +1021,49 @@ class DataAgentClientTest(unittest.TestCase):
 
 
 class RemoteDataAgentBackendTest(unittest.TestCase):
+    def test_gateway_rejects_unhandled_payload_kinds_before_tool_output(
+        self,
+    ) -> None:
+        class UnsafePayloadClient(FakeDataAgentClient):
+            def access(
+                self,
+                request: DataAgentAccessRequest,
+            ) -> DataAgentAccessResult:
+                result = super().access(request)
+                return replace(
+                    result,
+                    payload=DataAgentPayload(
+                        kind="frame_uris",
+                        media_type="application/json",
+                        value={"url": "https://should-not-be-exposed.invalid"},
+                    ),
+                )
+
+        config = load_config(CONFIG_PATH)
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteSessionStore(Path(directory) / "gateway.sqlite3")
+            gateway = AccessGateway(
+                config,
+                store,
+                RemoteDataAgentBackend(UnsafePayloadClient()),
+            )
+            session = gateway.register_session(
+                FlowMeshAgentRunRequest(
+                    question="When does the red car enter?",
+                    design_id="D_structured_digest",
+                    task_class_id="video_qa",
+                    quote_profile_id="digest_low",
+                    trial_id="unsafe-payload",
+                    object_id="video-001",
+                )
+            )
+            with self.assertRaises(DataAgentProtocolError):
+                gateway.access_representation(
+                    session.session_id,
+                    "multimodal_digest",
+                )
+            self.assertEqual([], store.list_events(session.session_id))
+
     def test_gateway_uses_remote_result_without_exposing_realized_cost(
         self,
     ) -> None:
