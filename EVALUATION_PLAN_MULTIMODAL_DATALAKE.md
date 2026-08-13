@@ -361,6 +361,14 @@ Run the causal harness and evaluate Gates P1–P4. Pre-register task classes,
 exclusion rules before examining the full result. Run the exogeneity-violation
 tolerance sweep separately.
 
+The first executable slice is the real-FlowMesh quote-response pilot described
+in `integrations/flowmesh/PILOT.md`. It fixes `D_structured_digest` and latency,
+block-randomizes digest quotes 2 versus 6, and records completed behavior,
+telemetry failure, and infrastructure failure as distinct outcomes. The
+included repeated fixture is an engineering validation only; the registered
+Phase A analysis must replace it with a frozen multi-object workload and must
+not infer a PPD effect from the smoke or fixture runs alone.
+
 ### Phase B: Reduced Oracle and Lock-In Study
 
 Deploy every feasible reduced-instance design. Measure the true response

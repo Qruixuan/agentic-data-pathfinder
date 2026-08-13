@@ -272,6 +272,18 @@ When a remote Data Agent is configured, the runner also queries completed
 artifact-transfer telemetry and attributes it to the matching Gateway access
 event before returning the session result.
 
+## 6. Run a Randomized Real-FlowMesh Pilot
+
+After the Level-2 smoke test passes, use `run-flowmesh-pilot` for a frozen,
+resumable batch. The included Phase A configurations compare digest quotes 2
+and 6 while holding the physical design and latency multiplier fixed. The
+runner appends every outcome before continuing, distinguishes telemetry from
+infrastructure failures, and never manages worker or service lifecycle.
+
+See [`PILOT.md`](PILOT.md) for the configuration contract, manual prerequisites,
+exact dry-run and engineering-pilot commands, output files, and the boundary
+between fixture validation and causal evidence.
+
 ## Credential Handling
 
 This integration needs two classes of secret: the **LLM credentials** the

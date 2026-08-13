@@ -934,6 +934,64 @@ class FlowMeshIntegrationTest(unittest.TestCase):
         self.assertEqual("wfl-test", session.flowmesh_workflow_id)
         self.assertIsNotNone(client.submitted_workflow)
 
+    def test_adapter_recovers_a_completed_gateway_session(self) -> None:
+        first_client = FakeFlowMeshClient()
+        adapter = FlowMeshAgentAdapter(
+            first_client,
+            self.gateway,
+            FlowMeshSettings(),
+        )
+        completed = adapter.run(self.request(trial_id="recover-done"))
+
+        recovery_client = FakeFlowMeshClient()
+        recovered = FlowMeshAgentAdapter(
+            recovery_client,
+            self.gateway,
+            FlowMeshSettings(),
+        ).recover(completed.session_id)
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(completed.final_answer, recovered.final_answer)
+        self.assertEqual(
+            {"recovered_from_gateway_state": True},
+            recovered.raw_result,
+        )
+        self.assertIsNone(recovery_client.submitted_workflow)
+
+    def test_adapter_resumes_a_bound_running_session(self) -> None:
+        session = self.gateway.register_session(
+            self.request(trial_id="recover-bound")
+        )
+        self.store.bind_flowmesh(session.session_id, "wfl-old", "tsk-old")
+        client = FakeFlowMeshClient()
+
+        recovered = FlowMeshAgentAdapter(
+            client,
+            self.gateway,
+            FlowMeshSettings(),
+        ).recover(session.session_id)
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual("wfl-old", recovered.workflow_id)
+        self.assertEqual("tsk-old", recovered.task_id)
+        self.assertEqual("DONE", self.store.get_session(session.session_id).status)
+        self.assertIsNone(client.submitted_workflow)
+
+    def test_adapter_fails_closed_on_an_unbound_created_session(self) -> None:
+        session = self.gateway.register_session(
+            self.request(trial_id="recover-unbound")
+        )
+        with self.assertRaisesRegex(FlowMeshRunError, "ambiguous"):
+            FlowMeshAgentAdapter(
+                FakeFlowMeshClient(),
+                self.gateway,
+                FlowMeshSettings(),
+            ).recover(session.session_id)
+        self.assertEqual(
+            "FAILED",
+            self.store.get_session(session.session_id).status,
+        )
+
     def test_result_parser_accepts_direct_result_shape(self) -> None:
         answer = extract_agent_answer(
             {"items": [{"response": "Direct response"}]}

@@ -21,6 +21,17 @@ from .gateway import (
     SQLiteSessionStore,
     TelemetryIncompleteError,
 )
+from .pilot import (
+    FlowMeshPilotConfig,
+    FlowMeshPilotConfigError,
+    PilotTrial,
+    PilotWorkload,
+    build_trial_plan,
+    load_flowmesh_pilot_config,
+    run_flowmesh_pilot,
+    summarize_pilot_records,
+    validate_flowmesh_pilot_config,
+)
 from .workflow import (
     PATHFINDER_GRAPH_NODE_NAME,
     build_agent_workflow,
@@ -35,10 +46,14 @@ __all__ = [
     "FlowMeshAgentRun",
     "FlowMeshAgentRunRequest",
     "FlowMeshPinningError",
+    "FlowMeshPilotConfig",
+    "FlowMeshPilotConfigError",
     "FlowMeshRunError",
     "FlowMeshSettings",
     "GatewayError",
     "PATHFINDER_GRAPH_NODE_NAME",
+    "PilotTrial",
+    "PilotWorkload",
     "RemoteDataAgentBackend",
     "SdkFlowMeshClient",
     "SQLiteSessionStore",
@@ -46,5 +61,10 @@ __all__ = [
     "WorkerResolutionError",
     "WorkflowValidation",
     "build_agent_workflow",
+    "build_trial_plan",
+    "load_flowmesh_pilot_config",
+    "run_flowmesh_pilot",
+    "summarize_pilot_records",
+    "validate_flowmesh_pilot_config",
     "workflow_selected_worker",
 ]

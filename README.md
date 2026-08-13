@@ -147,6 +147,8 @@ The coupling layer includes:
 - worker pinning by exact ID or stable alias, so a session cannot run on an
   unrelated worker of a shared deployment;
 - workflow validation that does not submit or execute a task;
+- a frozen, block-randomized real-FlowMesh pilot runner with durable per-trial
+  records, fail-closed telemetry classification, and resume support;
 - a FlowMesh agent configuration and thin worker-image overlay; and
 - fake-client integration tests that do not require a running FlowMesh stack,
   plus compatibility tests run against a real FlowMesh source tree when one is
@@ -160,6 +162,8 @@ one-node `spec.graph` for worker pinning to take effect at all.
 See
 [`integrations/flowmesh/README.md`](integrations/flowmesh/README.md)
 for installation, deployment, and smoke-test instructions.
+The dedicated batch configurations and Phase A runbook are in
+[`integrations/flowmesh/PILOT.md`](integrations/flowmesh/PILOT.md).
 
 The Gateway can also use the versioned HTTP `DataAgentClient` and included
 single-node Data Agent server instead of the emulated backend. The server

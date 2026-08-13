@@ -8,7 +8,7 @@ from .contracts import (
     FlowMeshClientProtocol,
     FlowMeshSettings,
 )
-from .gateway import AccessGateway
+from .gateway import AccessGateway, GatewaySession, SessionNotFoundError
 from .workflow import build_agent_workflow, workflow_selected_worker
 
 
@@ -107,22 +107,10 @@ class FlowMeshAgentAdapter:
                 submitted.workflow_id,
                 task_id,
             )
-            terminal = self.client.wait(
-                submitted.workflow_id,
-                self.settings.poll_interval_seconds,
-            )
-            if terminal.status != "DONE":
-                raise FlowMeshRunError(
-                    f"FlowMesh workflow {terminal.workflow_id} ended with "
-                    f"status {terminal.status}"
-                )
-            raw_result = self.client.retrieve_result(task_id)
-            final_answer = extract_agent_answer(raw_result)
-            self.gateway.reconcile_artifact_telemetry(session.session_id)
-            self.gateway.store.finish_session(
+            return self._complete_bound_session(
                 session.session_id,
-                status="DONE",
-                final_answer=final_answer,
+                submitted.workflow_id,
+                task_id,
             )
         except Exception:
             self.gateway.store.finish_session(
@@ -132,18 +120,118 @@ class FlowMeshAgentAdapter:
             )
             raise
 
+    def recover(self, session_id: str) -> FlowMeshAgentRun | None:
+        """Recover a session that existed before a batch-runner restart.
+
+        A crash can happen after FlowMesh has accepted or completed a task but
+        before the pilot JSONL record is durable. Re-submitting the same
+        deterministic session would either duplicate work or collide with the
+        Gateway primary key. Recover the bound task instead; an unbound
+        CREATED session is ambiguous and therefore fails closed.
+        """
+        try:
+            session = self.gateway.store.get_session(session_id)
+        except SessionNotFoundError:
+            return None
+
+        if session.status == "FAILED":
+            raise FlowMeshRunError(
+                f"Pathfinder session {session_id} already exists as FAILED; "
+                "it will not be silently retried"
+            )
+        if session.status == "DONE":
+            if (
+                session.flowmesh_workflow_id is None
+                or session.flowmesh_task_id is None
+                or session.final_answer is None
+            ):
+                raise FlowMeshRunError(
+                    f"completed Pathfinder session {session_id} is missing "
+                    "its FlowMesh IDs or final answer"
+                )
+            return self._stored_run(session)
+        if session.status not in {"CREATED", "RUNNING"}:
+            raise FlowMeshRunError(
+                f"Pathfinder session {session_id} has unsupported recovery "
+                f"status {session.status}"
+            )
+        if (
+            session.flowmesh_workflow_id is None
+            or session.flowmesh_task_id is None
+        ):
+            self.gateway.store.finish_session(
+                session_id,
+                status="FAILED",
+                final_answer=None,
+            )
+            raise FlowMeshRunError(
+                f"Pathfinder session {session_id} was created but never "
+                "bound to a FlowMesh task; submission state is ambiguous"
+            )
+        try:
+            return self._complete_bound_session(
+                session_id,
+                session.flowmesh_workflow_id,
+                session.flowmesh_task_id,
+            )
+        except Exception:
+            self.gateway.store.finish_session(
+                session_id,
+                status="FAILED",
+                final_answer=None,
+            )
+            raise
+
+    def _complete_bound_session(
+        self,
+        session_id: str,
+        workflow_id: str,
+        task_id: str,
+    ) -> FlowMeshAgentRun:
+        terminal = self.client.wait(
+            workflow_id,
+            self.settings.poll_interval_seconds,
+        )
+        if terminal.status != "DONE":
+            raise FlowMeshRunError(
+                f"FlowMesh workflow {terminal.workflow_id} ended with "
+                f"status {terminal.status}"
+            )
+        raw_result = self.client.retrieve_result(task_id)
+        final_answer = extract_agent_answer(raw_result)
+        self.gateway.reconcile_artifact_telemetry(session_id)
+        self.gateway.store.finish_session(
+            session_id,
+            status="DONE",
+            final_answer=final_answer,
+        )
+        events = tuple(
+            event.to_dict()
+            for event in self.gateway.store.list_events(session_id)
+        )
+        return FlowMeshAgentRun(
+            session_id=session_id,
+            workflow_id=workflow_id,
+            task_id=task_id,
+            status="DONE",
+            final_answer=final_answer,
+            access_events=events,
+            raw_result=raw_result,
+        )
+
+    def _stored_run(self, session: GatewaySession) -> FlowMeshAgentRun:
         events = tuple(
             event.to_dict()
             for event in self.gateway.store.list_events(session.session_id)
         )
         return FlowMeshAgentRun(
             session_id=session.session_id,
-            workflow_id=submitted.workflow_id,
-            task_id=task_id,
+            workflow_id=session.flowmesh_workflow_id,
+            task_id=session.flowmesh_task_id,
             status="DONE",
-            final_answer=final_answer,
+            final_answer=session.final_answer,
             access_events=events,
-            raw_result=raw_result,
+            raw_result={"recovered_from_gateway_state": True},
         )
 
     def _validate(self, workflow: dict[str, Any]) -> None:

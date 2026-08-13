@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -13,6 +14,9 @@ from .telemetry import JsonlTelemetryStore
 
 DEFAULT_CONFIG = Path("configs/minimal_system.json")
 DEFAULT_FLOWMESH_STATE_DB = Path("outputs/flowmesh/gateway.sqlite3")
+DEFAULT_FLOWMESH_PILOT_CONFIG = Path(
+    "configs/phase_a_quote_pilot_dry_run.json"
+)
 DEFAULT_DATA_AGENT_MANIFEST = Path("configs/data_agent_manifest.json")
 DEFAULT_DATA_AGENT_OPERATION_DB = Path(
     "outputs/data_agent/operations.sqlite3"
@@ -134,6 +138,76 @@ def _parser() -> argparse.ArgumentParser:
     )
     flowmesh_session.add_argument("--compact", action="store_true")
 
+    flowmesh_pilot = subcommands.add_parser(
+        "run-flowmesh-pilot",
+        help="run or resume a randomized pilot through real FlowMesh",
+    )
+    flowmesh_pilot.add_argument(
+        "--pilot-config",
+        type=Path,
+        default=DEFAULT_FLOWMESH_PILOT_CONFIG,
+    )
+    flowmesh_pilot.add_argument(
+        "--config",
+        type=Path,
+        help="override the system_config named by the pilot plan",
+    )
+    flowmesh_pilot.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "batch output directory; defaults to "
+            "outputs/flowmesh-pilot/<experiment-id>"
+        ),
+    )
+    flowmesh_pilot.add_argument(
+        "--state-db",
+        type=Path,
+        help=(
+            "SQLite state shared with the already-running MCP gateway; "
+            "defaults to <output-dir>/gateway.sqlite3"
+        ),
+    )
+    flowmesh_pilot.add_argument(
+        "--repetitions",
+        type=int,
+        help="override repetitions per workload/intervention cell",
+    )
+    flowmesh_pilot.add_argument(
+        "--randomization-seed",
+        type=int,
+        help="override the frozen trial-order seed",
+    )
+    flowmesh_pilot.add_argument("--flowmesh-base-url")
+    flowmesh_pilot.add_argument("--agent-config")
+    flowmesh_pilot.add_argument("--task-timeout", type=int, default=600)
+    flowmesh_pilot.add_argument("--poll-interval", type=float, default=2.0)
+    pilot_pin = flowmesh_pilot.add_mutually_exclusive_group()
+    pilot_pin.add_argument("--worker-id")
+    pilot_pin.add_argument("--worker-alias")
+    flowmesh_pilot.add_argument(
+        "--validate-workflow",
+        action="store_true",
+    )
+    flowmesh_pilot.add_argument(
+        "--data-agent-url",
+        help=(
+            "required remote Data Agent URL; falls back to "
+            "PATHFINDER_DATA_AGENT_URL"
+        ),
+    )
+    flowmesh_pilot.add_argument(
+        "--data-agent-timeout",
+        type=float,
+        default=30.0,
+    )
+    flowmesh_pilot.add_argument(
+        "--data-agent-max-retries",
+        type=int,
+        default=1,
+    )
+    flowmesh_pilot.add_argument("--compact", action="store_true")
+
     gateway = subcommands.add_parser(
         "serve-flowmesh-tools",
         help="serve Pathfinder access tools over Streamable HTTP MCP",
@@ -199,6 +273,18 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _print_payload(payload: object, *, compact: bool) -> int:
+    print(
+        json.dumps(
+            payload,
+            indent=None if compact else 2,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -221,6 +307,93 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
             )
             return 0
+        if args.command == "run-flowmesh-pilot":
+            from .data_agent_client import (
+                DataAgentClientSettings,
+                HttpDataAgentClient,
+            )
+            from .integrations.flowmesh import (
+                AccessGateway,
+                FlowMeshAgentAdapter,
+                FlowMeshSettings,
+                RemoteDataAgentBackend,
+                SdkFlowMeshClient,
+                SQLiteSessionStore,
+            )
+            from .integrations.flowmesh.pilot import (
+                load_flowmesh_pilot_config,
+                run_flowmesh_pilot,
+            )
+
+            pilot_config = load_flowmesh_pilot_config(args.pilot_config)
+            config = load_config(args.config or pilot_config.system_config_path)
+            output_dir = args.output_dir or (
+                Path("outputs")
+                / "flowmesh-pilot"
+                / pilot_config.experiment_id
+            )
+            state_db = args.state_db or output_dir / "gateway.sqlite3"
+            resolved_data_agent_url = (
+                args.data_agent_url
+                or os.getenv("PATHFINDER_DATA_AGENT_URL")
+            )
+            if not resolved_data_agent_url:
+                raise ConfigError(
+                    "run-flowmesh-pilot requires --data-agent-url or "
+                    "PATHFINDER_DATA_AGENT_URL; the emulated backend is not "
+                    "valid for a real pilot"
+                )
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                agent_config_name=args.agent_config,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_id=args.worker_id,
+                worker_alias=args.worker_alias,
+                validate_before_submit=(
+                    True if args.validate_workflow else None
+                ),
+            )
+            backend = RemoteDataAgentBackend(
+                HttpDataAgentClient(
+                    DataAgentClientSettings.from_environment(
+                        base_url=resolved_data_agent_url,
+                        timeout_seconds=args.data_agent_timeout,
+                        max_retries=args.data_agent_max_retries,
+                    )
+                )
+            )
+            gateway = AccessGateway(
+                config,
+                SQLiteSessionStore(state_db),
+                backend,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_pilot(
+                    pilot=pilot_config,
+                    system=config,
+                    adapter=FlowMeshAgentAdapter(
+                        client,
+                        gateway,
+                        settings,
+                    ),
+                    output_dir=output_dir,
+                    repetitions=args.repetitions,
+                    randomization_seed=args.randomization_seed,
+                    progress_callback=lambda event: print(
+                        json.dumps(
+                            {"status": "trial_recorded", **event},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                        flush=True,
+                    ),
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
         config = load_config(args.config)
         if args.command == "validate-config":
             payload = {
@@ -347,12 +520,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"status": "error", "message": str(exc)}))
         return 2
 
-    print(
-        json.dumps(
-            payload,
-            indent=None if getattr(args, "compact", False) else 2,
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+    return _print_payload(
+        payload,
+        compact=getattr(args, "compact", False),
     )
-    return 0

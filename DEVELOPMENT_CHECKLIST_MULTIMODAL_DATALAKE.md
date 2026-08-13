@@ -98,8 +98,17 @@ physical design and an agent session.
   changing FlowMesh.
 - [x] Cover submission, result parsing, offer visibility, budget rejection,
   and access-count rejection with fake-client integration tests.
-- [ ] Run the live Linux FlowMesh smoke test with model credentials and verify
-  worker-to-MCP network reachability.
+- [x] Run the live Linux FlowMesh Level-1 and Level-2 smoke tests with model
+  credentials, worker-to-MCP reachability, HTTP result delivery, opaque
+  artifact handles, `fetch_artifact`, and reconciled transfer telemetry.
+- [x] Add a real-FlowMesh pilot batch runner with frozen block randomization,
+  paired Pathfinder seeds, unique sessions, durable JSONL records, resume support,
+  failure classification, manifests, and CSV summaries.
+- [x] Add dedicated Phase A quote-pilot system, dry-run, and ten-per-condition
+  fixture configurations that exclude unsupported binary video access.
+- [ ] Manually run and review the two-session real-FlowMesh pilot dry run.
+- [ ] Run the ten-per-condition fixture engineering pilot only after the dry
+  run passes; do not present repeated-fixture results as scientific evidence.
 - [ ] Replace the emulated representation backend before collecting scientific
   results.
 - [x] Implement the Data Agent server-side `/v1/access` contract, persistent

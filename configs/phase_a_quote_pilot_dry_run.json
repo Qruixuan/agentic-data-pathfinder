@@ -1,0 +1,28 @@
+{
+  "schema_version": "pathfinder.flowmesh-pilot/v1alpha1",
+  "experiment_id": "phase-a-quote-pilot-dry-run-v1",
+  "system_config": "phase_a_quote_pilot_system.json",
+  "design_id": "D_structured_digest",
+  "task_class_id": "video_qa",
+  "quote_profile_ids": [
+    "digest_low",
+    "as_designed"
+  ],
+  "latency_multipliers": [
+    1.0
+  ],
+  "repetitions": 1,
+  "base_seed": 1701,
+  "randomization_seed": 2701,
+  "workloads": [
+    {
+      "id": "fixture-red-car-timestamp",
+      "object_id": "fixture-video-001",
+      "question": "At what timestamp does the red car enter the tunnel?",
+      "accepted_answer_substrings": [
+        "00:17",
+        "17 seconds"
+      ]
+    }
+  ]
+}
