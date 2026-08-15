@@ -136,6 +136,15 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
     )
+    flowmesh_session.add_argument(
+        "--telemetry-quiescence-timeout",
+        type=float,
+        default=15.0,
+        help=(
+            "seconds to wait for final artifact telemetry; shared-host "
+            "experiments default to 15s and still fail closed on timeout"
+        ),
+    )
     flowmesh_session.add_argument("--compact", action="store_true")
 
     flowmesh_pilot = subcommands.add_parser(
@@ -206,6 +215,15 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
     )
+    flowmesh_pilot.add_argument(
+        "--telemetry-quiescence-timeout",
+        type=float,
+        default=15.0,
+        help=(
+            "seconds to wait for final artifact telemetry; timeout records "
+            "a telemetry failure rather than accepting stale counters"
+        ),
+    )
     flowmesh_pilot.add_argument("--compact", action="store_true")
 
     gateway = subcommands.add_parser(
@@ -236,6 +254,11 @@ def _parser() -> argparse.ArgumentParser:
         "--data-agent-max-retries",
         type=int,
         default=1,
+    )
+    gateway.add_argument(
+        "--telemetry-quiescence-timeout",
+        type=float,
+        default=15.0,
     )
 
     data_agent = subcommands.add_parser(
@@ -361,7 +384,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         timeout_seconds=args.data_agent_timeout,
                         max_retries=args.data_agent_max_retries,
                     )
-                )
+                ),
+                telemetry_quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout
+                ),
             )
             gateway = AccessGateway(
                 config,
@@ -474,7 +500,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                             timeout_seconds=args.data_agent_timeout,
                             max_retries=args.data_agent_max_retries,
                         )
-                    )
+                    ),
+                    telemetry_quiescence_timeout_seconds=(
+                        args.telemetry_quiescence_timeout
+                    ),
                 )
             gateway = AccessGateway(
                 config,
@@ -514,6 +543,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 data_agent_url=args.data_agent_url,
                 data_agent_timeout_seconds=args.data_agent_timeout,
                 data_agent_max_retries=args.data_agent_max_retries,
+                telemetry_quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout
+                ),
             )
             return 0
     except (ConfigError, OSError, RuntimeError, ValueError) as exc:

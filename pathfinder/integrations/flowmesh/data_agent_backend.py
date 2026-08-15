@@ -76,6 +76,8 @@ class RemoteDataAgentBackend:
             realized_cost=result.realized_cost,
             bytes_read=result.bytes_read,
             location=result.location,
+            service_latency_ms=result.service_latency_ms,
+            service_timings_ms=dict(result.timings_ms),
             payload=payload,
             content_sha256=result.payload.sha256,
             data_agent_access_id=result.access_id,

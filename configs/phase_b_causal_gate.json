@@ -1,0 +1,36 @@
+{
+  "schema_version": "pathfinder.flowmesh-pilot/v1alpha1",
+  "experiment_id": "phase-b-causal-gate-v1",
+  "system_config": "phase_b_causal_gate_system.json",
+  "design_ids": ["D_remote_digest", "D_local_digest"],
+  "task_class_id": "video_qa",
+  "quote_profile_ids": [
+    "digest_low",
+    "digest_high",
+    "digest_unaffordable"
+  ],
+  "latency_multipliers": [0.5, 1.0, 2.0],
+  "repetitions": 10,
+  "base_seed": 5201,
+  "randomization_seed": 6201,
+  "workloads": [
+    {
+      "id": "fixture-red-car-timestamp",
+      "object_id": "fixture-video-001",
+      "question": "At what timestamp does the red car enter the tunnel?",
+      "accepted_answer_substrings": ["00:17", "17 seconds"]
+    },
+    {
+      "id": "fixture-car-color",
+      "object_id": "fixture-video-001",
+      "question": "What color is the car that enters the tunnel?",
+      "accepted_answer_substrings": ["red"]
+    },
+    {
+      "id": "fixture-car-destination",
+      "object_id": "fixture-video-001",
+      "question": "What does the car enter in the recorded clip?",
+      "accepted_answer_substrings": ["tunnel"]
+    }
+  ]
+}

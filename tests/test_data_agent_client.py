@@ -1116,6 +1116,12 @@ class RemoteDataAgentBackendTest(unittest.TestCase):
             events = store.list_events(session.session_id)
             self.assertEqual(1, len(events))
             self.assertEqual(0.73, events[0].realized_cost)
+            self.assertEqual(125.0, events[0].felt_latency_ms)
+            self.assertEqual(80.0, events[0].data_agent_service_latency_ms)
+            self.assertEqual(5.0, events[0].data_agent_fetch_latency_ms)
+            self.assertIsNone(
+                events[0].data_agent_controlled_delay_ms
+            )
             self.assertEqual(
                 sha256(b"The red car enters at 00:17.").hexdigest(),
                 events[0].content_sha256,

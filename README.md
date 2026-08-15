@@ -19,6 +19,10 @@ physical design
 The simulated harness uses only the Python standard library. The optional
 FlowMesh coupling layer uses the FlowMesh SDK and MCP package.
 
+The staged experiment and acceptance criteria for moving from the completed
+FlowMesh smoke tests to full Performative Physical Design validation are in
+[PPD_VALIDATION_PROTOCOL.md](PPD_VALIDATION_PROTOCOL.md).
+
 ## Current Scope
 
 The included experiment domain has:

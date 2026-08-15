@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pathfinder.config import load_config
+from pathfinder.data_agent_manifest import load_data_agent_manifest
 from pathfinder.integrations.flowmesh.contracts import (
     FlowMeshAgentRun,
     FlowMeshAgentRunRequest,
@@ -22,6 +23,7 @@ from pathfinder.integrations.flowmesh.pilot import (
     load_flowmesh_pilot_config,
     load_pilot_records,
     run_flowmesh_pilot,
+    summarize_paired_contrasts,
     validate_flowmesh_pilot_config,
 )
 
@@ -39,6 +41,16 @@ COST_AWARE_DRY_RUN_CONFIG_PATH = (
 )
 COST_AWARE_SYSTEM_CONFIG_PATH = (
     ROOT / "configs" / "phase_a_cost_aware_quote_v2_system.json"
+)
+PHASE_B_PILOT_CONFIG_PATH = ROOT / "configs" / "phase_b_causal_gate.json"
+PHASE_B_DRY_RUN_CONFIG_PATH = (
+    ROOT / "configs" / "phase_b_causal_gate_dry_run.json"
+)
+PHASE_B_SYSTEM_CONFIG_PATH = (
+    ROOT / "configs" / "phase_b_causal_gate_system.json"
+)
+PHASE_B_DATA_AGENT_MANIFEST_PATH = (
+    ROOT / "configs" / "phase_b_data_agent_manifest.json"
 )
 
 
@@ -63,6 +75,13 @@ class FakePilotAdapter:
             ),
             "felt_latency_ms": (
                 210.0 if representation == "multimodal_digest" else 75.0
+            ),
+            "data_agent_service_latency_ms": (
+                210.0 if representation == "multimodal_digest" else 75.0
+            ),
+            "data_agent_fetch_latency_ms": 0.2,
+            "data_agent_controlled_delay_ms": (
+                209.8 if representation == "multimodal_digest" else 74.8
             ),
             "artifact_bytes_sent": (
                 0 if representation == "multimodal_digest" else 121
@@ -157,6 +176,7 @@ class FlowMeshPilotConfigTest(unittest.TestCase):
         self.assertNotIn("must use", question)
 
     def test_trial_plan_is_deterministic_balanced_and_paired(self) -> None:
+        self.assertEqual("D_structured_digest", self.pilot.design_id)
         first = build_trial_plan(self.pilot)
         second = build_trial_plan(self.pilot)
         self.assertEqual(first, second)
@@ -176,7 +196,7 @@ class FlowMeshPilotConfigTest(unittest.TestCase):
         broken = self.pilot.__class__(
             **{
                 **self.pilot.__dict__,
-                "design_id": "unknown-design",
+                "design_ids": ("unknown-design",),
             }
         )
         with self.assertRaises(FlowMeshPilotConfigError):
@@ -271,6 +291,138 @@ class CostAwareQuotePilotConfigTest(unittest.TestCase):
                 self.assertNotIn(representation.casefold(), question)
 
 
+class PhaseBCausalGateConfigTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.pilot = load_flowmesh_pilot_config(PHASE_B_PILOT_CONFIG_PATH)
+        cls.dry_run = load_flowmesh_pilot_config(
+            PHASE_B_DRY_RUN_CONFIG_PATH
+        )
+        cls.system = load_config(PHASE_B_SYSTEM_CONFIG_PATH)
+
+    def test_phase_b_factorial_is_balanced_and_matched(self) -> None:
+        validate_flowmesh_pilot_config(self.pilot, self.system)
+        validate_flowmesh_pilot_config(self.dry_run, self.system)
+        self.assertEqual(
+            ("D_remote_digest", "D_local_digest"),
+            self.pilot.design_ids,
+        )
+        with self.assertRaisesRegex(FlowMeshPilotConfigError, "multiple"):
+            _ = self.pilot.design_id
+        dry_trials = build_trial_plan(self.dry_run)
+        full_trials = build_trial_plan(self.pilot)
+        self.assertEqual(54, len(dry_trials))
+        self.assertEqual(540, len(full_trials))
+
+        cells = Counter(
+            (
+                trial.design_id,
+                trial.quote_profile_id,
+                trial.latency_multiplier,
+            )
+            for trial in full_trials
+        )
+        self.assertEqual(18, len(cells))
+        self.assertEqual({30}, set(cells.values()))
+        blocks: dict[tuple[str, int], set[tuple[str, str, float]]] = {}
+        for trial in full_trials:
+            blocks.setdefault(
+                (trial.workload_id, trial.repetition), set()
+            ).add(
+                (
+                    trial.design_id,
+                    trial.quote_profile_id,
+                    trial.latency_multiplier,
+                )
+            )
+        self.assertEqual({18}, {len(cells) for cells in blocks.values()})
+
+    def test_matched_quote_and_physical_cells_are_declared(self) -> None:
+        task = self.system.task_classes["video_qa"]
+        remote = self.system.designs["D_remote_digest"]
+        local = self.system.designs["D_local_digest"]
+        low = self.system.quote_profiles["digest_low"]
+        remote_quote = low.quote_for(
+            task.id,
+            "multimodal_digest",
+            remote.paths["multimodal_digest"].quotes[task.id],
+        )
+        local_quote = low.quote_for(
+            task.id,
+            "multimodal_digest",
+            local.paths["multimodal_digest"].quotes[task.id],
+        )
+        self.assertEqual(remote_quote, local_quote)
+        self.assertNotEqual(
+            remote.paths["multimodal_digest"].location,
+            local.paths["multimodal_digest"].location,
+        )
+        self.assertNotEqual(
+            remote.paths["multimodal_digest"].realized_cost,
+            local.paths["multimodal_digest"].realized_cost,
+        )
+
+    def test_data_agent_bindings_match_every_phase_b_design_path(self) -> None:
+        manifest = load_data_agent_manifest(
+            PHASE_B_DATA_AGENT_MANIFEST_PATH
+        )
+        for design_id in self.pilot.design_ids:
+            design = self.system.designs[design_id]
+            for representation_id, path in design.paths.items():
+                binding = manifest.representations[
+                    representation_id
+                ].plan_bindings[design_id]
+                self.assertEqual(path.location, binding.location)
+                self.assertEqual(path.latency_ms, binding.minimum_latency_ms)
+                self.assertEqual(path.realized_cost, binding.realized_cost)
+
+    def test_paired_contrasts_cover_each_single_factor(self) -> None:
+        trials = build_trial_plan(self.dry_run)
+        rows = summarize_paired_contrasts([], trials)
+        self.assertEqual(
+            {"physical", "quote", "latency"},
+            {row["contrast_type"] for row in rows},
+        )
+        self.assertTrue(all(row["planned_pairs"] > 0 for row in rows))
+        self.assertTrue(all(row["complete_pairs"] == 0 for row in rows))
+
+    def test_phase_b_dry_run_executes_all_multi_design_cells(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            adapter = FakePilotAdapter()
+            manifest = run_flowmesh_pilot(
+                pilot=self.dry_run,
+                system=self.system,
+                adapter=adapter,
+                output_dir=Path(directory) / "phase-b",
+            )
+            output = Path(directory) / "phase-b"
+            self.assertEqual(54, manifest["planned_trials"])
+            self.assertEqual(54, len(adapter.requests))
+            self.assertEqual(
+                set(self.pilot.design_ids),
+                {request.design_id for request in adapter.requests},
+            )
+            with (output / "summary.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as handle:
+                self.assertEqual(18, len(list(csv.DictReader(handle))))
+            with (output / "summary_by_workload.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as handle:
+                self.assertEqual(54, len(list(csv.DictReader(handle))))
+            with (output / "paired_contrasts.csv").open(
+                "r", encoding="utf-8", newline=""
+            ) as handle:
+                contrasts = list(csv.DictReader(handle))
+            self.assertEqual(
+                {"physical", "quote", "latency"},
+                {row["contrast_type"] for row in contrasts},
+            )
+            self.assertTrue(
+                all(int(row["complete_pairs"]) > 0 for row in contrasts)
+            )
+
+
 class FlowMeshPilotBatchTest(unittest.TestCase):
     def setUp(self) -> None:
         self.pilot = load_flowmesh_pilot_config(PILOT_CONFIG_PATH)
@@ -320,6 +472,10 @@ class FlowMeshPilotBatchTest(unittest.TestCase):
         }
         self.assertEqual("1.0", rates["digest_low"])
         self.assertEqual("0.0", rates["as_designed"])
+        self.assertTrue((self.output_dir / "summary_by_workload.csv").exists())
+        self.assertTrue((self.output_dir / "paired_contrasts.csv").exists())
+        self.assertIn("workload_summary_path", manifest)
+        self.assertIn("paired_contrasts_path", manifest)
         self.assertFalse(manifest["secrets_recorded"])
 
     def test_interrupted_batch_resumes_only_missing_trials(self) -> None:

@@ -115,6 +115,27 @@ affordability, and directional quote response; they are not independent data
 samples and cannot support the final causal claim. A frozen multi-object
 evaluation set remains the next step after v2 establishes a first stage.
 
+## Phase B Causal Gate
+
+After the v2 first stage, use the Phase B harness to randomize physical design,
+quote, and latency inside every workload/repetition block. Unlike the legacy
+single `design_id`, a Phase B pilot declares `design_ids`; the loader accepts
+exactly one of these two forms so existing Phase A plans remain resumable.
+
+The included fixture files are:
+
+- `configs/phase_b_causal_gate_system.json`;
+- `configs/phase_b_causal_gate_dry_run.json` (54 sessions);
+- `configs/phase_b_causal_gate.json` (540 sessions); and
+- `configs/phase_b_data_agent_manifest.json`.
+
+The fixture compares a controlled remote-digest binding with a controlled
+local-digest binding. It validates multi-design execution and P1-P4 analysis,
+but it is not the real corpus or storage deployment required for the paper.
+Do not run the 540-session fixture as a substitute for preparing independent
+objects. The complete evidence sequence and acceptance gates are defined in
+[`PPD_VALIDATION_PROTOCOL.md`](../../PPD_VALIDATION_PROTOCOL.md).
+
 ## Before Running
 
 The operator must already have:
@@ -185,6 +206,7 @@ PYTHONPATH=. python -m pathfinder run-flowmesh-pilot \
   --flowmesh-base-url "$FLOWMESH_BASE_URL" \
   --agent-config pathfinder_video \
   --data-agent-url http://127.0.0.1:8780 \
+  --telemetry-quiescence-timeout 15 \
   --validate-workflow
 ```
 
@@ -227,8 +249,18 @@ Each output directory contains:
   error classification;
 - `summary.csv`: per-condition completion, access, task-success, selection,
   cost, byte, and latency summaries;
+- `summary_by_workload.csv`: the same metrics stratified by workload so a
+  task-specific response is not hidden by a pooled rate;
+- `paired_contrasts.csv`: matched physical, quote, and latency comparisons
+  that differ in exactly one factor;
 - `manifest.json`: progress, code/config versions, non-secret runtime metadata,
   and artifact locations.
+
+For remote Data Agents, records distinguish client round-trip latency from
+Data Agent service, fetch, and controlled-delay latency. The CLI waits up to
+`--telemetry-quiescence-timeout` (15 seconds by default) for final transfer
+telemetry. Expiry is still recorded as a telemetry failure; the longer bounded
+wait never marks a provisional summary complete.
 
 The runner skips every trial already present in `runs.jsonl`, including an
 infrastructure or telemetry failure. It never silently retries a failed outcome

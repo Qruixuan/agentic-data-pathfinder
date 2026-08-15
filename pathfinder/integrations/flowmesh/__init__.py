@@ -30,6 +30,8 @@ from .pilot import (
     load_flowmesh_pilot_config,
     run_flowmesh_pilot,
     summarize_pilot_records,
+    summarize_pilot_records_by_workload,
+    summarize_paired_contrasts,
     validate_flowmesh_pilot_config,
 )
 from .workflow import (
@@ -65,6 +67,8 @@ __all__ = [
     "load_flowmesh_pilot_config",
     "run_flowmesh_pilot",
     "summarize_pilot_records",
+    "summarize_pilot_records_by_workload",
+    "summarize_paired_contrasts",
     "validate_flowmesh_pilot_config",
     "workflow_selected_worker",
 ]

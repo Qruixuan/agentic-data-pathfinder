@@ -109,6 +109,9 @@ class GatewayAccessEvent:
     location: str | None
     content_sha256: str | None
     created_at: str
+    data_agent_service_latency_ms: float | None = None
+    data_agent_fetch_latency_ms: float | None = None
+    data_agent_controlled_delay_ms: float | None = None
     object_id: str | None = None
     data_agent_access_id: str | None = None
     artifact_bytes_sent: int = 0
@@ -129,6 +132,8 @@ class BackendAccessResult:
     realized_cost: float
     bytes_read: int
     location: str
+    service_latency_ms: float | None = None
+    service_timings_ms: dict[str, float] | None = None
     payload: dict[str, Any] | None = None
     content_sha256: str | None = None
     data_agent_access_id: str | None = None
@@ -183,6 +188,8 @@ class EmulatedRepresentationBackend:
         return BackendAccessResult(
             content=content,
             felt_latency_ms=execution.felt_latency_ms,
+            service_latency_ms=execution.felt_latency_ms,
+            service_timings_ms=None,
             realized_cost=execution.realized_cost,
             bytes_read=execution.bytes_read,
             location=execution.location,
@@ -244,6 +251,9 @@ class SQLiteSessionStore:
                     accepted INTEGER NOT NULL,
                     rejection_reason TEXT,
                     felt_latency_ms REAL,
+                    data_agent_service_latency_ms REAL,
+                    data_agent_fetch_latency_ms REAL,
+                    data_agent_controlled_delay_ms REAL,
                     realized_cost REAL NOT NULL,
                     bytes_read INTEGER NOT NULL,
                     location TEXT,
@@ -284,6 +294,9 @@ class SQLiteSessionStore:
             }
             migrations = {
                 "object_id": "TEXT",
+                "data_agent_service_latency_ms": "REAL",
+                "data_agent_fetch_latency_ms": "REAL",
+                "data_agent_controlled_delay_ms": "REAL",
                 "data_agent_access_id": "TEXT",
                 "artifact_bytes_sent": "INTEGER NOT NULL DEFAULT 0",
                 "artifact_transfer_latency_ms": "REAL NOT NULL DEFAULT 0",
@@ -413,7 +426,10 @@ class SQLiteSessionStore:
                 INSERT INTO gateway_access_events (
                     session_id, event_index, representation_id,
                     quoted_price, accepted, rejection_reason,
-                    felt_latency_ms, realized_cost, bytes_read,
+                    felt_latency_ms, data_agent_service_latency_ms,
+                    data_agent_fetch_latency_ms,
+                    data_agent_controlled_delay_ms,
+                    realized_cost, bytes_read,
                     location, content_sha256, object_id,
                     data_agent_access_id, artifact_bytes_sent,
                     artifact_transfer_latency_ms,
@@ -421,7 +437,10 @@ class SQLiteSessionStore:
                     artifact_full_download_count, object_catalog_version,
                     artifact_handle,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 """,
                 (
                     event.session_id,
@@ -431,6 +450,9 @@ class SQLiteSessionStore:
                     int(event.accepted),
                     event.rejection_reason,
                     event.felt_latency_ms,
+                    event.data_agent_service_latency_ms,
+                    event.data_agent_fetch_latency_ms,
+                    event.data_agent_controlled_delay_ms,
                     event.realized_cost,
                     event.bytes_read,
                     event.location,
@@ -498,6 +520,15 @@ class SQLiteSessionStore:
             accepted=bool(row["accepted"]),
             rejection_reason=row["rejection_reason"],
             felt_latency_ms=row["felt_latency_ms"],
+            data_agent_service_latency_ms=row[
+                "data_agent_service_latency_ms"
+            ],
+            data_agent_fetch_latency_ms=row[
+                "data_agent_fetch_latency_ms"
+            ],
+            data_agent_controlled_delay_ms=row[
+                "data_agent_controlled_delay_ms"
+            ],
             realized_cost=row["realized_cost"],
             bytes_read=row["bytes_read"],
             location=row["location"],
@@ -747,6 +778,13 @@ class AccessGateway:
                     accepted=True,
                     rejection_reason=None,
                     felt_latency_ms=result.felt_latency_ms,
+                    data_agent_service_latency_ms=result.service_latency_ms,
+                    data_agent_fetch_latency_ms=(
+                        result.service_timings_ms or {}
+                    ).get("fetch"),
+                    data_agent_controlled_delay_ms=(
+                        result.service_timings_ms or {}
+                    ).get("controlled_delay"),
                     realized_cost=result.realized_cost,
                     bytes_read=result.bytes_read,
                     location=result.location,
@@ -854,6 +892,9 @@ class AccessGateway:
                 accepted=False,
                 rejection_reason=reason,
                 felt_latency_ms=None,
+                data_agent_service_latency_ms=None,
+                data_agent_fetch_latency_ms=None,
+                data_agent_controlled_delay_ms=None,
                 realized_cost=0.0,
                 bytes_read=0,
                 location=None,
@@ -879,6 +920,15 @@ class AccessGateway:
                 "accepted": event.accepted,
                 "rejection_reason": event.rejection_reason,
                 "felt_latency_ms": event.felt_latency_ms,
+                "data_agent_service_latency_ms": (
+                    event.data_agent_service_latency_ms
+                ),
+                "data_agent_fetch_latency_ms": (
+                    event.data_agent_fetch_latency_ms
+                ),
+                "data_agent_controlled_delay_ms": (
+                    event.data_agent_controlled_delay_ms
+                ),
                 "object_id": event.object_id,
                 "artifact_bytes_sent": event.artifact_bytes_sent,
                 "artifact_transfer_latency_ms": (

@@ -26,6 +26,7 @@ def build_mcp_server(
     data_agent_url: str | None = None,
     data_agent_timeout_seconds: float = 30.0,
     data_agent_max_retries: int = 1,
+    telemetry_quiescence_timeout_seconds: float = 15.0,
 ) -> Any:
     try:
         from mcp.server.fastmcp import FastMCP
@@ -45,7 +46,12 @@ def build_mcp_server(
             timeout_seconds=data_agent_timeout_seconds,
             max_retries=data_agent_max_retries,
         )
-        backend = RemoteDataAgentBackend(HttpDataAgentClient(settings))
+        backend = RemoteDataAgentBackend(
+            HttpDataAgentClient(settings),
+            telemetry_quiescence_timeout_seconds=(
+                telemetry_quiescence_timeout_seconds
+            ),
+        )
 
     gateway = AccessGateway(
         load_config(config_path),
@@ -96,6 +102,7 @@ def run_mcp_server(
     data_agent_url: str | None = None,
     data_agent_timeout_seconds: float = 30.0,
     data_agent_max_retries: int = 1,
+    telemetry_quiescence_timeout_seconds: float = 15.0,
 ) -> None:
     server = build_mcp_server(
         config_path=config_path,
@@ -105,5 +112,8 @@ def run_mcp_server(
         data_agent_url=data_agent_url,
         data_agent_timeout_seconds=data_agent_timeout_seconds,
         data_agent_max_retries=data_agent_max_retries,
+        telemetry_quiescence_timeout_seconds=(
+            telemetry_quiescence_timeout_seconds
+        ),
     )
     server.run(transport="streamable-http")

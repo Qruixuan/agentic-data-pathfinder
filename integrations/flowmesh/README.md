@@ -284,6 +284,10 @@ See [`PILOT.md`](PILOT.md) for the configuration contract, manual prerequisites,
 exact dry-run and engineering-pilot commands, output files, and the boundary
 between fixture validation and causal evidence.
 
+The next multi-design quote-by-latency gate and the path from that gate to the
+Reduced Oracle, AWM, and OED experiments are specified in
+[`PPD_VALIDATION_PROTOCOL.md`](../../PPD_VALIDATION_PROTOCOL.md).
+
 ## Credential Handling
 
 This integration needs two classes of secret: the **LLM credentials** the

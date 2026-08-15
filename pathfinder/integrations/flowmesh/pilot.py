@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib import metadata
+from itertools import combinations
 from pathlib import Path
 from statistics import mean
 from typing import Any, Callable, Iterable, Iterator, Protocol
@@ -56,7 +57,7 @@ class FlowMeshPilotConfig:
     experiment_id: str
     source_path: Path
     system_config_path: Path
-    design_id: str
+    design_ids: tuple[str, ...]
     task_class_id: str
     quote_profile_ids: tuple[str, ...]
     latency_multipliers: tuple[float, ...]
@@ -65,6 +66,16 @@ class FlowMeshPilotConfig:
     randomization_seed: int
     workloads: tuple[PilotWorkload, ...]
     source_sha256: str
+
+    @property
+    def design_id(self) -> str:
+        """Return the legacy singleton design without hiding a factorial."""
+        if len(self.design_ids) != 1:
+            raise FlowMeshPilotConfigError(
+                "this pilot declares multiple design_ids; consume design_ids "
+                "or the per-trial design_id instead"
+            )
+        return self.design_ids[0]
 
 
 @dataclass(frozen=True)
@@ -261,12 +272,29 @@ def load_flowmesh_pilot_config(
         if isinstance(value, bool) or not isinstance(value, int):
             raise FlowMeshPilotConfigError(f"{name} must be an integer")
 
+    raw_design_ids = root.get("design_ids")
+    raw_design_id = root.get("design_id")
+    if raw_design_ids is not None and raw_design_id is not None:
+        raise FlowMeshPilotConfigError(
+            "pilot configuration must use either design_id or design_ids, "
+            "not both"
+        )
+    if raw_design_ids is not None:
+        design_ids = _unique_strings(
+            _require_list(raw_design_ids, "design_ids"),
+            "design_ids",
+        )
+    else:
+        design_ids = (
+            _nonempty_string(raw_design_id, "design_id"),
+        )
+
     return FlowMeshPilotConfig(
         schema_version=schema_version,
         experiment_id=experiment_id,
         source_path=source_path,
         system_config_path=system_config_path,
-        design_id=_nonempty_string(root.get("design_id"), "design_id"),
+        design_ids=design_ids,
         task_class_id=_nonempty_string(
             root.get("task_class_id"),
             "task_class_id",
@@ -285,10 +313,11 @@ def validate_flowmesh_pilot_config(
     pilot: FlowMeshPilotConfig,
     system: SystemConfig,
 ) -> None:
-    if pilot.design_id not in system.designs:
-        raise FlowMeshPilotConfigError(
-            f"pilot references unknown design: {pilot.design_id}"
-        )
+    for design_id in pilot.design_ids:
+        if design_id not in system.designs:
+            raise FlowMeshPilotConfigError(
+                f"pilot references unknown design: {design_id}"
+            )
     if pilot.task_class_id not in system.task_classes:
         raise FlowMeshPilotConfigError(
             f"pilot references unknown task class: {pilot.task_class_id}"
@@ -334,34 +363,46 @@ def build_trial_plan(
             # current FlowMesh/UTU workflow does not set an LLM sampling seed.
             seed = pilot.base_seed + repetition
             block: list[dict[str, Any]] = []
-            for latency_multiplier in pilot.latency_multipliers:
-                for profile_id in pilot.quote_profile_ids:
-                    multiplier_key = format(latency_multiplier, ".12g")
-                    trial_key = (
-                        f"{workload.id}|{profile_id}|{multiplier_key}|"
-                        f"r{repetition:04d}"
-                    )
-                    identity = (
-                        f"{pilot.source_sha256}:{pilot.experiment_id}:"
-                        f"{trial_key}"
-                    )
-                    block.append(
-                        {
-                            "trial_key": trial_key,
-                            "trial_id": (
-                                f"{pilot.experiment_id}-"
-                                f"{sha256(trial_key.encode()).hexdigest()[:12]}"
-                            ),
-                            "session_id": str(
-                                uuid.uuid5(uuid.NAMESPACE_URL, identity)
-                            ),
-                            "workload": workload,
-                            "profile_id": profile_id,
-                            "latency_multiplier": latency_multiplier,
-                            "repetition": repetition,
-                            "seed": seed,
-                        }
-                    )
+            for design_id in pilot.design_ids:
+                for latency_multiplier in pilot.latency_multipliers:
+                    for profile_id in pilot.quote_profile_ids:
+                        multiplier_key = format(latency_multiplier, ".12g")
+                        # Preserve the v1 single-design identity so an existing
+                        # pilot can still be resumed after this schema extension.
+                        # Multi-design plans need the design in the key because
+                        # every block contains a matched physical intervention.
+                        if len(pilot.design_ids) == 1:
+                            trial_key = (
+                                f"{workload.id}|{profile_id}|{multiplier_key}|"
+                                f"r{repetition:04d}"
+                            )
+                        else:
+                            trial_key = (
+                                f"{workload.id}|{design_id}|{profile_id}|"
+                                f"{multiplier_key}|r{repetition:04d}"
+                            )
+                        identity = (
+                            f"{pilot.source_sha256}:{pilot.experiment_id}:"
+                            f"{trial_key}"
+                        )
+                        block.append(
+                            {
+                                "trial_key": trial_key,
+                                "trial_id": (
+                                    f"{pilot.experiment_id}-"
+                                    f"{sha256(trial_key.encode()).hexdigest()[:12]}"
+                                ),
+                                "session_id": str(
+                                    uuid.uuid5(uuid.NAMESPACE_URL, identity)
+                                ),
+                                "workload": workload,
+                                "design_id": design_id,
+                                "profile_id": profile_id,
+                                "latency_multiplier": latency_multiplier,
+                                "repetition": repetition,
+                                "seed": seed,
+                            }
+                        )
             blocks.append(block)
 
     # Randomize blocks and the intervention order inside each block. Every
@@ -385,7 +426,7 @@ def build_trial_plan(
             accepted_answer_substrings=(
                 item["workload"].accepted_answer_substrings
             ),
-            design_id=pilot.design_id,
+            design_id=item["design_id"],
             task_class_id=pilot.task_class_id,
             quote_profile_id=item["profile_id"],
             latency_multiplier=item["latency_multiplier"],
@@ -632,18 +673,26 @@ def summarize_pilot_records(
     records: Iterable[dict[str, Any]],
     trials: Iterable[PilotTrial],
 ) -> list[dict[str, Any]]:
-    planned: Counter[tuple[str, float]] = Counter(
-        (trial.quote_profile_id, trial.latency_multiplier) for trial in trials
+    planned: Counter[tuple[str, str, float]] = Counter(
+        (trial.design_id, trial.quote_profile_id, trial.latency_multiplier)
+        for trial in trials
     )
-    groups: dict[tuple[str, float], list[dict[str, Any]]] = defaultdict(list)
+    groups: dict[
+        tuple[str, str, float], list[dict[str, Any]]
+    ] = defaultdict(list)
     for record in records:
-        groups[(record["quote_profile_id"], record["latency_multiplier"])].append(
-            record
-        )
+        groups[
+            (
+                record["design_id"],
+                record["quote_profile_id"],
+                record["latency_multiplier"],
+            )
+        ].append(record)
 
     rows: list[dict[str, Any]] = []
-    for profile_id, latency_multiplier in sorted(planned):
-        sessions = groups.get((profile_id, latency_multiplier), [])
+    for design_id, profile_id, latency_multiplier in sorted(planned):
+        group_key = (design_id, profile_id, latency_multiplier)
+        sessions = groups.get(group_key, [])
         completed = [
             record for record in sessions if record["outcome_type"] == "completed"
         ]
@@ -668,9 +717,10 @@ def summarize_pilot_records(
         ]
         rows.append(
             {
+                "design_id": design_id,
                 "quote_profile_id": profile_id,
                 "latency_multiplier": latency_multiplier,
-                "planned_trials": planned[(profile_id, latency_multiplier)],
+                "planned_trials": planned[group_key],
                 "attempted_trials": len(sessions),
                 "completed_trials": len(completed),
                 "infrastructure_failures": sum(
@@ -719,6 +769,27 @@ def summarize_pilot_records(
                     for event in accepted_events
                     if event.get("felt_latency_ms") is not None
                 ),
+                "mean_data_agent_service_latency_ms_per_access": (
+                    _mean_or_blank(
+                        float(event["data_agent_service_latency_ms"])
+                        for event in accepted_events
+                        if event.get("data_agent_service_latency_ms") is not None
+                    )
+                ),
+                "mean_data_agent_fetch_latency_ms_per_access": (
+                    _mean_or_blank(
+                        float(event["data_agent_fetch_latency_ms"])
+                        for event in accepted_events
+                        if event.get("data_agent_fetch_latency_ms") is not None
+                    )
+                ),
+                "mean_data_agent_controlled_delay_ms_per_access": (
+                    _mean_or_blank(
+                        float(event["data_agent_controlled_delay_ms"])
+                        for event in accepted_events
+                        if event.get("data_agent_controlled_delay_ms") is not None
+                    )
+                ),
                 "mean_artifact_bytes_sent_per_access": _mean_or_blank(
                     float(event.get("artifact_bytes_sent", 0))
                     for event in accepted_events
@@ -726,6 +797,225 @@ def summarize_pilot_records(
                 "mean_artifact_transfer_latency_ms_per_access": _mean_or_blank(
                     float(event.get("artifact_transfer_latency_ms", 0.0))
                     for event in accepted_events
+                ),
+            }
+        )
+    return rows
+
+
+def summarize_pilot_records_by_workload(
+    records: Iterable[dict[str, Any]],
+    trials: Iterable[PilotTrial],
+) -> list[dict[str, Any]]:
+    """Produce the same cell metrics without hiding task heterogeneity.
+
+    The first real pilot showed that the quote response was concentrated in a
+    single question type. Aggregating only by quote can therefore manufacture
+    a misleading global elasticity estimate. Phase B treats workload as a
+    pre-registered stratum and emits one row per physical-design, workload,
+    quote, and latency cell.
+    """
+    trials_by_workload: dict[str, list[PilotTrial]] = defaultdict(list)
+    records_by_workload: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for trial in trials:
+        trials_by_workload[trial.workload_id].append(trial)
+    for record in records:
+        records_by_workload[str(record["workload_id"])].append(record)
+
+    rows: list[dict[str, Any]] = []
+    for workload_id in sorted(trials_by_workload):
+        for row in summarize_pilot_records(
+            records_by_workload.get(workload_id, []),
+            trials_by_workload[workload_id],
+        ):
+            rows.append({"workload_id": workload_id, **row})
+    return rows
+
+
+def _exact_two_sided_sign_pvalue(left_only: int, right_only: int) -> float:
+    discordant = left_only + right_only
+    if discordant == 0:
+        return 1.0
+    tail = sum(
+        math.comb(discordant, index)
+        for index in range(min(left_only, right_only) + 1)
+    ) / (2**discordant)
+    return round(min(1.0, 2.0 * tail), 8)
+
+
+def summarize_paired_contrasts(
+    records: Iterable[dict[str, Any]],
+    trials: Iterable[PilotTrial],
+    *,
+    primary_representation_id: str = "multimodal_digest",
+) -> list[dict[str, Any]]:
+    """Summarize matched one-factor contrasts from the frozen block design.
+
+    Only pairs that differ in exactly one of physical design, quote profile, or
+    latency multiplier are compared. Results are emitted both per workload and
+    pooled. The exact sign-test p-value is descriptive engineering evidence;
+    the experiment protocol must still pre-register the primary contrast and
+    account for repeated workloads before making a paper-level claim.
+    """
+    trial_blocks: dict[tuple[str, int], list[PilotTrial]] = defaultdict(list)
+    for trial in trials:
+        trial_blocks[(trial.workload_id, trial.repetition)].append(trial)
+    records_by_key = {
+        str(record["trial_key"]): record for record in records
+    }
+    aggregated: dict[tuple[Any, ...], list[tuple[Any, Any]]] = defaultdict(list)
+
+    for (workload_id, _), block in trial_blocks.items():
+        for left, right in combinations(
+            sorted(
+                block,
+                key=lambda item: (
+                    item.design_id,
+                    item.quote_profile_id,
+                    item.latency_multiplier,
+                ),
+            ),
+            2,
+        ):
+            changed = [
+                name
+                for name, left_value, right_value in (
+                    ("physical", left.design_id, right.design_id),
+                    ("quote", left.quote_profile_id, right.quote_profile_id),
+                    (
+                        "latency",
+                        left.latency_multiplier,
+                        right.latency_multiplier,
+                    ),
+                )
+                if left_value != right_value
+            ]
+            if len(changed) != 1:
+                continue
+            contrast_key = (
+                changed[0],
+                left.design_id,
+                right.design_id,
+                left.quote_profile_id,
+                right.quote_profile_id,
+                left.latency_multiplier,
+                right.latency_multiplier,
+            )
+            pair = (
+                records_by_key.get(left.trial_key),
+                records_by_key.get(right.trial_key),
+            )
+            aggregated[(workload_id, *contrast_key)].append(pair)
+            aggregated[("__pooled__", *contrast_key)].append(pair)
+
+    rows: list[dict[str, Any]] = []
+    for key in sorted(aggregated, key=lambda value: tuple(map(str, value))):
+        (
+            workload_id,
+            contrast_type,
+            left_design,
+            right_design,
+            left_profile,
+            right_profile,
+            left_latency,
+            right_latency,
+        ) = key
+        pairs = aggregated[key]
+        attempted = [pair for pair in pairs if all(pair)]
+        complete = [
+            pair
+            for pair in attempted
+            if all(record["outcome_type"] == "completed" for record in pair)
+        ]
+
+        def selected(record: dict[str, Any]) -> bool:
+            return primary_representation_id in record.get(
+                "selected_representations", []
+            )
+
+        left_only = sum(
+            selected(left) and not selected(right)
+            for left, right in complete
+        )
+        right_only = sum(
+            not selected(left) and selected(right)
+            for left, right in complete
+        )
+        left_rate = _mean_or_blank(float(selected(left)) for left, _ in complete)
+        right_rate = _mean_or_blank(float(selected(right)) for _, right in complete)
+
+        def completed_value(
+            record: dict[str, Any],
+            field: str,
+        ) -> float | None:
+            value = record.get(field)
+            if value is None:
+                return None
+            return float(value)
+
+        def access_total(
+            record: dict[str, Any], field: str
+        ) -> float | None:
+            values = [
+                float(event[field])
+                for event in record.get("access_events", [])
+                if event.get("accepted") and event.get(field) is not None
+            ]
+            return sum(values) if values else None
+
+        def mean_pair_delta(
+            extractor: Callable[[dict[str, Any]], float | None],
+        ) -> float | str:
+            deltas = []
+            for left, right in complete:
+                left_value = extractor(left)
+                right_value = extractor(right)
+                if left_value is not None and right_value is not None:
+                    deltas.append(right_value - left_value)
+            return _mean_or_blank(deltas)
+
+        rows.append(
+            {
+                "workload_id": workload_id,
+                "contrast_type": contrast_type,
+                "left_design_id": left_design,
+                "right_design_id": right_design,
+                "left_quote_profile_id": left_profile,
+                "right_quote_profile_id": right_profile,
+                "left_latency_multiplier": left_latency,
+                "right_latency_multiplier": right_latency,
+                "primary_representation_id": primary_representation_id,
+                "planned_pairs": len(pairs),
+                "attempted_pairs": len(attempted),
+                "complete_pairs": len(complete),
+                "left_primary_access_rate": left_rate,
+                "right_primary_access_rate": right_rate,
+                "primary_access_rate_delta_right_minus_left": (
+                    round(float(right_rate) - float(left_rate), 6)
+                    if left_rate != "" and right_rate != ""
+                    else ""
+                ),
+                "discordant_left_only": left_only,
+                "discordant_right_only": right_only,
+                "exact_two_sided_sign_pvalue": (
+                    _exact_two_sided_sign_pvalue(left_only, right_only)
+                    if complete
+                    else ""
+                ),
+                "mean_task_success_delta_right_minus_left": mean_pair_delta(
+                    lambda record: completed_value(record, "task_success")
+                ),
+                "mean_realized_cost_delta_right_minus_left": mean_pair_delta(
+                    lambda record: access_total(record, "realized_cost")
+                ),
+                "mean_felt_latency_ms_delta_right_minus_left": mean_pair_delta(
+                    lambda record: access_total(record, "felt_latency_ms")
+                ),
+                "mean_service_latency_ms_delta_right_minus_left": mean_pair_delta(
+                    lambda record: access_total(
+                        record,
+                        "data_agent_service_latency_ms",
+                    )
                 ),
             }
         )
@@ -912,6 +1202,8 @@ def _run_flowmesh_pilot_unlocked(
     output_path.mkdir(parents=True, exist_ok=True)
     records_path = output_path / "runs.jsonl"
     summary_path = output_path / "summary.csv"
+    workload_summary_path = output_path / "summary_by_workload.csv"
+    paired_contrasts_path = output_path / "paired_contrasts.csv"
     trial_plan_path = output_path / "trial_plan.json"
     manifest_path = output_path / "manifest.json"
 
@@ -949,10 +1241,21 @@ def _run_flowmesh_pilot_unlocked(
     git_dirty = _git_dirty(repository)
     flowmesh_sdk_version = _package_version("flowmesh-sdk")
     mcp_version = _package_version("mcp")
+    adapter_gateway = getattr(adapter, "gateway", None)
+    adapter_backend = getattr(adapter_gateway, "backend", None)
+    telemetry_quiescence_timeout_seconds = getattr(
+        adapter_backend,
+        "telemetry_quiescence_timeout_seconds",
+        None,
+    )
 
     def write_progress(status: str) -> dict[str, Any]:
         rows = summarize_pilot_records(records, trials)
         _write_csv(rows, summary_path)
+        workload_rows = summarize_pilot_records_by_workload(records, trials)
+        _write_csv(workload_rows, workload_summary_path)
+        contrast_rows = summarize_paired_contrasts(records, trials)
+        _write_csv(contrast_rows, paired_contrasts_path)
         outcome_counts = Counter(
             str(record["outcome_type"]) for record in records
         )
@@ -973,6 +1276,8 @@ def _run_flowmesh_pilot_unlocked(
             "trial_plan_path": str(trial_plan_path),
             "records_path": str(records_path),
             "summary_path": str(summary_path),
+            "workload_summary_path": str(workload_summary_path),
+            "paired_contrasts_path": str(paired_contrasts_path),
             "gateway_state_is_external_to_records": True,
             "git_revision": git_revision,
             "git_dirty": git_dirty,
@@ -987,6 +1292,9 @@ def _run_flowmesh_pilot_unlocked(
             ),
             "task_timeout_seconds": adapter.settings.task_timeout_seconds,
             "poll_interval_seconds": adapter.settings.poll_interval_seconds,
+            "telemetry_quiescence_timeout_seconds": (
+                telemetry_quiescence_timeout_seconds
+            ),
             "secrets_recorded": False,
         }
         _write_json(manifest, manifest_path)
