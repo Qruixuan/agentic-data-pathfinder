@@ -786,6 +786,27 @@ class FlowMeshIntegrationTest(unittest.TestCase):
         self.assertIn("      - fetch_artifact\n", agent_config)
         self.assertIn("Never construct or fetch", agent_config)
 
+    def test_cost_aware_worker_config_defines_a_neutral_price_objective(
+        self,
+    ) -> None:
+        config_path = (
+            ROOT
+            / "integrations"
+            / "flowmesh"
+            / "agent_configs"
+            / "pathfinder_video_cost_aware.yaml"
+        )
+        agent_config = config_path.read_text(encoding="utf-8")
+        self.assertIn("Unspent budget has value", agent_config)
+        self.assertIn("Compare all affordable offers", agent_config)
+        self.assertIn("      - fetch_artifact\n", agent_config)
+        self.assertNotIn("choose multimodal_digest", agent_config.casefold())
+
+        dockerfile = (
+            ROOT / "integrations" / "flowmesh" / "Dockerfile.worker-overlay"
+        ).read_text(encoding="utf-8")
+        self.assertIn("pathfinder_video_cost_aware.yaml", dockerfile)
+
     def test_workflow_requests_http_result_delivery(self) -> None:
         """Guard the fix for results.retrieve() answering 404 result not found.
 

@@ -149,6 +149,8 @@ The coupling layer includes:
 - workflow validation that does not submit or execute a task;
 - a frozen, block-randomized real-FlowMesh pilot runner with durable per-trial
   records, fail-closed telemetry classification, and resume support;
+- versioned feasibility-control and cost-aware quote-response pilot
+  configurations that separate budget enforcement from behavioral response;
 - a FlowMesh agent configuration and thin worker-image overlay; and
 - fake-client integration tests that do not require a running FlowMesh stack,
   plus compatibility tests run against a real FlowMesh source tree when one is

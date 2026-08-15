@@ -31,6 +31,15 @@ PILOT_CONFIG_PATH = ROOT / "configs" / "phase_a_quote_pilot.json"
 SYSTEM_CONFIG_PATH = (
     ROOT / "configs" / "phase_a_quote_pilot_system.json"
 )
+COST_AWARE_PILOT_CONFIG_PATH = (
+    ROOT / "configs" / "phase_a_cost_aware_quote_v2.json"
+)
+COST_AWARE_DRY_RUN_CONFIG_PATH = (
+    ROOT / "configs" / "phase_a_cost_aware_quote_v2_dry_run.json"
+)
+COST_AWARE_SYSTEM_CONFIG_PATH = (
+    ROOT / "configs" / "phase_a_cost_aware_quote_v2_system.json"
+)
 
 
 class FakePilotAdapter:
@@ -172,6 +181,94 @@ class FlowMeshPilotConfigTest(unittest.TestCase):
         )
         with self.assertRaises(FlowMeshPilotConfigError):
             validate_flowmesh_pilot_config(broken, self.system)
+
+
+class CostAwareQuotePilotConfigTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.pilot = load_flowmesh_pilot_config(
+            COST_AWARE_PILOT_CONFIG_PATH
+        )
+        cls.dry_run = load_flowmesh_pilot_config(
+            COST_AWARE_DRY_RUN_CONFIG_PATH
+        )
+        cls.system = load_config(COST_AWARE_SYSTEM_CONFIG_PATH)
+
+    def test_v2_configs_validate_and_use_three_distinct_quote_levels(
+        self,
+    ) -> None:
+        validate_flowmesh_pilot_config(self.pilot, self.system)
+        validate_flowmesh_pilot_config(self.dry_run, self.system)
+
+        task = self.system.task_classes["video_qa"]
+        path = self.system.designs["D_structured_digest"].paths[
+            "multimodal_digest"
+        ]
+        quotes = {
+            profile_id: self.system.quote_profiles[profile_id].quote_for(
+                task.id,
+                "multimodal_digest",
+                path.quotes[task.id],
+            )
+            for profile_id in self.pilot.quote_profile_ids
+        }
+        self.assertEqual(
+            {
+                "digest_low": 2.0,
+                "digest_high": 6.0,
+                "digest_unaffordable": 8.0,
+            },
+            quotes,
+        )
+        self.assertLessEqual(quotes["digest_high"], task.access_budget)
+        self.assertGreater(
+            quotes["digest_unaffordable"],
+            task.access_budget,
+        )
+
+    def test_v2_changes_only_the_digest_quote(self) -> None:
+        task = self.system.task_classes["video_qa"]
+        design = self.system.designs["D_structured_digest"]
+        for representation_id in ("sampled_frames", "embeddings"):
+            default = design.paths[representation_id].quotes[task.id]
+            observed = {
+                self.system.quote_profiles[profile_id].quote_for(
+                    task.id,
+                    representation_id,
+                    default,
+                )
+                for profile_id in self.pilot.quote_profile_ids
+            }
+            self.assertEqual({default}, observed)
+
+    def test_v2_plans_are_balanced_paired_and_do_not_force_a_choice(
+        self,
+    ) -> None:
+        dry_trials = build_trial_plan(self.dry_run)
+        full_trials = build_trial_plan(self.pilot)
+        self.assertEqual(9, len(dry_trials))
+        self.assertEqual(45, len(full_trials))
+
+        counts = Counter(trial.quote_profile_id for trial in full_trials)
+        self.assertEqual(
+            {
+                "digest_low": 15,
+                "digest_high": 15,
+                "digest_unaffordable": 15,
+            },
+            dict(counts),
+        )
+        seeds: dict[tuple[str, int], set[int]] = {}
+        for trial in full_trials:
+            block = (trial.workload_id, trial.repetition)
+            seeds.setdefault(block, set()).add(trial.seed)
+        self.assertTrue(all(len(values) == 1 for values in seeds.values()))
+
+        for workload in self.pilot.workloads:
+            question = workload.question.casefold()
+            self.assertNotIn("must use", question)
+            for representation in self.system.representations:
+                self.assertNotIn(representation.casefold(), question)
 
 
 class FlowMeshPilotBatchTest(unittest.TestCase):

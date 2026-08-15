@@ -32,6 +32,89 @@ visible directional effect, but repeated fixture answers are not independent
 scientific samples. Replace `workloads` with a frozen real evaluation set before
 making a causal research claim.
 
+## Cost-Aware Quote-Response Follow-up (v2)
+
+The first Phase A configuration changes a quote without assigning any value to
+unspent budget. Both digest quotes also remain affordable. If an Agent always
+chooses the digest, that run validates the execution path but has no behavioral
+first stage. The versioned v2 follow-up separates two questions:
+
+1. does the Gateway enforce affordability; and
+2. among affordable offers, does a cost-aware Agent change its choice when the
+   digest price changes?
+
+The follow-up adds these files:
+
+- `configs/phase_a_cost_aware_quote_v2_system.json` fixes the physical design
+  and varies only the digest quote: `digest_low=2`, `digest_high=6`, and
+  `digest_unaffordable=8`, with an access budget of 6;
+- `configs/phase_a_cost_aware_quote_v2_dry_run.json` runs three fixture
+  questions once under every condition (nine sessions);
+- `configs/phase_a_cost_aware_quote_v2.json` runs five paired repetitions of
+  the same three questions under every condition (45 sessions); and
+- `pathfinder_video_cost_aware` is a separate worker Agent configuration. It
+  values unused budget and asks the Agent to choose the cheapest representation
+  it expects to be sufficient, without naming a preferred representation.
+
+The separate Agent configuration preserves the original pilot semantics. The
+worker overlay must be rebuilt and the existing operator-owned worker recreated
+with the new image before using it. No Pathfinder service or runner creates or
+replaces that worker automatically.
+
+Start the MCP Gateway with the v2 system configuration:
+
+```bash
+PYTHONPATH=. python -m pathfinder serve-flowmesh-tools \
+  --config configs/phase_a_cost_aware_quote_v2_system.json \
+  --state-db "$PF_V2_DB" \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --data-agent-url http://127.0.0.1:8780
+```
+
+Use a new state database and new output directories; do not mix v2 sessions
+with the completed v1 pilot. After the operator rebuilds and starts the worker,
+run the nine-session gate:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-flowmesh-pilot \
+  --pilot-config configs/phase_a_cost_aware_quote_v2_dry_run.json \
+  --output-dir "$PF_V2_ROOT/phase-a-cost-aware-quote-dry-run-v2" \
+  --state-db "$PF_V2_DB" \
+  --worker-alias "$PF_WORKER_ALIAS" \
+  --flowmesh-base-url "$FLOWMESH_BASE_URL" \
+  --agent-config pathfinder_video_cost_aware \
+  --data-agent-url http://127.0.0.1:8780 \
+  --validate-workflow
+```
+
+The dry-run gate requires all nine sessions to complete with complete
+telemetry. `digest_unaffordable` must never produce an accepted digest access;
+otherwise affordability enforcement or the experiment binding is invalid.
+The comparison of interest is `digest_low` versus `digest_high`, because both
+remain affordable. A higher digest access rate under `digest_low` is the
+behavioral first stage needed before a larger PPD experiment is useful.
+
+Once the gate passes, run the 45-session engineering follow-up with the same
+Gateway and state database:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-flowmesh-pilot \
+  --pilot-config configs/phase_a_cost_aware_quote_v2.json \
+  --output-dir "$PF_V2_ROOT/phase-a-cost-aware-quote-pilot-v2" \
+  --state-db "$PF_V2_DB" \
+  --worker-alias "$PF_WORKER_ALIAS" \
+  --flowmesh-base-url "$FLOWMESH_BASE_URL" \
+  --agent-config pathfinder_video_cost_aware \
+  --data-agent-url http://127.0.0.1:8780 \
+  --validate-workflow
+```
+
+The three questions still reuse one fixture object. They test mechanics,
+affordability, and directional quote response; they are not independent data
+samples and cannot support the final causal claim. A frozen multi-object
+evaluation set remains the next step after v2 establishes a first stage.
+
 ## Before Running
 
 The operator must already have:

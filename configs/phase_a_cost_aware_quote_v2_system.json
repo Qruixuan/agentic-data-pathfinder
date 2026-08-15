@@ -1,0 +1,152 @@
+{
+  "schema_version": "1.0",
+  "price_universe_version": "phase-a-cost-aware-quote-v2",
+  "objective": {
+    "resource_cost_weight": 1.0
+  },
+  "representations": [
+    {
+      "id": "sampled_frames",
+      "description": "Deterministically sampled frames represented as bounded JSON.",
+      "size_bytes": 8000000,
+      "task_quality": {
+        "video_qa": 0.7
+      }
+    },
+    {
+      "id": "embeddings",
+      "description": "Reusable frame and clip embeddings exposed as bounded text.",
+      "size_bytes": 2000000,
+      "task_quality": {
+        "video_qa": 0.62
+      }
+    },
+    {
+      "id": "multimodal_digest",
+      "description": "Structured temporal digest with events and captions.",
+      "size_bytes": 1000000,
+      "task_quality": {
+        "video_qa": 0.95
+      }
+    }
+  ],
+  "task_classes": [
+    {
+      "id": "video_qa",
+      "description": "Answer a question using one agent-readable video representation.",
+      "candidate_representations": [
+        "sampled_frames",
+        "embeddings",
+        "multimodal_digest"
+      ],
+      "access_budget": 6,
+      "max_accesses": 1,
+      "task_value": 10,
+      "quality_weight": 9,
+      "price_weight": 1.0,
+      "outside_option_utility": 2.0,
+      "choice_noise": 0.35,
+      "success_midpoint": 0.6,
+      "success_temperature": 0.12,
+      "latency_reference_ms": 250,
+      "latency_success_penalty_per_ms": 0.0
+    }
+  ],
+  "price_universes": {
+    "video_qa": {
+      "sampled_frames": [1, 2, 4],
+      "embeddings": [2, 3, 5],
+      "multimodal_digest": [2, 4, 6, 8]
+    }
+  },
+  "physical_designs": [
+    {
+      "id": "D_structured_digest",
+      "description": "Fixed physical design for the cost-aware quote-response experiment.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {
+            "video_qa": 2
+          }
+        },
+        "embeddings": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 55,
+          "latency_jitter_ms": 6,
+          "realized_cost": 0.25,
+          "quotes": {
+            "video_qa": 3
+          }
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "remote_digest_service",
+          "latency_ms": 210,
+          "latency_jitter_ms": 18,
+          "realized_cost": 1.6,
+          "quotes": {
+            "video_qa": 6
+          }
+        }
+      }
+    }
+  ],
+  "quote_profiles": [
+    {
+      "id": "as_designed",
+      "description": "Required baseline profile; digest keeps its designed quote of 6.",
+      "overrides": {}
+    },
+    {
+      "id": "digest_low",
+      "description": "Behavioral treatment: digest costs 2 and ties sampled frames on price.",
+      "overrides": {
+        "video_qa": {
+          "multimodal_digest": 2
+        }
+      }
+    },
+    {
+      "id": "digest_high",
+      "description": "Behavioral control: digest costs 6 but remains affordable.",
+      "overrides": {
+        "video_qa": {
+          "multimodal_digest": 6
+        }
+      }
+    },
+    {
+      "id": "digest_unaffordable",
+      "description": "Mechanism check: digest costs 8 and exceeds the access budget.",
+      "overrides": {
+        "video_qa": {
+          "multimodal_digest": 8
+        }
+      }
+    }
+  ],
+  "pilot": {
+    "design_ids": [
+      "D_structured_digest"
+    ],
+    "task_class_ids": [
+      "video_qa"
+    ],
+    "quote_profile_ids": [
+      "digest_low",
+      "digest_high",
+      "digest_unaffordable"
+    ],
+    "latency_multipliers": [
+      1.0
+    ],
+    "trials_per_cell": 5,
+    "base_seed": 2701
+  }
+}
