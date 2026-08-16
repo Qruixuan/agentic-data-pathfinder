@@ -52,6 +52,17 @@ PHASE_B_SYSTEM_CONFIG_PATH = (
 PHASE_B_DATA_AGENT_MANIFEST_PATH = (
     ROOT / "configs" / "phase_b_data_agent_manifest.json"
 )
+PHASE_B_CONFIRMATORY_SMALL_CONFIG_PATH = (
+    ROOT / "configs" / "phase_b_confirmatory_small.json"
+)
+PHASE_B_CONFIRMATORY_SMALL_MANIFEST_PATH = (
+    ROOT
+    / "configs"
+    / "phase_b_confirmatory_small_data_agent_manifest.json"
+)
+PHASE_B_CONFIRMATORY_SMALL_SYSTEM_PATH = (
+    ROOT / "configs" / "phase_b_confirmatory_small_system.json"
+)
 
 
 class FakePilotAdapter:
@@ -421,6 +432,90 @@ class PhaseBCausalGateConfigTest(unittest.TestCase):
             self.assertTrue(
                 all(int(row["complete_pairs"]) > 0 for row in contrasts)
             )
+
+
+class PhaseBConfirmatorySmallConfigTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.pilot = load_flowmesh_pilot_config(
+            PHASE_B_CONFIRMATORY_SMALL_CONFIG_PATH
+        )
+        cls.system = load_config(PHASE_B_CONFIRMATORY_SMALL_SYSTEM_PATH)
+        cls.manifest = load_data_agent_manifest(
+            PHASE_B_CONFIRMATORY_SMALL_MANIFEST_PATH
+        )
+
+    def test_plan_has_48_balanced_matched_sessions(self) -> None:
+        validate_flowmesh_pilot_config(self.pilot, self.system)
+        trials = build_trial_plan(self.pilot)
+        self.assertEqual(48, len(trials))
+        self.assertEqual((1.0,), self.pilot.latency_multipliers)
+        self.assertEqual(8, len(self.pilot.workloads))
+        self.assertEqual(
+            8,
+            len({workload.object_id for workload in self.pilot.workloads}),
+        )
+
+        cells = Counter(
+            (trial.design_id, trial.quote_profile_id)
+            for trial in trials
+        )
+        self.assertEqual(6, len(cells))
+        self.assertEqual({8}, set(cells.values()))
+
+        per_object: dict[str, set[tuple[str, str]]] = {}
+        for trial in trials:
+            per_object.setdefault(trial.object_id, set()).add(
+                (trial.design_id, trial.quote_profile_id)
+            )
+        self.assertEqual({6}, {len(cells) for cells in per_object.values()})
+
+    def test_workload_strata_and_questions_are_frozen_without_path_hints(
+        self,
+    ) -> None:
+        strata = Counter(
+            workload.id.split("-", 1)[0]
+            for workload in self.pilot.workloads
+        )
+        self.assertEqual(
+            {"temporal": 3, "causal": 3, "descriptive": 2},
+            dict(strata),
+        )
+        for workload in self.pilot.workloads:
+            question = workload.question.casefold()
+            self.assertNotIn("must use", question)
+            for representation in self.system.representations:
+                self.assertNotIn(representation.casefold(), question)
+
+    def test_object_catalog_covers_every_workload_and_representation(
+        self,
+    ) -> None:
+        catalog = self.manifest.object_catalog
+        self.assertIsNotNone(catalog)
+        assert catalog is not None
+        self.assertEqual(
+            {workload.object_id for workload in self.pilot.workloads},
+            set(catalog.objects),
+        )
+        expected_representations = set(self.system.representations)
+        for representations in catalog.objects.values():
+            self.assertEqual(expected_representations, set(representations))
+            for specification in representations.values():
+                self.assertIn(
+                    "phase_b_confirmatory_small",
+                    str(specification.path),
+                )
+
+    def test_manifest_bindings_match_every_design_path(self) -> None:
+        for design_id in self.pilot.design_ids:
+            design = self.system.designs[design_id]
+            for representation_id, path in design.paths.items():
+                binding = self.manifest.representations[
+                    representation_id
+                ].plan_bindings[design_id]
+                self.assertEqual(path.location, binding.location)
+                self.assertEqual(path.latency_ms, binding.minimum_latency_ms)
+                self.assertEqual(path.realized_cost, binding.realized_cost)
 
 
 class FlowMeshPilotBatchTest(unittest.TestCase):

@@ -1,0 +1,54 @@
+{
+  "schema_version": "pathfinder.data-object-catalog/v1alpha1",
+  "catalog_version": "nextqa-val-confirmatory-small-v1",
+  "objects": {
+    "nextqa-val-2834146886": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-2834146886/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-2834146886/multimodal_digest.txt"}
+      }
+    },
+    "nextqa-val-3441428429": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-3441428429/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-3441428429/multimodal_digest.txt"}
+      }
+    },
+    "nextqa-val-2976913210": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-2976913210/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-2976913210/multimodal_digest.txt"}
+      }
+    },
+    "nextqa-val-4882821564": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-4882821564/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-4882821564/multimodal_digest.txt"}
+      }
+    },
+    "nextqa-val-4260763967": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-4260763967/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-4260763967/multimodal_digest.txt"}
+      }
+    },
+    "nextqa-val-9088819598": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-9088819598/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-9088819598/multimodal_digest.txt"}
+      }
+    },
+    "nextqa-val-8547321641": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-8547321641/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-8547321641/multimodal_digest.txt"}
+      }
+    },
+    "nextqa-val-4130504920": {
+      "representations": {
+        "sampled_frames": {"path": "../data/phase_b_confirmatory_small/nextqa-val-4130504920/sampled_frames.json"},
+        "multimodal_digest": {"path": "../data/phase_b_confirmatory_small/nextqa-val-4130504920/multimodal_digest.txt"}
+      }
+    }
+  }
+}

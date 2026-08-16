@@ -11,6 +11,10 @@ requires-python = ">=3.12"
 dependencies = []
 
 [project.optional-dependencies]
+data-prep = [
+    "av==17.0.1",
+    "Pillow>=10.4,<13",
+]
 flowmesh = [
     # Must match the deployed FlowMesh control plane (v0.1.8-rc.1).
     "flowmesh-sdk==0.1.8rc1",

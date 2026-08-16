@@ -1,0 +1,66 @@
+{
+  "schema_version": "pathfinder.flowmesh-pilot/v1alpha1",
+  "experiment_id": "phase-b-confirmatory-small-v1",
+  "system_config": "phase_b_confirmatory_small_system.json",
+  "design_ids": ["D_remote_digest", "D_local_digest"],
+  "task_class_id": "video_qa",
+  "quote_profile_ids": [
+    "digest_low",
+    "digest_high",
+    "digest_unaffordable"
+  ],
+  "latency_multipliers": [1.0],
+  "repetitions": 1,
+  "base_seed": 7301,
+  "randomization_seed": 8301,
+  "workloads": [
+    {
+      "id": "temporal-nextqa-val-2834146886-q8",
+      "object_id": "nextqa-val-2834146886",
+      "question": "What does the white dog do after going to the cushion? Answer with the best option text: drink again; shake its body; smells the black dog; wagging tail; touch lady in blue stripes.",
+      "accepted_answer_substrings": ["smells the black dog", "smells black dog"]
+    },
+    {
+      "id": "temporal-nextqa-val-3441428429-q10",
+      "object_id": "nextqa-val-3441428429",
+      "question": "What does the female skater do after the male skater puts her back down on the ice? Answer with the best option text: put hand in mouth; continue skating; jump; move her arms up and down; laugh and run forward.",
+      "accepted_answer_substrings": ["continue skating", "continues skating"]
+    },
+    {
+      "id": "temporal-nextqa-val-2976913210-q6",
+      "object_id": "nextqa-val-2976913210",
+      "question": "How did the man respond when he was stuck in the dirt? Answer with the best option text: touched his head; pointed towards the jumping line; kept trying; prepared to swing again; looked at the floor.",
+      "accepted_answer_substrings": ["kept trying", "continued trying"]
+    },
+    {
+      "id": "causal-nextqa-val-4882821564-q1",
+      "object_id": "nextqa-val-4882821564",
+      "question": "Why did the boy pick up one present from the group and move to the sofa? Answer with the best option text: share with the girl; approach the seated lady; unwrap it; play with a toy train; gesture something.",
+      "accepted_answer_substrings": ["unwrap it", "unwrap the present"]
+    },
+    {
+      "id": "causal-nextqa-val-4260763967-q4",
+      "object_id": "nextqa-val-4260763967",
+      "question": "Why is the boy in yellow reaching out to things on the green mat? Answer with the best option text: team uniform; watch something in the pool; assemble parts to build a toy; keep his belongings; grab a remote control.",
+      "accepted_answer_substrings": ["assemble parts", "assembling parts", "build a toy"]
+    },
+    {
+      "id": "causal-nextqa-val-9088819598-q1",
+      "object_id": "nextqa-val-9088819598",
+      "question": "Why does the baby keep the ball near his mouth at the beginning? Answer with the best option text: take a photo; lick it; smell the ball; blow it away; kiss it.",
+      "accepted_answer_substrings": ["lick it", "lick the ball"]
+    },
+    {
+      "id": "descriptive-nextqa-val-8547321641-q7",
+      "object_id": "nextqa-val-8547321641",
+      "question": "How many babies are in the video? Answer with the best option text: kitchen; four; two; three; one.",
+      "accepted_answer_substrings": ["one"]
+    },
+    {
+      "id": "descriptive-nextqa-val-4130504920-q4",
+      "object_id": "nextqa-val-4130504920",
+      "question": "What is the color of the balloon? Answer with the best option text: purple; black; brown; white and red; green.",
+      "accepted_answer_substrings": ["purple"]
+    }
+  ]
+}
