@@ -45,6 +45,7 @@ class AWMDataset:
     holdout: dict[str, DesignSample]
     storage_costs: dict[str, float]
     forward_transition_costs: dict[str, float]
+    restoration_transition_costs: dict[str, float]
 
     @property
     def horizon_sessions(self) -> int:
@@ -132,7 +133,20 @@ def _load_oracle_table(path: Path) -> dict[str, dict[str, str]]:
             f"{path}"
         )
     with path.open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        required = {
+            "design_id",
+            "storage_cost",
+            "forward_transition_cost",
+            "restoration_cost",
+        }
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise AWMConfigError(
+                "Reduced Oracle table is missing required columns: "
+                + ", ".join(sorted(missing))
+            )
     result = {str(row.get("design_id")): row for row in rows}
     if not result or "" in result:
         raise AWMConfigError(f"invalid Reduced Oracle table: {path}")
@@ -286,6 +300,10 @@ def load_oracle_dataset(
         },
         forward_transition_costs={
             design_id: float(table[design_id]["forward_transition_cost"])
+            for design_id in oracle_config.design_ids
+        },
+        restoration_transition_costs={
+            design_id: float(table[design_id]["restoration_cost"])
             for design_id in oracle_config.design_ids
         },
     )

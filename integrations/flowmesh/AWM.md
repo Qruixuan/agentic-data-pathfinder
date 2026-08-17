@@ -23,7 +23,8 @@ pessimistic_gain(current, candidate)
 optimistic_gain(current, candidate)
 ```
 
-This is the interface the later OED Commit/Reveal/Hold controller will use.
+This is the interface used by the offline OED Commit/Reveal/Hold controller.
+See [`OED.md`](OED.md).
 
 ## Input and Split Contract
 
@@ -36,9 +37,11 @@ blocks across every design. With the current three-repetition Oracle config:
 
 `observed_design_ids` controls which training records are visible to the model.
 The committed MVP exposes only `D_remote_digest`, even though the exhaustive
-Oracle output contains both designs. Candidate records remain hidden until
-held-out evaluation. This recreates the censored-history setting without
-discarding the candidate ground truth needed for evaluation.
+Oracle output contains both designs. Candidate training records remain hidden
+until an OED Reveal explicitly adds that design to the observed history;
+candidate holdout records remain evaluation-only. This recreates the
+censored-history setting without discarding the candidate ground truth needed
+for evaluation.
 
 Only records classified as `completed`, with complete telemetry and an
 evaluable task answer, enter an estimate. Excluded training and holdout counts
@@ -54,7 +57,9 @@ Bonferroni allocation across the complete observed response vector. Service
 cost uses a bounded Hoeffding interval intersected with the access-weighted
 unit-cost envelope. A cost observation outside the configured support
 invalidates the model. Transition cost uses a declared relative radius because
-the current Oracle records only one forward transition per clean design run.
+the current Oracle records only one forward and one restoration transition per
+clean design run. AWM Commit bounds use the forward interval; OED adds the
+separate restoration interval and probe-window loss for a complete Reveal.
 
 The following empirical assumptions are separately gated:
 

@@ -198,6 +198,22 @@ with lower cumulative exploration and transition cost than equal-budget
 baselines, without an unreported safe-sequence regression. Claims remain
 candidate-relative whenever `G_other` is nonempty.
 
+### Current implementation
+
+The repository now contains an offline OED v1alpha1 that consumes the frozen
+Reduced Oracle and AWM contracts. It emits the full candidate partition and
+gain/cost trace, enforces complete Reveal accounting and restoration, retains
+revealed training observations, and requires a later independent Commit to
+change `D_safe`. It compares full OED with passive AWM, random feasible Reveal,
+an equal-budget independent black-box policy, the naive incumbent-demand
+policy, and the exhaustive reduced-domain oracle.
+
+Synthetic closed-loop tests complete the pre-server controller framework, not
+Gate B4. The real gate still requires frozen physical Oracle data, calibrated
+cost supports, live excursion/restoration evidence, and repeated held-out
+policy comparisons. See
+[`integrations/flowmesh/OED.md`](integrations/flowmesh/OED.md).
+
 ## Harness Outputs and Audit Contract
 
 Each Phase B batch writes:
@@ -244,7 +260,9 @@ bytes or latency to be marked complete.
 4. Run the confirmatory causal gate once in a new output directory.
 5. Calibrate physical tiers and transition costs, then run the implemented
    Reduced Oracle in a new output directory.
-6. Implement AWM against the frozen oracle, then OED and its baselines.
+6. Run the implemented AWM and offline OED baselines against the frozen
+   oracle, review their gates, then execute the preregistered live Reveal
+   excursions needed for Gate B4.
 
 Do not launch the 540-session fixture plan as a substitute for Step 2. More
 repetitions of the same synthetic object improve engineering repeatability but

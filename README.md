@@ -2,7 +2,8 @@
 
 This repository now includes a minimal, runnable Python implementation of the
 causal access-response harness described in the research documents. It is the
-first vertical slice of Pathfinder, not the complete AWM/OED controller.
+first vertical slice of Pathfinder. It now also includes offline Reduced
+Oracle, AWM, and OED components, but not the complete deployed control plane.
 
 The harness executes:
 
@@ -178,6 +179,9 @@ schema, and manual server runbook are in
 The offline Adaptive Workload Model, configuration-gated assumptions,
 confidence sets, baselines, and held-out evaluation are documented in
 [`integrations/flowmesh/AWM.md`](integrations/flowmesh/AWM.md).
+The offline Commit/Reveal/Hold/Stop controller, equal-budget baselines, replay
+contract, and Gate B4 boundary are documented in
+[`integrations/flowmesh/OED.md`](integrations/flowmesh/OED.md).
 
 The Gateway can also use the versioned HTTP `DataAgentClient` and included
 single-node Data Agent server instead of the emulated backend. The server

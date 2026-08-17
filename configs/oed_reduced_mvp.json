@@ -1,0 +1,19 @@
+{
+  "schema_version": "pathfinder.oed/v1alpha1",
+  "controller_id": "oed-reduced-mvp-v1",
+  "commit_margin": 0.0,
+  "reveal_margin": 0.0,
+  "exploration_budget": 10.0,
+  "per_excursion_cap": 5.0,
+  "max_iterations": 8,
+  "random_seed": 17031,
+  "cost_model_status": "engineering-placeholder-requires-preregistration",
+  "reveal_candidates": [
+    {
+      "design_id": "D_local_digest",
+      "reveal_tier": "simultaneous-canonical",
+      "probe_window_loss": 0.0
+    }
+  ],
+  "other_design_ids": []
+}

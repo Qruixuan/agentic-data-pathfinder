@@ -403,6 +403,17 @@ On the reduced oracle and held-out runs, OED improves safe design quality or
 reaches the oracle decision at lower total exploration cost than equal-budget
 baselines. Claims remain candidate-relative when `G_other` is nonempty.
 
+### Current engineering status
+
+The offline v1alpha1 controller now implements the finite candidate partition,
+pessimistic Commit, complete-cost optimistic Reveal, budget/cap refusal,
+structural Hold, safe restoration, retained observations, AWM refitting, and
+the required naive/passive/random/black-box/oracle replay baselines. These are
+covered by synthetic closed-loop tests. The checklist above remains open as a
+scientific gate until the frozen physical Oracle, calibrated costs, live
+Reveal provenance, repeated held-out comparison, and termination argument are
+complete.
+
 ## D7. Escalation and Candidate Expansion
 
 ### Goal

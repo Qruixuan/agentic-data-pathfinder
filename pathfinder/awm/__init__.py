@@ -8,7 +8,7 @@ from .contracts import (
     load_awm_config,
 )
 from .dataset import AWMDataset, DesignSample, load_oracle_dataset
-from .evaluation import evaluate_awm
+from .evaluation import evaluate_awm, holdout_truth
 from .model import (
     AWM_MODEL_KINDS,
     AdaptiveWorkloadModel,
@@ -28,6 +28,7 @@ __all__ = [
     "DesignSample",
     "Interval",
     "evaluate_awm",
+    "holdout_truth",
     "load_awm_config",
     "load_oracle_dataset",
 ]

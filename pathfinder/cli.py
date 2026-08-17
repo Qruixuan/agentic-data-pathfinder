@@ -21,6 +21,7 @@ DEFAULT_REDUCED_ORACLE_CONFIG = Path(
     "configs/reduced_oracle_mvp.json"
 )
 DEFAULT_AWM_CONFIG = Path("configs/awm_reduced_mvp.json")
+DEFAULT_OED_CONFIG = Path("configs/oed_reduced_mvp.json")
 DEFAULT_DATA_AGENT_MANIFEST = Path("configs/data_agent_manifest.json")
 DEFAULT_DATA_AGENT_OPERATION_DB = Path(
     "outputs/data_agent/operations.sqlite3"
@@ -327,6 +328,36 @@ def _parser() -> argparse.ArgumentParser:
     awm_evaluation.add_argument("--output-dir", type=Path, required=True)
     awm_evaluation.add_argument("--compact", action="store_true")
 
+    oed_replay = subcommands.add_parser(
+        "run-oed-replay",
+        help=(
+            "replay Commit/Reveal/Hold/Stop and equal-budget baselines "
+            "against a frozen Reduced Oracle"
+        ),
+    )
+    oed_replay.add_argument(
+        "--oed-config",
+        type=Path,
+        default=DEFAULT_OED_CONFIG,
+    )
+    oed_replay.add_argument(
+        "--awm-config",
+        type=Path,
+        default=DEFAULT_AWM_CONFIG,
+    )
+    oed_replay.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    oed_replay.add_argument(
+        "--oracle-output-dir",
+        type=Path,
+        required=True,
+    )
+    oed_replay.add_argument("--output-dir", type=Path, required=True)
+    oed_replay.add_argument("--compact", action="store_true")
+
     gateway = subcommands.add_parser(
         "serve-flowmesh-tools",
         help="serve Pathfinder access tools over Streamable HTTP MCP",
@@ -546,6 +577,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .awm import evaluate_awm
 
             payload = evaluate_awm(
+                args.awm_config,
+                args.oracle_config,
+                oracle_output_dir=args.oracle_output_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-oed-replay":
+            from .oed import run_oed_replay
+
+            payload = run_oed_replay(
+                args.oed_config,
                 args.awm_config,
                 args.oracle_config,
                 oracle_output_dir=args.oracle_output_dir,

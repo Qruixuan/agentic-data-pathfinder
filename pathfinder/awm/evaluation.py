@@ -18,7 +18,7 @@ from .model import AWM_MODEL_KINDS, AdaptiveWorkloadModel
 AWM_EVALUATION_SCHEMA_VERSION = "pathfinder.awm-evaluation/v1alpha1"
 
 
-def _truth(
+def holdout_truth(
     dataset: AWMDataset,
     design_id: str,
     sample: DesignSample,
@@ -172,7 +172,11 @@ def evaluate_awm(
     output = Path(output_dir).resolve()
     output.mkdir(parents=True, exist_ok=True)
     truths = {
-        design_id: _truth(dataset, design_id, dataset.holdout[design_id])
+        design_id: holdout_truth(
+            dataset,
+            design_id,
+            dataset.holdout[design_id],
+        )
         for design_id in dataset.design_ids
     }
     models = {

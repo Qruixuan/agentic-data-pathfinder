@@ -219,6 +219,7 @@ def _synthetic_oracle_output(root: Path, *, drift: bool = False) -> Path:
                 "design_id",
                 "storage_cost",
                 "forward_transition_cost",
+                "restoration_cost",
             ),
         )
         writer.writeheader()
@@ -227,6 +228,7 @@ def _synthetic_oracle_output(root: Path, *, drift: bool = False) -> Path:
                 "design_id": "D_remote_digest",
                 "storage_cost": 0,
                 "forward_transition_cost": 0,
+                "restoration_cost": 0,
             }
         )
         writer.writerow(
@@ -234,6 +236,7 @@ def _synthetic_oracle_output(root: Path, *, drift: bool = False) -> Path:
                 "design_id": "D_local_digest",
                 "storage_cost": 1,
                 "forward_transition_cost": 2,
+                "restoration_cost": 1,
             }
         )
     return output
@@ -279,6 +282,46 @@ class AWMConfigTest(unittest.TestCase):
 
 
 class AWMSyntheticOracleTest(unittest.TestCase):
+    def test_oracle_table_requires_complete_reveal_cost_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            config = load_awm_config(_awm_config(root))
+            output = _synthetic_oracle_output(root)
+            table = output / "oracle_table.csv"
+            rows = list(
+                csv.DictReader(
+                    table.read_text(encoding="utf-8").splitlines()
+                )
+            )
+            with table.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=(
+                        "design_id",
+                        "storage_cost",
+                        "forward_transition_cost",
+                    ),
+                )
+                writer.writeheader()
+                writer.writerows(
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if key != "restoration_cost"
+                    }
+                    for row in rows
+                )
+            with self.assertRaisesRegex(
+                AWMConfigError,
+                "restoration_cost",
+            ):
+                load_oracle_dataset(
+                    config,
+                    oracle,
+                    oracle_output_dir=output,
+                )
+
     def test_excluded_holdout_session_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
