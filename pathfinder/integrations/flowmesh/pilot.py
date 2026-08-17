@@ -516,6 +516,56 @@ def _offered_quotes(
     return result
 
 
+def _sanitized_access_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Remove reusable capabilities while retaining a correlation key."""
+    sanitized = dict(event)
+    raw_handle = sanitized.pop("artifact_handle", None)
+    if raw_handle is not None:
+        if not isinstance(raw_handle, str):
+            raise RuntimeError("artifact_handle in an access event is not text")
+        sanitized["artifact_handle_sha256"] = sha256(
+            raw_handle.encode("utf-8")
+        ).hexdigest()
+    return sanitized
+
+
+def artifact_delivery_failures(
+    events: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Describe accepted artifact accesses without a completed full fetch."""
+    failures: list[dict[str, Any]] = []
+    for event in events:
+        if not event.get("accepted"):
+            continue
+        fingerprint = event.get("artifact_handle_sha256")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            continue
+        request_count = int(event.get("artifact_download_request_count") or 0)
+        full_download_count = int(
+            event.get("artifact_full_download_count") or 0
+        )
+        reasons: list[str] = []
+        if request_count == 0:
+            reasons.append("no_download_request")
+        if full_download_count == 0:
+            reasons.append("no_completed_full_download")
+        if reasons:
+            failures.append(
+                {
+                    "event_id": event.get("event_id"),
+                    "representation_id": event.get("representation_id"),
+                    "artifact_handle_sha256": fingerprint,
+                    "artifact_download_request_count": request_count,
+                    "artifact_full_download_count": full_download_count,
+                    "artifact_bytes_sent": int(
+                        event.get("artifact_bytes_sent") or 0
+                    ),
+                    "reasons": reasons,
+                }
+            )
+    return failures
+
+
 def _record_for_success(
     pilot: FlowMeshPilotConfig,
     trial: PilotTrial,
@@ -527,13 +577,24 @@ def _record_for_success(
     offered_quotes: dict[str, float],
     recovered_from_gateway_state: bool,
 ) -> dict[str, Any]:
-    events = [dict(event) for event in result.access_events]
+    events = [
+        _sanitized_access_event(dict(event))
+        for event in result.access_events
+    ]
     accepted_events = [event for event in events if event.get("accepted")]
     selected = [
         str(event["representation_id"])
         for event in accepted_events
         if event.get("representation_id") is not None
     ]
+    delivery_failures = artifact_delivery_failures(events)
+    artifact_required = any(
+        event.get("accepted") and event.get("artifact_handle_sha256")
+        for event in events
+    )
+    outcome_type = (
+        "artifact_delivery_failure" if delivery_failures else "completed"
+    )
     return {
         "schema_version": PILOT_RECORD_SCHEMA_VERSION,
         "experiment_id": pilot.experiment_id,
@@ -541,7 +602,7 @@ def _record_for_success(
         "started_at": started_at,
         "finished_at": finished_at,
         "duration_seconds": round(duration_seconds, 6),
-        "outcome_type": "completed",
+        "outcome_type": outcome_type,
         "recovered_from_gateway_state": recovered_from_gateway_state,
         "offered_quotes": offered_quotes,
         "telemetry_complete": True,
@@ -549,16 +610,31 @@ def _record_for_success(
         "task_id": result.task_id,
         "flowmesh_status": result.status,
         "final_answer": result.final_answer,
-        "task_success": _evaluate_answer(
-            result.final_answer,
-            trial.accepted_answer_substrings,
+        "task_success": (
+            None
+            if delivery_failures
+            else _evaluate_answer(
+                result.final_answer,
+                trial.accepted_answer_substrings,
+            )
         ),
         "access_event_count": len(events),
         "accepted_access_count": len(accepted_events),
         "selected_representations": selected,
         "access_events": events,
-        "error_type": None,
-        "error_message": None,
+        "artifact_delivery_required": bool(artifact_required),
+        "artifact_delivery_complete": not delivery_failures,
+        "artifact_delivery_failure_count": len(delivery_failures),
+        "artifact_delivery_failures": delivery_failures,
+        "error_type": (
+            "ArtifactDeliveryFailure" if delivery_failures else None
+        ),
+        "error_message": (
+            f"{len(delivery_failures)} accepted artifact access(es) did not "
+            "complete a full artifact download"
+            if delivery_failures
+            else None
+        ),
     }
 
 
@@ -595,6 +671,10 @@ def _record_for_failure(
         "accepted_access_count": None,
         "selected_representations": [],
         "access_events": [],
+        "artifact_delivery_required": None,
+        "artifact_delivery_complete": None,
+        "artifact_delivery_failure_count": 0,
+        "artifact_delivery_failures": [],
         "error_type": type(exc).__name__,
         "error_message": _safe_error_message(exc),
     }
@@ -609,13 +689,23 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
-def load_pilot_records(path: str | Path) -> list[dict[str, Any]]:
+def load_pilot_records(
+    path: str | Path,
+    *,
+    repair_truncated_tail: bool = True,
+) -> list[dict[str, Any]]:
+    """Load durable pilot records.
+
+    The batch runner keeps the historical tail-repair behaviour enabled.
+    Read-only analysis disables it so auditing can never alter its source.
+    """
     source = Path(path)
     if not source.exists():
         return []
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
-    with source.open("r+", encoding="utf-8", newline="") as handle:
+    mode = "r+" if repair_truncated_tail else "r"
+    with source.open(mode, encoding="utf-8", newline="") as handle:
         lines = handle.readlines()
         for line_number, line in enumerate(lines, start=1):
             if not line.strip():
@@ -623,7 +713,11 @@ def load_pilot_records(path: str | Path) -> list[dict[str, Any]]:
             try:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
-                if line_number == len(lines) and not line.endswith("\n"):
+                if (
+                    repair_truncated_tail
+                    and line_number == len(lines)
+                    and not line.endswith("\n")
+                ):
                     # A process can die inside the final append. That fragment
                     # never became a record, so discard only this provably
                     # truncated tail and let Gateway recovery decide whether
@@ -641,7 +735,11 @@ def load_pilot_records(path: str | Path) -> list[dict[str, Any]]:
                 raise RuntimeError(
                     f"pilot JSONL entry at {source}:{line_number} is not an object"
                 )
-            if line_number == len(lines) and not line.endswith("\n"):
+            if (
+                repair_truncated_tail
+                and line_number == len(lines)
+                and not line.endswith("\n")
+            ):
                 handle.seek(0, os.SEEK_END)
                 handle.write("\n")
                 handle.flush()
@@ -729,6 +827,10 @@ def summarize_pilot_records(
                 ),
                 "telemetry_failures": sum(
                     record["outcome_type"] == "telemetry_failure"
+                    for record in sessions
+                ),
+                "artifact_delivery_failures": sum(
+                    record["outcome_type"] == "artifact_delivery_failure"
                     for record in sessions
                 ),
                 "completion_rate": (

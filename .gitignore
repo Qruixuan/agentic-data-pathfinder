@@ -8,6 +8,7 @@ build/
 *.egg-info/
 outputs/
 data/phase_b_confirmatory_small/
+data/reduced_oracle_mvp/
 
 # Local Claude Code configuration. Machine-specific paths and permission
 # grants; narrow patterns so a deliberately shared .claude file still can be.

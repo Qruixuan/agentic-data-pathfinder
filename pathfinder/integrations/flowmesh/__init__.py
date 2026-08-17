@@ -5,6 +5,11 @@ from .adapter import (
     FlowMeshPinningError,
     FlowMeshRunError,
 )
+from .analysis import (
+    ANALYSIS_SCHEMA_VERSION,
+    analyze_flowmesh_pilot,
+    audit_pilot_records,
+)
 from .client import SdkFlowMeshClient, WorkerResolutionError
 from .contracts import (
     FlowMeshAgentRun,
@@ -20,6 +25,7 @@ from .gateway import (
     GatewayError,
     SQLiteSessionStore,
     TelemetryIncompleteError,
+    artifact_handle_fingerprint,
 )
 from .pilot import (
     FlowMeshPilotConfig,
@@ -42,6 +48,7 @@ from .workflow import (
 
 __all__ = [
     "AccessGateway",
+    "ANALYSIS_SCHEMA_VERSION",
     "ArtifactFetchUnsupportedError",
     "ArtifactHandleError",
     "FlowMeshAgentAdapter",
@@ -62,6 +69,9 @@ __all__ = [
     "TelemetryIncompleteError",
     "WorkerResolutionError",
     "WorkflowValidation",
+    "analyze_flowmesh_pilot",
+    "artifact_handle_fingerprint",
+    "audit_pilot_records",
     "build_agent_workflow",
     "build_trial_plan",
     "load_flowmesh_pilot_config",

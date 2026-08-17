@@ -117,6 +117,23 @@ counterexample alone is not sufficient.
 
 The resulting exhaustive table is the frozen oracle dataset for AWM and OED.
 
+### Current implementation
+
+The repository now includes a two-design Reduced Oracle MVP. It exhaustively
+runs the Phase B eight-object workload under `D_remote_digest` and
+`D_local_digest`, performs a fingerprint-verified digest materialization,
+records forward/restoration cost, computes steady-state and
+transition-adjusted `Phi(D)`, and emits a naive incumbent-only lock-in trace.
+It restores the declared safe design after every probe and on resume.
+
+This is an engineering implementation of the B2 loop, not yet a complete B2
+scientific result: the committed source and target may share one physical
+disk, the transition-cost coefficients are marked as uncalibrated
+placeholders, and the design set does not yet separate every `M`, `L`, and `E`
+choice. See
+[`integrations/flowmesh/REDUCED_ORACLE.md`](integrations/flowmesh/REDUCED_ORACLE.md)
+for the exact boundary and runbook.
+
 ## Gate B3: Adaptive Workload Model
 
 Build AWM only after Gates B1 and B2 identify which assumptions survive. The
@@ -137,6 +154,23 @@ against an assumption-free box and an independent-box baseline.
 
 Gate B3 passes only if coverage reaches its pre-registered level and the bounds
 are materially tighter and decision-relevant.
+
+### Current implementation
+
+The repository now contains an offline AWM v1alpha1 that reads the frozen
+per-design Oracle records, holds out complete paired repetition blocks, and
+compares an assumption-free box, an independent confidence box, and a coupled
+envelope through one bound/gain API. Empirical constraints are disabled by
+default and cannot be enabled across designs without an explicit
+quoted-price-sufficiency gate. Synthetic Oracle tests cover interval
+tightening, joint held-out containment, and false-safe Commit detection.
+
+This completes the pre-server AWM framework, not Gate B3. The current evaluator
+uses one held-out repetition block and configured cost radii. Real coverage,
+width, and false-safe claims require a frozen Oracle, reviewed assumption
+statuses, calibrated cost supports, and multiple independent held-out vectors
+or cross-fitting folds. See
+[`integrations/flowmesh/AWM.md`](integrations/flowmesh/AWM.md).
 
 ## Gate B4: OED Closed Loop
 
@@ -178,6 +212,17 @@ Each Phase B batch writes:
 - `manifest.json`: configuration hashes, versions, worker pin, timeout, and
   output paths.
 
+An accepted artifact representation is evaluable only when transfer telemetry
+shows a completed full download. Otherwise the runner records
+`artifact_delivery_failure` and excludes the answer from completed-task
+metrics. Gateway state and research records persist only the SHA-256
+fingerprint of an artifact handle, never the reusable handle.
+
+Existing batches are audited read-only with `analyze-flowmesh-pilot`. The
+command leaves `runs.jsonl` and `trial_plan.json` unchanged and writes derived
+audited records, cell/workload summaries, paired contrasts, and an audit report
+to a separate directory.
+
 `felt_latency_ms` is the client round trip. The new
 `data_agent_service_latency_ms`, `data_agent_fetch_latency_ms`, and
 `data_agent_controlled_delay_ms` fields describe the Data Agent path itself.
@@ -197,7 +242,8 @@ bytes or latency to be marked complete.
 3. Pre-register P1-P4 estimands, equivalence margins, exclusion rules, and
    power-based sample sizes.
 4. Run the confirmatory causal gate once in a new output directory.
-5. Build and exhaustively deploy the reduced design oracle.
+5. Calibrate physical tiers and transition costs, then run the implemented
+   Reduced Oracle in a new output directory.
 6. Implement AWM against the frozen oracle, then OED and its baselines.
 
 Do not launch the 540-session fixture plan as a substitute for Step 2. More

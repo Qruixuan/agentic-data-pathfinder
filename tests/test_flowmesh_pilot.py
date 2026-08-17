@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from collections import Counter
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,10 @@ from pathfinder.integrations.flowmesh.contracts import (
     FlowMeshAgentRun,
     FlowMeshAgentRunRequest,
     FlowMeshSettings,
+)
+from pathfinder.integrations.flowmesh.analysis import (
+    analyze_flowmesh_pilot,
+    audit_pilot_records,
 )
 from pathfinder.integrations.flowmesh.gateway import TelemetryIncompleteError
 from pathfinder.integrations.flowmesh.pilot import (
@@ -100,7 +105,17 @@ class FakePilotAdapter:
             "artifact_transfer_latency_ms": (
                 0.0 if representation == "multimodal_digest" else 0.3
             ),
+            "artifact_download_request_count": (
+                0 if representation == "multimodal_digest" else 1
+            ),
+            "artifact_full_download_count": (
+                0 if representation == "multimodal_digest" else 1
+            ),
         }
+        if representation == "sampled_frames":
+            event["artifact_handle_sha256"] = sha256(
+                f"handle-{len(self.requests)}".encode("utf-8")
+            ).hexdigest()
         suffix = len(self.requests)
         return FlowMeshAgentRun(
             session_id=request.session_id or f"session-{suffix}",
@@ -126,6 +141,28 @@ class FailingPilotAdapter(FakePilotAdapter):
         if request.quote_profile_id == "digest_low":
             raise TelemetryIncompleteError("access-test", 1)
         raise RuntimeError("simulated FlowMesh failure")
+
+
+class MissingArtifactDownloadPilotAdapter(FakePilotAdapter):
+    def run(self, request: FlowMeshAgentRunRequest) -> FlowMeshAgentRun:
+        result = super().run(request)
+        events = []
+        for source in result.access_events:
+            event = dict(source)
+            if event.get("artifact_handle_sha256"):
+                event["artifact_download_request_count"] = 0
+                event["artifact_full_download_count"] = 0
+                event["artifact_bytes_sent"] = 0
+            events.append(event)
+        return FlowMeshAgentRun(
+            session_id=result.session_id,
+            workflow_id=result.workflow_id,
+            task_id=result.task_id,
+            status=result.status,
+            final_answer=result.final_answer,
+            access_events=tuple(events),
+            raw_result=result.raw_result,
+        )
 
 
 class SecretEchoPilotAdapter(FakePilotAdapter):
@@ -636,6 +673,127 @@ class FlowMeshPilotBatchTest(unittest.TestCase):
         )
         self.assertEqual([], retry.requests)
 
+    def test_missing_artifact_download_is_not_counted_as_completed(self) -> None:
+        manifest = run_flowmesh_pilot(
+            pilot=self.pilot,
+            system=self.system,
+            adapter=MissingArtifactDownloadPilotAdapter(),
+            output_dir=self.output_dir,
+            repetitions=1,
+        )
+        self.assertEqual(
+            {"artifact_delivery_failure": 1, "completed": 1},
+            manifest["outcome_counts"],
+        )
+        records = load_pilot_records(self.output_dir / "runs.jsonl")
+        failed = next(
+            record
+            for record in records
+            if record["outcome_type"] == "artifact_delivery_failure"
+        )
+        self.assertTrue(failed["telemetry_complete"])
+        self.assertIsNone(failed["task_success"])
+        self.assertTrue(failed["artifact_delivery_required"])
+        self.assertFalse(failed["artifact_delivery_complete"])
+        self.assertEqual(1, failed["artifact_delivery_failure_count"])
+        self.assertEqual(
+            ["no_download_request", "no_completed_full_download"],
+            failed["artifact_delivery_failures"][0]["reasons"],
+        )
+        with (self.output_dir / "summary.csv").open(
+            "r", encoding="utf-8", newline=""
+        ) as handle:
+            rows = list(csv.DictReader(handle))
+        affected = next(
+            row for row in rows if row["quote_profile_id"] == "as_designed"
+        )
+        self.assertEqual("0", affected["completed_trials"])
+        self.assertEqual("1", affected["artifact_delivery_failures"])
+
+    def test_analysis_reclassifies_legacy_failure_without_mutating_source(
+        self,
+    ) -> None:
+        run_flowmesh_pilot(
+            pilot=self.pilot,
+            system=self.system,
+            adapter=FakePilotAdapter(),
+            output_dir=self.output_dir,
+            repetitions=1,
+        )
+        records_path = self.output_dir / "runs.jsonl"
+        records = load_pilot_records(records_path)
+        legacy_handle = "legacy-reusable-artifact-handle"
+        target = next(
+            record
+            for record in records
+            if record["selected_representations"] == ["sampled_frames"]
+        )
+        event = target["access_events"][0]
+        event.pop("artifact_handle_sha256")
+        event["artifact_handle"] = legacy_handle
+        event["artifact_download_request_count"] = 0
+        event["artifact_full_download_count"] = 0
+        event["artifact_bytes_sent"] = 0
+        records_path.write_text(
+            "".join(
+                json.dumps(record, sort_keys=True) + "\n"
+                for record in records
+            ),
+            encoding="utf-8",
+        )
+        source_before = records_path.read_bytes()
+        analysis_dir = Path(self.temporary_directory.name) / "analysis"
+
+        report = analyze_flowmesh_pilot(
+            self.output_dir,
+            output_dir=analysis_dir,
+        )
+
+        self.assertEqual(source_before, records_path.read_bytes())
+        self.assertTrue(report["source_records_unchanged"])
+        self.assertEqual(
+            1,
+            report["newly_reclassified_artifact_delivery_failures"],
+        )
+        self.assertEqual(1, report["artifact_delivery_failure_count"])
+        audited_raw = (analysis_dir / "audited_runs.jsonl").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn(legacy_handle, audited_raw)
+        audited = load_pilot_records(
+            analysis_dir / "audited_runs.jsonl",
+            repair_truncated_tail=False,
+        )
+        failure = next(
+            record
+            for record in audited
+            if record["outcome_type"] == "artifact_delivery_failure"
+        )
+        self.assertEqual("completed", failure["original_outcome_type"])
+        self.assertEqual(
+            sha256(legacy_handle.encode("utf-8")).hexdigest(),
+            failure["access_events"][0]["artifact_handle_sha256"],
+        )
+        self.assertTrue((analysis_dir / "summary.csv").exists())
+        self.assertTrue((analysis_dir / "summary_by_workload.csv").exists())
+        self.assertTrue((analysis_dir / "paired_contrasts.csv").exists())
+
+    def test_analysis_does_not_mark_infrastructure_failure_delivery_complete(
+        self,
+    ) -> None:
+        audited = audit_pilot_records(
+            [
+                {
+                    "trial_key": "failed",
+                    "outcome_type": "infrastructure_failure",
+                    "task_success": None,
+                    "access_events": [],
+                }
+            ]
+        )
+        self.assertIsNone(audited[0]["artifact_delivery_required"])
+        self.assertIsNone(audited[0]["artifact_delivery_complete"])
+
     def test_changed_plan_cannot_be_mixed_into_existing_output(self) -> None:
         run_flowmesh_pilot(
             pilot=self.pilot,
@@ -691,6 +849,20 @@ class FlowMeshPilotBatchTest(unittest.TestCase):
         self.assertEqual([{"trial_key": "complete"}], records)
         repaired = records_path.read_text(encoding="utf-8")
         self.assertEqual(json.dumps({"trial_key": "complete"}) + "\n", repaired)
+
+    def test_read_only_record_loading_never_repairs_its_source(self) -> None:
+        records_path = self.output_dir / "runs.jsonl"
+        records_path.parent.mkdir(parents=True)
+        original = b'{"trial_key":"partial'
+        records_path.write_bytes(original)
+
+        with self.assertRaisesRegex(RuntimeError, "invalid pilot JSONL"):
+            load_pilot_records(
+                records_path,
+                repair_truncated_tail=False,
+            )
+
+        self.assertEqual(original, records_path.read_bytes())
 
     def test_failure_records_redact_credentials_and_signed_urls(self) -> None:
         with patch.dict(

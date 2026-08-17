@@ -153,6 +153,8 @@ The coupling layer includes:
 - workflow validation that does not submit or execute a task;
 - a frozen, block-randomized real-FlowMesh pilot runner with durable per-trial
   records, fail-closed telemetry classification, and resume support;
+- a read-only pilot analyzer that reclassifies missing artifact downloads and
+  regenerates workload-stratified and paired-contrast summaries;
 - versioned feasibility-control and cost-aware quote-response pilot
   configurations that separate budget enforcement from behavioral response;
 - a FlowMesh agent configuration and thin worker-image overlay; and
@@ -170,6 +172,12 @@ See
 for installation, deployment, and smoke-test instructions.
 The dedicated batch configurations and Phase A runbook are in
 [`integrations/flowmesh/PILOT.md`](integrations/flowmesh/PILOT.md).
+The two-design Reduced Oracle MVP, safe materialization contract, output
+schema, and manual server runbook are in
+[`integrations/flowmesh/REDUCED_ORACLE.md`](integrations/flowmesh/REDUCED_ORACLE.md).
+The offline Adaptive Workload Model, configuration-gated assumptions,
+confidence sets, baselines, and held-out evaluation are documented in
+[`integrations/flowmesh/AWM.md`](integrations/flowmesh/AWM.md).
 
 The Gateway can also use the versioned HTTP `DataAgentClient` and included
 single-node Data Agent server instead of the emulated backend. The server
@@ -183,9 +191,13 @@ for the server-side protocol contract.
 Remote `artifact_uri` payloads are exposed to the FlowMesh Agent through a
 separate `fetch_artifact` tool. `access_representation` returns a random opaque
 handle rather than the signed Data Agent URL; the handle is bound to the
-originating session and access event. Pathfinder refreshes and downloads the
-artifact internally, rejects redirects and unexpected origins, enforces a
-response-size bound, verifies the digest, and returns only JSON or UTF-8 text.
+originating session and access event. Only a SHA-256 fingerprint is persisted;
+the reusable handle is not written to Gateway state, pilot records, or logs.
+Pathfinder refreshes and downloads the artifact internally, rejects redirects
+and unexpected origins, enforces a response-size bound, verifies the digest,
+and returns only JSON or UTF-8 text. A selected artifact without a completed
+full download is classified as `artifact_delivery_failure`, not as a completed
+task.
 
 Post-workflow reconciliation is fail-closed: byte and latency figures are
 accepted only when the Data Agent reports `telemetry_complete=true`, and an

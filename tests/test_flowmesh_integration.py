@@ -3,10 +3,12 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
@@ -575,7 +577,7 @@ class ArtifactHandleBindingTest(unittest.TestCase):
             object_id="video-001",
         )
 
-    def test_handle_is_opaque_persisted_and_bound_to_its_session(self) -> None:
+    def test_handle_fingerprint_is_persisted_and_bound_to_session(self) -> None:
         owner = self.gateway.register_session(self.request("owner-session"))
         other = self.gateway.register_session(self.request("other-session"))
         access = self.gateway.access_representation(
@@ -588,7 +590,19 @@ class ArtifactHandleBindingTest(unittest.TestCase):
         self.assertGreaterEqual(len(handle), 24)
         self.assertNotIn("http", json.dumps(access).lower())
         event = self.store.list_events(owner.session_id)[0]
-        self.assertEqual(handle, event.artifact_handle)
+        fingerprint = sha256(handle.encode("utf-8")).hexdigest()
+        self.assertEqual(fingerprint, event.artifact_handle_sha256)
+        self.assertNotIn(handle, json.dumps(event.to_dict()))
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            stored = connection.execute(
+                """
+                SELECT artifact_handle, artifact_handle_sha256
+                FROM gateway_access_events
+                WHERE event_id = ?
+                """,
+                (event.event_id,),
+            ).fetchone()
+        self.assertEqual((None, fingerprint), stored)
 
         fetched = self.gateway.fetch_artifact(owner.session_id, handle)
         self.assertEqual(
@@ -596,6 +610,8 @@ class ArtifactHandleBindingTest(unittest.TestCase):
             fetched["content"],
         )
         self.assertEqual(event.content_sha256, fetched["sha256"])
+        self.assertNotIn("artifact_handle", fetched)
+        self.assertEqual(fingerprint, fetched["artifact_handle_sha256"])
         self.assertEqual(1, len(self.data_agent.fetch_requests))
         replay = self.data_agent.fetch_requests[0]
         self.assertEqual(event.data_agent_access_id, replay.access_id)
@@ -607,16 +623,55 @@ class ArtifactHandleBindingTest(unittest.TestCase):
             (owner.session_id, "unknown-handle"),
         ):
             with self.subTest(session_id=session_id):
-                with self.assertRaises(ArtifactHandleError) as context:
-                    self.gateway.fetch_artifact(
-                        session_id,
-                        invalid_handle,
-                    )
+                with self.assertLogs(
+                    "pathfinder.integrations.flowmesh.gateway",
+                    level="WARNING",
+                ) as captured:
+                    with self.assertRaises(ArtifactHandleError) as context:
+                        self.gateway.fetch_artifact(
+                            session_id,
+                            invalid_handle,
+                        )
                 self.assertEqual(
                     "artifact handle is invalid for this Pathfinder session",
                     str(context.exception),
                 )
+                self.assertNotIn(invalid_handle, "\n".join(captured.output))
         self.assertEqual(1, len(self.data_agent.fetch_requests))
+
+    def test_legacy_cleartext_handle_is_hashed_and_erased(self) -> None:
+        session = self.gateway.register_session(self.request("legacy-session"))
+        access = self.gateway.access_representation(
+            session.session_id,
+            "multimodal_digest",
+        )
+        handle = access["artifact_handle"]
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            connection.execute(
+                """
+                UPDATE gateway_access_events
+                SET artifact_handle = ?, artifact_handle_sha256 = NULL
+                WHERE session_id = ?
+                """,
+                (handle, session.session_id),
+            )
+            connection.commit()
+
+        migrated = SQLiteSessionStore(self.store.path)
+        event = migrated.list_events(session.session_id)[0]
+        fingerprint = sha256(handle.encode("utf-8")).hexdigest()
+        self.assertEqual(fingerprint, event.artifact_handle_sha256)
+        with closing(sqlite3.connect(self.store.path)) as connection:
+            raw = connection.execute(
+                """
+                SELECT artifact_handle
+                FROM gateway_access_events
+                WHERE session_id = ?
+                """,
+                (session.session_id,),
+            ).fetchone()[0]
+        self.assertIsNone(raw)
+        self.assertEqual(event, migrated.get_artifact_event(session.session_id, handle))
 
     def test_blank_and_oversized_handles_are_rejected_before_lookup(self) -> None:
         session = self.gateway.register_session(self.request("bad-handles"))

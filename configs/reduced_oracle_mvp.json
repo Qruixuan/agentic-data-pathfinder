@@ -1,0 +1,52 @@
+{
+  "schema_version": "pathfinder.reduced-oracle/v1alpha1",
+  "oracle_id": "reduced-oracle-mvp-v1",
+  "workload_pilot_config": "phase_b_confirmatory_small.json",
+  "safe_design_id": "D_remote_digest",
+  "design_order": ["D_remote_digest", "D_local_digest"],
+  "quote_profile_id": "as_designed",
+  "latency_multiplier": 1.0,
+  "repetitions": 3,
+  "base_seed": 9301,
+  "randomization_seed": 10301,
+  "horizon_sessions": 1000,
+  "horizon_hours": 24,
+  "minimum_completion_rate": 0.95,
+  "materialization_root": "../data/reduced_oracle_mvp/materialized",
+  "cost_model_status": "engineering-placeholder-requires-preregistration",
+  "transition_cost": {
+    "copy_cost_per_gib": 0.05,
+    "elapsed_time_cost_per_second": 0.001,
+    "foreground_loss_per_transition": 0.0,
+    "storage_cost_per_gib_hour": 0.01
+  },
+  "naive_baseline": {
+    "candidate_design_id": "D_local_digest",
+    "representation_id": "multimodal_digest",
+    "decision_margin": 0.0
+  },
+  "designs": [
+    {
+      "design_id": "D_remote_digest",
+      "materialization_decision": "reuse-existing-remote-digest",
+      "placement_decision": "remote-digest-service",
+      "execution_decision": "flowmesh-agent-on-pinned-worker",
+      "fixed_storage_cost": 0.0,
+      "materializations": []
+    },
+    {
+      "design_id": "D_local_digest",
+      "materialization_decision": "materialize-digest-copy",
+      "placement_decision": "pathfinder-owned-local-materialization-root",
+      "execution_decision": "flowmesh-agent-on-pinned-worker",
+      "fixed_storage_cost": 0.0,
+      "materializations": [
+        {
+          "representation_id": "multimodal_digest",
+          "source_template": "../data/phase_b_confirmatory_small/{object_id}/multimodal_digest.txt",
+          "target_template": "../data/reduced_oracle_mvp/materialized/{object_id}/multimodal_digest.txt"
+        }
+      ]
+    }
+  ]
+}

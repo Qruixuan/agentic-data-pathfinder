@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import secrets
 import sqlite3
@@ -18,6 +19,14 @@ from ...data_agent import LocalDataAgent
 from ...models import AccessOffer, SystemConfig
 from ...resolver import AccessResolver
 from .contracts import FlowMeshAgentRunRequest
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+def artifact_handle_fingerprint(artifact_handle: str) -> str:
+    """Return the non-reversible identifier persisted for an artifact handle."""
+    return sha256(artifact_handle.encode("utf-8")).hexdigest()
 
 
 class GatewayError(RuntimeError):
@@ -119,7 +128,7 @@ class GatewayAccessEvent:
     artifact_download_request_count: int = 0
     artifact_full_download_count: int = 0
     object_catalog_version: str | None = None
-    artifact_handle: str | None = None
+    artifact_handle_sha256: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -266,6 +275,7 @@ class SQLiteSessionStore:
                     artifact_full_download_count INTEGER NOT NULL DEFAULT 0,
                     object_catalog_version TEXT,
                     artifact_handle TEXT,
+                    artifact_handle_sha256 TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(session_id)
                         REFERENCES gateway_sessions(session_id)
@@ -304,6 +314,7 @@ class SQLiteSessionStore:
                 "artifact_full_download_count": "INTEGER NOT NULL DEFAULT 0",
                 "object_catalog_version": "TEXT",
                 "artifact_handle": "TEXT",
+                "artifact_handle_sha256": "TEXT",
             }
             for name, declaration in migrations.items():
                 if name not in event_columns:
@@ -311,11 +322,35 @@ class SQLiteSessionStore:
                         f"ALTER TABLE gateway_access_events ADD COLUMN "
                         f"{name} {declaration}"
                     )
+            # Migrate legacy clear-text handles once, then erase them. The
+            # deprecated column remains only because SQLite cannot drop it on
+            # every supported deployment version without rebuilding the
+            # table. Runtime reads and writes use only the fingerprint.
+            legacy_handles = connection.execute(
+                """
+                SELECT event_id, artifact_handle
+                FROM gateway_access_events
+                WHERE artifact_handle IS NOT NULL
+                """
+            ).fetchall()
+            for row in legacy_handles:
+                connection.execute(
+                    """
+                    UPDATE gateway_access_events
+                    SET artifact_handle_sha256 = ?, artifact_handle = NULL
+                    WHERE event_id = ?
+                    """,
+                    (
+                        artifact_handle_fingerprint(row["artifact_handle"]),
+                        row["event_id"],
+                    ),
+                )
+            connection.execute("DROP INDEX IF EXISTS idx_gateway_artifact_handle")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "idx_gateway_artifact_handle "
-                "ON gateway_access_events(artifact_handle) "
-                "WHERE artifact_handle IS NOT NULL"
+                "idx_gateway_artifact_handle_sha256 "
+                "ON gateway_access_events(artifact_handle_sha256) "
+                "WHERE artifact_handle_sha256 IS NOT NULL"
             )
 
     def create_session(self, session: GatewaySession) -> None:
@@ -435,7 +470,7 @@ class SQLiteSessionStore:
                     artifact_transfer_latency_ms,
                     artifact_download_request_count,
                     artifact_full_download_count, object_catalog_version,
-                    artifact_handle,
+                    artifact_handle_sha256,
                     created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -464,7 +499,7 @@ class SQLiteSessionStore:
                     event.artifact_download_request_count,
                     event.artifact_full_download_count,
                     event.object_catalog_version,
-                    event.artifact_handle,
+                    event.artifact_handle_sha256,
                     event.created_at,
                 ),
             )
@@ -494,20 +529,36 @@ class SQLiteSessionStore:
         error, so the tool cannot be used to probe handles owned by another
         experiment session.
         """
+        fingerprint = artifact_handle_fingerprint(artifact_handle)
         with self._connection() as connection:
             row = connection.execute(
                 """
                 SELECT * FROM gateway_access_events
-                WHERE session_id = ? AND artifact_handle = ?
+                WHERE session_id = ? AND artifact_handle_sha256 = ?
                   AND accepted = 1
                 """,
-                (session_id, artifact_handle),
+                (session_id, fingerprint),
             ).fetchone()
         if row is None:
             raise ArtifactHandleError(
                 "artifact handle is invalid for this Pathfinder session"
             )
         return self._event_from_row(row)
+
+    def list_artifact_handle_fingerprints(self, session_id: str) -> list[str]:
+        """Return safe identifiers for artifact handles owned by a session."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT artifact_handle_sha256
+                FROM gateway_access_events
+                WHERE session_id = ?
+                  AND artifact_handle_sha256 IS NOT NULL
+                ORDER BY event_index, event_id
+                """,
+                (session_id,),
+            ).fetchall()
+        return [str(row["artifact_handle_sha256"]) for row in rows]
 
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> GatewayAccessEvent:
@@ -547,7 +598,7 @@ class SQLiteSessionStore:
                 "artifact_full_download_count"
             ],
             object_catalog_version=row["object_catalog_version"],
-            artifact_handle=row["artifact_handle"],
+            artifact_handle_sha256=row["artifact_handle_sha256"],
         )
 
     def update_artifact_telemetry(
@@ -793,7 +844,11 @@ class AccessGateway:
                     object_id=session.object_id,
                     data_agent_access_id=result.data_agent_access_id,
                     object_catalog_version=result.object_catalog_version,
-                    artifact_handle=artifact_handle,
+                    artifact_handle_sha256=(
+                        artifact_handle_fingerprint(artifact_handle)
+                        if artifact_handle is not None
+                        else None
+                    ),
                 )
             )
             updated_state = self.list_offers(session_id)
@@ -835,10 +890,23 @@ class AccessGateway:
                 raise ArtifactHandleError(
                     "artifact handle is not available after the session ends"
                 )
-            event = self.store.get_artifact_event(
-                session_id,
-                artifact_handle,
-            )
+            try:
+                event = self.store.get_artifact_event(
+                    session_id,
+                    artifact_handle,
+                )
+            except ArtifactHandleError:
+                # Never log the bearer-like handle itself. Fingerprints make
+                # an agent-side mutation distinguishable from missing state
+                # without turning logs into a reusable capability store.
+                LOGGER.warning(
+                    "Artifact handle rejected for session %s: "
+                    "received_sha256=%s expected_sha256=%s",
+                    session_id,
+                    artifact_handle_fingerprint(artifact_handle),
+                    self.store.list_artifact_handle_fingerprints(session_id),
+                )
+                raise
             fetcher = getattr(self.backend, "fetch_artifact", None)
             if not callable(fetcher):
                 raise ArtifactFetchUnsupportedError(
@@ -867,7 +935,9 @@ class AccessGateway:
             "session_id": session_id,
             "object_id": event.object_id,
             "representation_id": event.representation_id,
-            "artifact_handle": artifact_handle,
+            "artifact_handle_sha256": artifact_handle_fingerprint(
+                artifact_handle
+            ),
             "media_type": artifact.media_type,
             "size_bytes": artifact.size_bytes,
             "sha256": artifact.sha256,

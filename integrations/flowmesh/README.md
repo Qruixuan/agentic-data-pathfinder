@@ -272,13 +272,28 @@ When a remote Data Agent is configured, the runner also queries completed
 artifact-transfer telemetry and attributes it to the matching Gateway access
 event before returning the session result.
 
+The raw artifact handle is returned once by `access_representation` so the
+Agent can call `fetch_artifact`, but it is never persisted in Gateway state or
+pilot records. The Gateway stores only its SHA-256 fingerprint and logs only
+fingerprints when rejecting a mismatched handle. Opening an older Gateway
+database migrates existing clear-text handles to fingerprints and clears the
+legacy values.
+
 ## 6. Run a Randomized Real-FlowMesh Pilot
 
 After the Level-2 smoke test passes, use `run-flowmesh-pilot` for a frozen,
 resumable batch. The included Phase A configurations compare digest quotes 2
 and 6 while holding the physical design and latency multiplier fixed. The
 runner appends every outcome before continuing, distinguishes telemetry from
-infrastructure failures, and never manages worker or service lifecycle.
+infrastructure failures, classifies a selected-but-undownloaded artifact as
+`artifact_delivery_failure`, and never manages worker or service lifecycle.
+
+Completed pilot directories can be re-audited without modifying their
+original records using `analyze-flowmesh-pilot`. The derived analysis removes
+legacy raw handles, reclassifies missing artifact downloads, and regenerates
+condition, workload, and paired-contrast summaries. See
+[`PILOT.md`](PILOT.md#read-only-audit-and-analysis) for the command and output
+contract.
 
 See [`PILOT.md`](PILOT.md) for the configuration contract, manual prerequisites,
 exact dry-run and engineering-pilot commands, output files, and the boundary
@@ -287,6 +302,11 @@ between fixture validation and causal evidence.
 The next multi-design quote-by-latency gate and the path from that gate to the
 Reduced Oracle, AWM, and OED experiments are specified in
 [`PPD_VALIDATION_PROTOCOL.md`](../../PPD_VALIDATION_PROTOCOL.md).
+The implemented two-design Oracle and its manual lifecycle boundary are
+documented in [`REDUCED_ORACLE.md`](REDUCED_ORACLE.md).
+The AWM can be developed and tested before that Oracle is run; its offline
+input, confidence, assumption-gating, and evaluation contract are documented
+in [`AWM.md`](AWM.md).
 
 ## Credential Handling
 

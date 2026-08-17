@@ -17,6 +17,10 @@ DEFAULT_FLOWMESH_STATE_DB = Path("outputs/flowmesh/gateway.sqlite3")
 DEFAULT_FLOWMESH_PILOT_CONFIG = Path(
     "configs/phase_a_quote_pilot_dry_run.json"
 )
+DEFAULT_REDUCED_ORACLE_CONFIG = Path(
+    "configs/reduced_oracle_mvp.json"
+)
+DEFAULT_AWM_CONFIG = Path("configs/awm_reduced_mvp.json")
 DEFAULT_DATA_AGENT_MANIFEST = Path("configs/data_agent_manifest.json")
 DEFAULT_DATA_AGENT_OPERATION_DB = Path(
     "outputs/data_agent/operations.sqlite3"
@@ -226,6 +230,103 @@ def _parser() -> argparse.ArgumentParser:
     )
     flowmesh_pilot.add_argument("--compact", action="store_true")
 
+    flowmesh_analysis = subcommands.add_parser(
+        "analyze-flowmesh-pilot",
+        help=(
+            "audit a completed pilot without modifying its original "
+            "runs.jsonl"
+        ),
+    )
+    flowmesh_analysis.add_argument(
+        "--input-dir",
+        type=Path,
+        required=True,
+        help="pilot directory containing runs.jsonl and trial_plan.json",
+    )
+    flowmesh_analysis.add_argument(
+        "--output-dir",
+        type=Path,
+        help="derived-analysis directory; defaults to <input>-analysis",
+    )
+    flowmesh_analysis.add_argument("--compact", action="store_true")
+
+    reduced_oracle = subcommands.add_parser(
+        "run-reduced-oracle",
+        help=(
+            "exhaustively run a reduced design set without managing worker "
+            "or service lifecycle"
+        ),
+    )
+    reduced_oracle.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    reduced_oracle.add_argument("--output-dir", type=Path, required=True)
+    reduced_oracle.add_argument("--state-db", type=Path, required=True)
+    reduced_oracle.add_argument("--flowmesh-base-url")
+    reduced_oracle.add_argument("--agent-config")
+    reduced_oracle.add_argument("--task-timeout", type=int, default=600)
+    reduced_oracle.add_argument("--poll-interval", type=float, default=2.0)
+    oracle_pin = reduced_oracle.add_mutually_exclusive_group()
+    oracle_pin.add_argument("--worker-id")
+    oracle_pin.add_argument("--worker-alias")
+    reduced_oracle.add_argument("--validate-workflow", action="store_true")
+    reduced_oracle.add_argument("--data-agent-url")
+    reduced_oracle.add_argument(
+        "--data-agent-timeout",
+        type=float,
+        default=30.0,
+    )
+    reduced_oracle.add_argument(
+        "--data-agent-max-retries",
+        type=int,
+        default=1,
+    )
+    reduced_oracle.add_argument(
+        "--telemetry-quiescence-timeout",
+        type=float,
+        default=15.0,
+    )
+    reduced_oracle.add_argument("--compact", action="store_true")
+
+    oracle_analysis = subcommands.add_parser(
+        "analyze-reduced-oracle",
+        help="recompute a reduced-oracle table and lock-in trace",
+    )
+    oracle_analysis.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    oracle_analysis.add_argument("--output-dir", type=Path, required=True)
+    oracle_analysis.add_argument("--compact", action="store_true")
+
+    awm_evaluation = subcommands.add_parser(
+        "evaluate-awm",
+        help=(
+            "fit assumption-free, independent, and coupled envelopes from "
+            "a frozen Reduced Oracle run"
+        ),
+    )
+    awm_evaluation.add_argument(
+        "--awm-config",
+        type=Path,
+        default=DEFAULT_AWM_CONFIG,
+    )
+    awm_evaluation.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    awm_evaluation.add_argument(
+        "--oracle-output-dir",
+        type=Path,
+        required=True,
+    )
+    awm_evaluation.add_argument("--output-dir", type=Path, required=True)
+    awm_evaluation.add_argument("--compact", action="store_true")
+
     gateway = subcommands.add_parser(
         "serve-flowmesh-tools",
         help="serve Pathfinder access tools over Streamable HTTP MCP",
@@ -410,6 +511,124 @@ def main(argv: Sequence[str] | None = None) -> int:
                     progress_callback=lambda event: print(
                         json.dumps(
                             {"status": "trial_recorded", **event},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                        flush=True,
+                    ),
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "analyze-flowmesh-pilot":
+            from .integrations.flowmesh.analysis import (
+                analyze_flowmesh_pilot,
+            )
+
+            payload = analyze_flowmesh_pilot(
+                args.input_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "analyze-reduced-oracle":
+            from .reduced_oracle import (
+                analyze_reduced_oracle,
+                load_reduced_oracle_config,
+            )
+
+            payload = analyze_reduced_oracle(
+                load_reduced_oracle_config(args.oracle_config),
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "evaluate-awm":
+            from .awm import evaluate_awm
+
+            payload = evaluate_awm(
+                args.awm_config,
+                args.oracle_config,
+                oracle_output_dir=args.oracle_output_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-reduced-oracle":
+            from .data_agent_client import (
+                DataAgentClientSettings,
+                HttpDataAgentClient,
+            )
+            from .integrations.flowmesh import (
+                AccessGateway,
+                FlowMeshAgentAdapter,
+                FlowMeshSettings,
+                RemoteDataAgentBackend,
+                SdkFlowMeshClient,
+                SQLiteSessionStore,
+            )
+            from .integrations.flowmesh.pilot import (
+                load_flowmesh_pilot_config,
+            )
+            from .reduced_oracle import (
+                load_reduced_oracle_config,
+                run_reduced_oracle,
+            )
+
+            oracle_config = load_reduced_oracle_config(args.oracle_config)
+            workload_pilot = load_flowmesh_pilot_config(
+                oracle_config.workload_pilot_config_path
+            )
+            config = load_config(workload_pilot.system_config_path)
+            resolved_data_agent_url = (
+                args.data_agent_url
+                or os.getenv("PATHFINDER_DATA_AGENT_URL")
+            )
+            if not resolved_data_agent_url:
+                raise ConfigError(
+                    "run-reduced-oracle requires --data-agent-url or "
+                    "PATHFINDER_DATA_AGENT_URL"
+                )
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                agent_config_name=args.agent_config,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_id=args.worker_id,
+                worker_alias=args.worker_alias,
+                validate_before_submit=(
+                    True if args.validate_workflow else None
+                ),
+            )
+            backend = RemoteDataAgentBackend(
+                HttpDataAgentClient(
+                    DataAgentClientSettings.from_environment(
+                        base_url=resolved_data_agent_url,
+                        timeout_seconds=args.data_agent_timeout,
+                        max_retries=args.data_agent_max_retries,
+                    )
+                ),
+                telemetry_quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout
+                ),
+            )
+            gateway = AccessGateway(
+                config,
+                SQLiteSessionStore(args.state_db),
+                backend,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_reduced_oracle(
+                    config=oracle_config,
+                    system=config,
+                    adapter=FlowMeshAgentAdapter(
+                        client,
+                        gateway,
+                        settings,
+                    ),
+                    output_dir=args.output_dir,
+                    progress_callback=lambda event: print(
+                        json.dumps(
+                            {"status": "oracle_trial_recorded", **event},
                             ensure_ascii=False,
                             sort_keys=True,
                         ),

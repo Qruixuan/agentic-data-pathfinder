@@ -256,6 +256,13 @@ Each output directory contains:
 - `manifest.json`: progress, code/config versions, non-secret runtime metadata,
   and artifact locations.
 
+Artifact-backed accesses are complete only after telemetry reports at least
+one completed full download. If an Agent selects an artifact representation
+but never successfully calls `fetch_artifact`, the record is classified as
+`artifact_delivery_failure`; its answer is retained for diagnosis but is not
+treated as an evaluable task outcome. Access records contain only the
+SHA-256 fingerprint of the one-time handle, never the reusable handle itself.
+
 For remote Data Agents, records distinguish client round-trip latency from
 Data Agent service, fetch, and controlled-delay latency. The CLI waits up to
 `--telemetry-quiescence-timeout` (15 seconds by default) for final transfer
@@ -281,9 +288,39 @@ Failure interpretation is explicit:
 
 - `completed`: a valid behavioral outcome, including no access or a wrong
   answer;
+- `artifact_delivery_failure`: the Agent accepted an artifact representation
+  but no full artifact download completed, so its answer is not evaluable;
 - `telemetry_failure`: the physical byte/latency observation could not be
   proven complete and must not enter PPD analysis;
 - `infrastructure_failure`: FlowMesh, worker, model, or another execution
   dependency failed.
 
-The summary never converts either failure class into an Agent decision.
+The summary never converts any failure class into an Agent decision.
+
+## Read-only Audit and Analysis
+
+Re-audit an existing pilot, including records created before strict artifact
+delivery classification was added, with:
+
+```bash
+PYTHONPATH=. python -m pathfinder analyze-flowmesh-pilot \
+  --input-dir "$PF_CONFIRM_FORMAL_OUT" \
+  --output-dir "$PF_CONFIRM_FORMAL_OUT-analysis"
+```
+
+The command never edits `runs.jsonl` or `trial_plan.json`. It writes a derived
+`audited_runs.jsonl`, `audit_report.json`, `summary.csv`,
+`summary_by_workload.csv`, and `paired_contrasts.csv` into a separate
+directory. Legacy raw artifact handles are replaced by fingerprints in the
+derived output. `audit_report.json` reports raw and audited outcome counts,
+the number of newly reclassified delivery failures, and task-success metrics
+before and after auditing.
+
+## Reduced Oracle
+
+After the causal pilot is frozen, use the separate Reduced Oracle runner to
+deploy each reduced design, account for materialization and restoration, and
+compare exhaustive `Phi(D)` with the naive incumbent-only baseline. The runner
+does not manage workers or services. See [`REDUCED_ORACLE.md`](REDUCED_ORACLE.md)
+for the safety contract, commands, outputs, and the distinction between the
+same-disk engineering MVP and a calibrated physical-placement result.
