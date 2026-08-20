@@ -1,0 +1,120 @@
+{
+  "schema_version": "pathfinder.flowmesh-pilot/v1alpha1",
+  "experiment_id": "synthetic-multi-candidate-v1",
+  "system_config": "synthetic_multi_candidate_system.json",
+  "design_ids": [
+    "S_remote_baseline",
+    "S_local_digest",
+    "S_local_scene_graph",
+    "S_local_pair",
+    "S_tiered_cache"
+  ],
+  "task_class_id": "video_qa",
+  "quote_profile_ids": [
+    "as_designed"
+  ],
+  "latency_multipliers": [
+    1.0
+  ],
+  "repetitions": 10,
+  "base_seed": 4101,
+  "randomization_seed": 4201,
+  "workloads": [
+    {
+      "id": "synthetic-workload-01",
+      "object_id": "synthetic-object-01",
+      "question": "Synthetic placeholder question 01. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-02",
+      "object_id": "synthetic-object-02",
+      "question": "Synthetic placeholder question 02. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-03",
+      "object_id": "synthetic-object-03",
+      "question": "Synthetic placeholder question 03. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-04",
+      "object_id": "synthetic-object-04",
+      "question": "Synthetic placeholder question 04. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-05",
+      "object_id": "synthetic-object-05",
+      "question": "Synthetic placeholder question 05. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-06",
+      "object_id": "synthetic-object-06",
+      "question": "Synthetic placeholder question 06. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-07",
+      "object_id": "synthetic-object-07",
+      "question": "Synthetic placeholder question 07. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-08",
+      "object_id": "synthetic-object-08",
+      "question": "Synthetic placeholder question 08. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-09",
+      "object_id": "synthetic-object-09",
+      "question": "Synthetic placeholder question 09. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-10",
+      "object_id": "synthetic-object-10",
+      "question": "Synthetic placeholder question 10. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-11",
+      "object_id": "synthetic-object-11",
+      "question": "Synthetic placeholder question 11. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-12",
+      "object_id": "synthetic-object-12",
+      "question": "Synthetic placeholder question 12. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-13",
+      "object_id": "synthetic-object-13",
+      "question": "Synthetic placeholder question 13. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-14",
+      "object_id": "synthetic-object-14",
+      "question": "Synthetic placeholder question 14. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-15",
+      "object_id": "synthetic-object-15",
+      "question": "Synthetic placeholder question 15. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    },
+    {
+      "id": "synthetic-workload-16",
+      "object_id": "synthetic-object-16",
+      "question": "Synthetic placeholder question 16. This fixture never submits a question to any Agent; the field exists only so the generated records keep the real pilot record shape.",
+      "accepted_answer_substrings": []
+    }
+  ]
+}

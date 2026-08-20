@@ -4,6 +4,7 @@ from .adapter import (
     FlowMeshAgentAdapter,
     FlowMeshPinningError,
     FlowMeshRunError,
+    FlowMeshWorkflowFailureError,
 )
 from .analysis import (
     ANALYSIS_SCHEMA_VERSION,
@@ -15,6 +16,8 @@ from .contracts import (
     FlowMeshAgentRun,
     FlowMeshAgentRunRequest,
     FlowMeshSettings,
+    FlowMeshWorkerIdentity,
+    TerminalWorkflow,
     WorkflowValidation,
 )
 from .data_agent_backend import RemoteDataAgentBackend
@@ -40,6 +43,17 @@ from .pilot import (
     summarize_paired_contrasts,
     validate_flowmesh_pilot_config,
 )
+from .preflight import (
+    PREFLIGHT_SCHEMA_VERSION,
+    WorkerPreflightError,
+    describe_pinned_worker,
+    preflight_flowmesh_worker,
+)
+from .redaction import (
+    endpoint_fingerprint,
+    redact_secrets,
+    sanitize_endpoint,
+)
 from .workflow import (
     PATHFINDER_GRAPH_NODE_NAME,
     build_agent_workflow,
@@ -59,14 +73,19 @@ __all__ = [
     "FlowMeshPilotConfigError",
     "FlowMeshRunError",
     "FlowMeshSettings",
+    "FlowMeshWorkerIdentity",
+    "FlowMeshWorkflowFailureError",
     "GatewayError",
     "PATHFINDER_GRAPH_NODE_NAME",
+    "PREFLIGHT_SCHEMA_VERSION",
     "PilotTrial",
     "PilotWorkload",
     "RemoteDataAgentBackend",
     "SdkFlowMeshClient",
     "SQLiteSessionStore",
     "TelemetryIncompleteError",
+    "TerminalWorkflow",
+    "WorkerPreflightError",
     "WorkerResolutionError",
     "WorkflowValidation",
     "analyze_flowmesh_pilot",
@@ -74,8 +93,13 @@ __all__ = [
     "audit_pilot_records",
     "build_agent_workflow",
     "build_trial_plan",
+    "describe_pinned_worker",
+    "endpoint_fingerprint",
     "load_flowmesh_pilot_config",
+    "preflight_flowmesh_worker",
+    "redact_secrets",
     "run_flowmesh_pilot",
+    "sanitize_endpoint",
     "summarize_pilot_records",
     "summarize_pilot_records_by_workload",
     "summarize_paired_contrasts",

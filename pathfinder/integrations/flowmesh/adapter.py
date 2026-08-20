@@ -1,15 +1,25 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from .contracts import (
     FlowMeshAgentRun,
     FlowMeshAgentRunRequest,
     FlowMeshClientProtocol,
     FlowMeshSettings,
+    FlowMeshWorkerIdentity,
+    TerminalWorkflow,
 )
 from .gateway import AccessGateway, GatewaySession, SessionNotFoundError
+from .redaction import redact_secrets
 from .workflow import build_agent_workflow, workflow_selected_worker
+
+
+NO_FLOWMESH_DETAIL = (
+    "FlowMesh returned no failure detail for this workflow or task; inspect "
+    "Root scheduling state, Node Server dispatch, and the pinned worker's "
+    "logs for this workflow and task"
+)
 
 
 class FlowMeshRunError(RuntimeError):
@@ -18,6 +28,31 @@ class FlowMeshRunError(RuntimeError):
 
 class FlowMeshPinningError(FlowMeshRunError):
     """Raised when a requested worker pin cannot be applied."""
+
+
+class FlowMeshWorkflowFailureError(FlowMeshRunError):
+    """Raised when a submitted workflow reaches a non-DONE terminal state.
+
+    Carries the identifiers an operator needs to correlate the failure with
+    Root, Node Server, and worker logs instead of only a bare status word.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        workflow_id: str,
+        task_id: str,
+        terminal_status: str,
+        detail: str | None,
+        lookup_note: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.workflow_id = workflow_id
+        self.task_id = task_id
+        self.terminal_status = terminal_status
+        self.detail = detail
+        self.lookup_note = lookup_note
 
 
 class FlowMeshAgentAdapter:
@@ -33,42 +68,58 @@ class FlowMeshAgentAdapter:
         self.gateway = gateway
         self.settings = settings
 
-    def resolve_selected_worker(self) -> str | None:
-        """Return the concrete worker ID this session must run on.
+    def verify_pinned_worker(self) -> FlowMeshWorkerIdentity | None:
+        """Verify the requested pin against the configured Root.
 
-        Returns None only when no pin was requested. A requested pin that
-        cannot be resolved raises instead of falling back to free scheduling.
+        Returns None only when no pin was requested. Both an alias and an
+        exact worker ID go through the same Root query: an ID that only the
+        local Node Server can see is not an ID this Root will dispatch to, and
+        trusting it verbatim produces a workflow that is accepted, never
+        dispatched, and fails later with nothing in the worker log.
         """
-        if self.settings.worker_id is not None:
-            return self.settings.worker_id.strip()
-        if self.settings.worker_alias is None:
+        if not self.settings.pinning_requested:
             return None
-        resolver = getattr(self.client, "resolve_worker_alias", None)
-        if not callable(resolver):
+        describe = getattr(self.client, "describe_current_worker", None)
+        if not callable(describe):
             raise FlowMeshPinningError(
-                "FlowMesh client cannot resolve worker aliases, so the "
-                f"requested pin to alias '{self.settings.worker_alias}' "
-                "cannot be honoured"
+                "FlowMesh client cannot verify a pinned worker against the "
+                "configured Root, so the requested pin cannot be honoured"
             )
+        selector = (
+            {"worker_id": self.settings.worker_id.strip()}
+            if self.settings.worker_id is not None
+            else {"alias": self.settings.worker_alias.strip()}
+        )
         try:
-            resolved = resolver(self.settings.worker_alias)
+            identity = describe(**selector)
         except FlowMeshRunError:
             raise
         except Exception as exc:
             raise FlowMeshPinningError(
-                "Cannot resolve FlowMesh worker alias "
-                f"'{self.settings.worker_alias}': {exc}"
+                "Cannot verify the requested FlowMesh worker pin "
+                f"{selector}: {redact_secrets(str(exc))}"
             ) from exc
-        if not isinstance(resolved, str) or not resolved.strip():
+        worker_id = getattr(identity, "worker_id", None)
+        if not isinstance(worker_id, str) or not worker_id.strip():
             raise FlowMeshPinningError(
-                f"FlowMesh worker alias '{self.settings.worker_alias}' "
-                "resolved to an empty worker ID"
+                f"The configured FlowMesh Root returned no usable worker ID "
+                f"for {selector}"
             )
-        return resolved.strip()
+        return identity
+
+    def resolve_selected_worker(self) -> str | None:
+        """Return the concrete worker ID this session must run on.
+
+        Returns None only when no pin was requested. A requested pin that
+        cannot be verified raises instead of falling back to free scheduling.
+        """
+        identity = self.verify_pinned_worker()
+        return None if identity is None else identity.worker_id.strip()
 
     def run(self, request: FlowMeshAgentRunRequest) -> FlowMeshAgentRun:
-        # Resolved before registration on purpose: an unresolvable alias
-        # means nothing ran, so there is no session to record as failed.
+        # Verified against the Root before registration on purpose: a pin that
+        # the Root cannot see means nothing ran, so there is no Gateway
+        # session to record as failed and nothing was submitted.
         selected_worker_id = self.resolve_selected_worker()
         session = self.gateway.register_session(request)
         # Everything from here on is inside the handler. Once a session row
@@ -193,10 +244,7 @@ class FlowMeshAgentAdapter:
             self.settings.poll_interval_seconds,
         )
         if terminal.status != "DONE":
-            raise FlowMeshRunError(
-                f"FlowMesh workflow {terminal.workflow_id} ended with "
-                f"status {terminal.status}"
-            )
+            raise self._workflow_failure(terminal, task_id)
         raw_result = self.client.retrieve_result(task_id)
         final_answer = extract_agent_answer(raw_result)
         self.gateway.reconcile_artifact_telemetry(session_id)
@@ -217,6 +265,82 @@ class FlowMeshAgentAdapter:
             final_answer=final_answer,
             access_events=events,
             raw_result=raw_result,
+        )
+
+    def _task_detail_parts(self, task_id: str) -> tuple[list[str], str | None]:
+        """Best-effort task detail plus the reason there is none.
+
+        Every failure mode of this optional lookup -- an SDK without the
+        method, a timeout, 401/403, 404, or a malformed response -- resolves
+        to a note. None of them may propagate, because this runs while an
+        exception describing the *real* failure is already being built.
+        """
+        describe = getattr(self.client, "describe_task_failure", None)
+        if not callable(describe):
+            return [], "this FlowMesh client cannot read task detail"
+        try:
+            task_detail = describe(task_id)
+        except Exception as exc:
+            return [], (
+                "task detail lookup failed: "
+                + redact_secrets(f"{type(exc).__name__}: {exc}", limit=300)
+            )
+        if not isinstance(task_detail, Mapping):
+            if task_detail is None:
+                return [], "FlowMesh reported no detail for this task"
+            return [], (
+                "task detail response was not an object "
+                f"({type(task_detail).__name__})"
+            )
+        parts = [
+            f"{key}={value}"
+            for key, value in sorted(
+                task_detail.items(),
+                key=lambda item: str(item[0]),
+            )
+            if value is not None
+        ]
+        if not parts:
+            return [], "FlowMesh reported no detail for this task"
+        return parts, None
+
+    def _workflow_failure(
+        self,
+        terminal: TerminalWorkflow,
+        task_id: str,
+    ) -> FlowMeshWorkflowFailureError:
+        """Attach whatever FlowMesh actually said to the terminal status.
+
+        A bare "ended with status FAILED" cannot distinguish an Agent error
+        from a control-plane mismatch in which the task was accepted but never
+        dispatched to the pinned worker. ``detail`` holds only what FlowMesh
+        genuinely reported; why there is nothing more is reported separately,
+        so a failed diagnostic lookup can never be mistaken for the failure
+        itself, and an empty detail is never left to be read as "no problem
+        was reported".
+        """
+        parts: list[str] = []
+        if terminal.detail:
+            parts.append(str(terminal.detail))
+        task_parts, lookup_note = self._task_detail_parts(task_id)
+        parts.extend(task_parts)
+        detail = redact_secrets("; ".join(parts)) if parts else None
+        note = (
+            f" (no additional detail available: {redact_secrets(lookup_note)})"
+            if lookup_note
+            else ""
+        )
+        return FlowMeshWorkflowFailureError(
+            (
+                f"FlowMesh workflow {terminal.workflow_id} task {task_id} "
+                f"ended with status {terminal.status}: "
+                f"{detail or NO_FLOWMESH_DETAIL}{note}"
+            ),
+            workflow_id=terminal.workflow_id,
+            task_id=task_id,
+            terminal_status=terminal.status,
+            detail=detail,
+            lookup_note=lookup_note,
         )
 
     def _stored_run(self, session: GatewaySession) -> FlowMeshAgentRun:

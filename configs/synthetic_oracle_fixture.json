@@ -1,0 +1,79 @@
+{
+  "schema_version": "pathfinder.synthetic-oracle-fixture/v1alpha1",
+  "fixture_id": "synthetic-multi-candidate-v1",
+  "synthetic": true,
+  "eligible_for_scientific_claims": false,
+  "fixture_kind": "engineering-fixture",
+  "scenario_note": "Declared generative scenario, not a measurement. Representation quality drives task success; a physical design changes only which representation is cheap enough to be chosen. Storage and transition costs are declared constants, not measured quantities.",
+  "oracle_config": "synthetic_multi_candidate_oracle.json",
+  "seed": 4104209,
+  "representation_success_probabilities": {
+    "sampled_frames": 0.4,
+    "multimodal_digest": 0.9,
+    "scene_graph": 0.7
+  },
+  "design_order": [
+    "S_remote_baseline",
+    "S_local_digest",
+    "S_local_pair",
+    "S_local_scene_graph",
+    "S_tiered_cache"
+  ],
+  "designs": [
+    {
+      "design_id": "S_remote_baseline",
+      "representation_probabilities": {
+        "sampled_frames": 0.75,
+        "multimodal_digest": 0.15,
+        "scene_graph": 0.1
+      },
+      "storage_cost": 0.0,
+      "forward_transition_cost": 0.0,
+      "restoration_cost": 0.0
+    },
+    {
+      "design_id": "S_local_digest",
+      "representation_probabilities": {
+        "sampled_frames": 0.3,
+        "multimodal_digest": 0.65,
+        "scene_graph": 0.05
+      },
+      "storage_cost": 0.8,
+      "forward_transition_cost": 1.0,
+      "restoration_cost": 0.5
+    },
+    {
+      "design_id": "S_local_pair",
+      "representation_probabilities": {
+        "sampled_frames": 0.15,
+        "multimodal_digest": 0.55,
+        "scene_graph": 0.3
+      },
+      "storage_cost": 1.6,
+      "forward_transition_cost": 1.2,
+      "restoration_cost": 0.6
+    },
+    {
+      "design_id": "S_local_scene_graph",
+      "representation_probabilities": {
+        "sampled_frames": 0.35,
+        "multimodal_digest": 0.1,
+        "scene_graph": 0.55
+      },
+      "storage_cost": 0.9,
+      "forward_transition_cost": 2.2,
+      "restoration_cost": 1.1
+    },
+    {
+      "design_id": "S_tiered_cache",
+      "representation_probabilities": {
+        "sampled_frames": 0.45,
+        "multimodal_digest": 0.35,
+        "scene_graph": 0.2
+      },
+      "storage_cost": 0.5,
+      "forward_transition_cost": 0.8,
+      "restoration_cost": 0.4
+    }
+  ]
+}

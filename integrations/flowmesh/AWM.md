@@ -103,6 +103,33 @@ PYTHONPATH=. python -m pathfinder evaluate-awm \
   --output-dir "$PF_AWM_OUT"
 ```
 
+## Run Against the Synthetic Fixture
+
+The same command reads a synthetic fixture directory, which is useful when
+real Oracle execution is blocked. Point it at the dedicated synthetic
+contracts, never at the committed real ones:
+
+```bash
+PYTHONPATH=. python -m pathfinder generate-synthetic-oracle \
+  --fixture-config configs/synthetic_oracle_fixture.json \
+  --output-dir "$PF_SYNTHETIC_OUT/oracle"
+
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/synthetic_multi_candidate_awm.json \
+  --oracle-config configs/synthetic_multi_candidate_oracle.json \
+  --oracle-output-dir "$PF_SYNTHETIC_OUT/oracle" \
+  --output-dir "$PF_SYNTHETIC_OUT/awm"
+```
+
+`configs/synthetic_multi_candidate_awm.json` observes only the synthetic safe
+incumbent and keeps every empirical assumption disabled, exactly like the
+committed real config. Coupled AWM therefore still matches the independent
+model over the fixture: the fixture widens the *design domain*, it does not
+enable any structural coupling, and it must not be used to argue that coupling
+helps. Fixture-derived bounds, containment results, and false-safe counts are
+engineering output only; see the scientific boundary in
+[`REDUCED_ORACLE.md`](REDUCED_ORACLE.md).
+
 ## Outputs
 
 - `awm_bounds.csv`: access, group, success, cost, transition, and `Phi` bounds

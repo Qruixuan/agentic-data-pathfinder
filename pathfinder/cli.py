@@ -22,6 +22,9 @@ DEFAULT_REDUCED_ORACLE_CONFIG = Path(
 )
 DEFAULT_AWM_CONFIG = Path("configs/awm_reduced_mvp.json")
 DEFAULT_OED_CONFIG = Path("configs/oed_reduced_mvp.json")
+DEFAULT_SYNTHETIC_FIXTURE_CONFIG = Path(
+    "configs/synthetic_oracle_fixture.json"
+)
 DEFAULT_DATA_AGENT_MANIFEST = Path("configs/data_agent_manifest.json")
 DEFAULT_DATA_AGENT_OPERATION_DB = Path(
     "outputs/data_agent/operations.sqlite3"
@@ -358,6 +361,46 @@ def _parser() -> argparse.ArgumentParser:
     oed_replay.add_argument("--output-dir", type=Path, required=True)
     oed_replay.add_argument("--compact", action="store_true")
 
+    synthetic_oracle = subcommands.add_parser(
+        "generate-synthetic-oracle",
+        help=(
+            "generate a deterministic multi-candidate engineering fixture "
+            "for the offline AWM and OED consumers; never physical evidence"
+        ),
+    )
+    synthetic_oracle.add_argument(
+        "--fixture-config",
+        type=Path,
+        default=DEFAULT_SYNTHETIC_FIXTURE_CONFIG,
+    )
+    synthetic_oracle.add_argument("--output-dir", type=Path, required=True)
+    synthetic_oracle.add_argument("--compact", action="store_true")
+
+    preflight = subcommands.add_parser(
+        "preflight-flowmesh",
+        help=(
+            "read-only check that the configured FlowMesh Root sees exactly "
+            "one current worker for a requested pin"
+        ),
+    )
+    preflight.add_argument("--flowmesh-base-url")
+    preflight_pin = preflight.add_mutually_exclusive_group()
+    preflight_pin.add_argument(
+        "--worker-id",
+        help=(
+            "verify this exact worker ID is current and visible through the "
+            "configured Root; falls back to PATHFINDER_FLOWMESH_WORKER_ID"
+        ),
+    )
+    preflight_pin.add_argument(
+        "--worker-alias",
+        help=(
+            "verify this stable alias resolves to exactly one current "
+            "worker; falls back to PATHFINDER_FLOWMESH_WORKER_ALIAS"
+        ),
+    )
+    preflight.add_argument("--compact", action="store_true")
+
     gateway = subcommands.add_parser(
         "serve-flowmesh-tools",
         help="serve Pathfinder access tools over Streamable HTTP MCP",
@@ -582,6 +625,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 oracle_output_dir=args.oracle_output_dir,
                 output_dir=args.output_dir,
             )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "generate-synthetic-oracle":
+            from .synthetic_oracle import generate_synthetic_oracle_fixture
+
+            payload = generate_synthetic_oracle_fixture(
+                args.fixture_config,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "preflight-flowmesh":
+            from .integrations.flowmesh import (
+                FlowMeshSettings,
+                SdkFlowMeshClient,
+                preflight_flowmesh_worker,
+            )
+
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                worker_id=args.worker_id,
+                worker_alias=args.worker_alias,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = preflight_flowmesh_worker(client, settings)
+            finally:
+                client.close()
             return _print_payload(payload, compact=args.compact)
         if args.command == "run-oed-replay":
             from .oed import run_oed_replay

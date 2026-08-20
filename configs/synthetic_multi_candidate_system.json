@@ -1,0 +1,229 @@
+{
+  "schema_version": "1.0",
+  "price_universe_version": "synthetic-multi-candidate-v1",
+  "objective": {
+    "resource_cost_weight": 1.0
+  },
+  "representations": [
+    {
+      "id": "sampled_frames",
+      "description": "Synthetic stand-in for time-indexed sampled frames. Cheap everywhere, lowest task quality.",
+      "size_bytes": 8000000,
+      "task_quality": {"video_qa": 0.55}
+    },
+    {
+      "id": "multimodal_digest",
+      "description": "Synthetic stand-in for a structured temporal digest. Highest task quality, most placement-sensitive price.",
+      "size_bytes": 1000000,
+      "task_quality": {"video_qa": 0.9}
+    },
+    {
+      "id": "scene_graph",
+      "description": "Synthetic stand-in for an entity/relation scene graph. Intermediate quality and price.",
+      "size_bytes": 2000000,
+      "task_quality": {"video_qa": 0.75}
+    }
+  ],
+  "task_classes": [
+    {
+      "id": "video_qa",
+      "description": "Synthetic single-access question answering over one video representation.",
+      "candidate_representations": [
+        "sampled_frames",
+        "multimodal_digest",
+        "scene_graph"
+      ],
+      "access_budget": 6,
+      "max_accesses": 1,
+      "task_value": 10,
+      "quality_weight": 9,
+      "price_weight": 1.0,
+      "outside_option_utility": 2.0,
+      "choice_noise": 0.35,
+      "success_midpoint": 0.6,
+      "success_temperature": 0.12,
+      "latency_reference_ms": 250,
+      "latency_success_penalty_per_ms": 0.0
+    }
+  ],
+  "price_universes": {
+    "video_qa": {
+      "sampled_frames": [1, 2, 4],
+      "multimodal_digest": [2, 4, 6, 8],
+      "scene_graph": [2, 4, 6, 8]
+    }
+  },
+  "physical_designs": [
+    {
+      "id": "S_remote_baseline",
+      "description": "Synthetic safe incumbent: frames are near, digest and scene graph are remote and expensive.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {"video_qa": 2}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "remote_digest_service",
+          "latency_ms": 210,
+          "latency_jitter_ms": 18,
+          "realized_cost": 1.6,
+          "quotes": {"video_qa": 6}
+        },
+        "scene_graph": {
+          "available": true,
+          "location": "remote_graph_service",
+          "latency_ms": 190,
+          "latency_jitter_ms": 16,
+          "realized_cost": 1.2,
+          "quotes": {"video_qa": 6}
+        }
+      }
+    },
+    {
+      "id": "S_local_digest",
+      "description": "Synthetic candidate: only the digest is placed on node-local storage.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {"video_qa": 2}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 25,
+          "latency_jitter_ms": 4,
+          "realized_cost": 0.2,
+          "quotes": {"video_qa": 2}
+        },
+        "scene_graph": {
+          "available": true,
+          "location": "remote_graph_service",
+          "latency_ms": 190,
+          "latency_jitter_ms": 16,
+          "realized_cost": 1.2,
+          "quotes": {"video_qa": 6}
+        }
+      }
+    },
+    {
+      "id": "S_local_scene_graph",
+      "description": "Synthetic candidate: only the scene graph is placed on node-local storage.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {"video_qa": 2}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "remote_digest_service",
+          "latency_ms": 210,
+          "latency_jitter_ms": 18,
+          "realized_cost": 1.6,
+          "quotes": {"video_qa": 6}
+        },
+        "scene_graph": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 30,
+          "latency_jitter_ms": 5,
+          "realized_cost": 0.25,
+          "quotes": {"video_qa": 2}
+        }
+      }
+    },
+    {
+      "id": "S_local_pair",
+      "description": "Synthetic candidate: digest and scene graph are both placed on node-local storage.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {"video_qa": 2}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 25,
+          "latency_jitter_ms": 4,
+          "realized_cost": 0.2,
+          "quotes": {"video_qa": 2}
+        },
+        "scene_graph": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 30,
+          "latency_jitter_ms": 5,
+          "realized_cost": 0.25,
+          "quotes": {"video_qa": 2}
+        }
+      }
+    },
+    {
+      "id": "S_tiered_cache",
+      "description": "Synthetic candidate: digest and scene graph sit on an intermediate cluster cache tier.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "shared_nvme",
+          "latency_ms": 75,
+          "latency_jitter_ms": 8,
+          "realized_cost": 0.35,
+          "quotes": {"video_qa": 2}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "cluster_cache_tier",
+          "latency_ms": 90,
+          "latency_jitter_ms": 10,
+          "realized_cost": 0.6,
+          "quotes": {"video_qa": 4}
+        },
+        "scene_graph": {
+          "available": true,
+          "location": "cluster_cache_tier",
+          "latency_ms": 95,
+          "latency_jitter_ms": 10,
+          "realized_cost": 0.55,
+          "quotes": {"video_qa": 4}
+        }
+      }
+    }
+  ],
+  "quote_profiles": [
+    {
+      "id": "as_designed",
+      "description": "Use each synthetic physical design's declared quote.",
+      "overrides": {}
+    }
+  ],
+  "pilot": {
+    "design_ids": [
+      "S_remote_baseline",
+      "S_local_digest",
+      "S_local_scene_graph",
+      "S_local_pair",
+      "S_tiered_cache"
+    ],
+    "task_class_ids": ["video_qa"],
+    "quote_profile_ids": ["as_designed"],
+    "latency_multipliers": [1.0],
+    "trials_per_cell": 16,
+    "base_seed": 4101
+  }
+}

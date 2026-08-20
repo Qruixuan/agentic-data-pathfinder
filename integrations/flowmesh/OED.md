@@ -85,6 +85,54 @@ PYTHONPATH=. python -m pathfinder run-oed-replay \
   --output-dir "$PF_OED_OUT"
 ```
 
+## Run Against the Synthetic Multi-Candidate Fixture
+
+The committed two-design MVP has exactly one Reveal candidate, so random and
+value-directed Reveal cannot differ. The synthetic fixture exists to remove
+that degeneracy offline:
+
+```bash
+PYTHONPATH=. python -m pathfinder generate-synthetic-oracle \
+  --fixture-config configs/synthetic_oracle_fixture.json \
+  --output-dir "$PF_SYNTHETIC_OUT/oracle"
+
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/synthetic_multi_candidate_awm.json \
+  --oracle-config configs/synthetic_multi_candidate_oracle.json \
+  --oracle-output-dir "$PF_SYNTHETIC_OUT/oracle" \
+  --output-dir "$PF_SYNTHETIC_OUT/awm"
+
+PYTHONPATH=. python -m pathfinder run-oed-replay \
+  --oed-config configs/synthetic_multi_candidate_oed.json \
+  --awm-config configs/synthetic_multi_candidate_awm.json \
+  --oracle-config configs/synthetic_multi_candidate_oracle.json \
+  --oracle-output-dir "$PF_SYNTHETIC_OUT/oracle" \
+  --output-dir "$PF_SYNTHETIC_OUT/oed"
+```
+
+`configs/synthetic_multi_candidate_oed.json` declares four Reveal candidates
+across three tiers over a five-design domain. With `per_excursion_cap` 3.0 and
+an `exploration_budget` of 8.0, three candidates are excursion-feasible at the
+first iteration and one is blocked by the cap, so tier ordering, the
+value-per-cost rule, the cap, and the purse are all exercised rather than
+short-circuited by a single admissible option.
+
+What the fixture demonstrates is *mechanism*, not merit. On the committed
+scenario the policies genuinely diverge — `passive_awm` stops at the
+incumbent, `full_oed` reveals the best tier-0 value-per-cost candidate and
+commits as soon as its pessimistic gain clears the margin, and `random_reveal`
+takes a different, more expensive path — but `full_oed` does **not** reach the
+exhaustive-oracle design, and the pre-server gate checks for reaching the
+oracle and for beating the equal-budget baselines both report false. That is
+the honest result of the declared scenario and is reported as such. Because
+every empirical AWM assumption is disabled, `coupled_awm` equals
+`independent_box`, so `full_oed` and `black_box_reveal` are expected to
+coincide over this fixture.
+
+No policy comparison computed from the fixture is evidence of anything about
+a real system. See the scientific boundary in
+[`REDUCED_ORACLE.md`](REDUCED_ORACLE.md).
+
 ## Outputs
 
 - `oed_trace.jsonl`: complete per-iteration partitions, bounds, gains, widths,

@@ -33,6 +33,7 @@ from .contracts import (
     FlowMeshSettings,
 )
 from .gateway import TelemetryIncompleteError
+from .redaction import redact_secrets
 
 
 PILOT_SCHEMA_VERSION = "pathfinder.flowmesh-pilot/v1alpha1"
@@ -468,29 +469,9 @@ def _classify_exception(exc: Exception) -> str:
 
 
 def _safe_error_message(exc: Exception) -> str:
-    message = str(exc)
     # Third-party exceptions must not turn the research log into a credential
     # or signed-URL sink.
-    for name in (
-        "FLOWMESH_API_KEY",
-        "PATHFINDER_DATA_AGENT_TOKEN",
-        "UTU_LLM_API_KEY",
-    ):
-        value = os.getenv(name)
-        if value:
-            message = message.replace(value, "<redacted>")
-    message = re.sub(
-        r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+",
-        r"\1<redacted>",
-        message,
-    )
-    message = re.sub(
-        r"(?i)(bearer\s+)\S+",
-        r"\1<redacted>",
-        message,
-    )
-    message = re.sub(r"(https?://[^\s?]+)\?\S+", r"\1?<redacted>", message)
-    return message[:2000]
+    return redact_secrets(str(exc))
 
 
 def _offered_quotes(

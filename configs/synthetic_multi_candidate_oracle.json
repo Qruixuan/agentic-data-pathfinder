@@ -1,0 +1,76 @@
+{
+  "schema_version": "pathfinder.reduced-oracle/v1alpha1",
+  "oracle_id": "synthetic-multi-candidate-oracle-v1",
+  "workload_pilot_config": "synthetic_multi_candidate_pilot.json",
+  "safe_design_id": "S_remote_baseline",
+  "design_order": [
+    "S_remote_baseline",
+    "S_local_digest",
+    "S_local_pair",
+    "S_local_scene_graph",
+    "S_tiered_cache"
+  ],
+  "quote_profile_id": "as_designed",
+  "latency_multiplier": 1.0,
+  "repetitions": 10,
+  "base_seed": 4101,
+  "randomization_seed": 4201,
+  "horizon_sessions": 200,
+  "horizon_hours": 24,
+  "minimum_completion_rate": 1.0,
+  "materialization_root": "../data/synthetic_multi_candidate/materialized",
+  "cost_model_status": "synthetic-engineering-fixture-not-eligible-for-scientific-claims",
+  "transition_cost": {
+    "copy_cost_per_gib": 0.0,
+    "elapsed_time_cost_per_second": 0.0,
+    "foreground_loss_per_transition": 0.0,
+    "storage_cost_per_gib_hour": 0.0
+  },
+  "naive_baseline": {
+    "candidate_design_id": "S_local_digest",
+    "representation_id": "multimodal_digest",
+    "decision_margin": 0.0
+  },
+  "designs": [
+    {
+      "design_id": "S_remote_baseline",
+      "materialization_decision": "synthetic-reuse-remote-sources",
+      "placement_decision": "synthetic-remote-services",
+      "execution_decision": "synthetic-offline-generator",
+      "fixed_storage_cost": 0.0,
+      "materializations": []
+    },
+    {
+      "design_id": "S_local_digest",
+      "materialization_decision": "synthetic-materialize-digest",
+      "placement_decision": "synthetic-node-local-digest",
+      "execution_decision": "synthetic-offline-generator",
+      "fixed_storage_cost": 0.0,
+      "materializations": []
+    },
+    {
+      "design_id": "S_local_pair",
+      "materialization_decision": "synthetic-materialize-digest-and-scene-graph",
+      "placement_decision": "synthetic-node-local-pair",
+      "execution_decision": "synthetic-offline-generator",
+      "fixed_storage_cost": 0.0,
+      "materializations": []
+    },
+    {
+      "design_id": "S_local_scene_graph",
+      "materialization_decision": "synthetic-materialize-scene-graph",
+      "placement_decision": "synthetic-node-local-scene-graph",
+      "execution_decision": "synthetic-offline-generator",
+      "fixed_storage_cost": 0.0,
+      "materializations": []
+    },
+    {
+      "design_id": "S_tiered_cache",
+      "materialization_decision": "synthetic-materialize-cluster-cache-tier",
+      "placement_decision": "synthetic-cluster-cache-tier",
+      "execution_decision": "synthetic-offline-generator",
+      "fixed_storage_cost": 0.0,
+      "materializations": []
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import os
 import sqlite3
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from unittest.mock import patch
 
+from pathfinder.cli import _parser as cli_parser
 from pathfinder.config import load_config
 from pathfinder.data_agent_client import (
     DataAgentAccessRequest,
@@ -28,18 +30,30 @@ from pathfinder.integrations.flowmesh.adapter import (
     FlowMeshAgentAdapter,
     FlowMeshPinningError,
     FlowMeshRunError,
+    FlowMeshWorkflowFailureError,
     extract_agent_answer,
 )
 from pathfinder.integrations.flowmesh.client import (
     SdkFlowMeshClient,
+    TaskDetailUnavailableError,
     WorkerResolutionError,
 )
 from pathfinder.integrations.flowmesh.contracts import (
     FlowMeshAgentRunRequest,
     FlowMeshSettings,
+    FlowMeshWorkerIdentity,
     SubmittedWorkflow,
     TerminalWorkflow,
     WorkflowValidation,
+)
+from pathfinder.integrations.flowmesh.preflight import (
+    PREFLIGHT_SCHEMA_VERSION,
+    WorkerPreflightError,
+    preflight_flowmesh_worker,
+)
+from pathfinder.integrations.flowmesh.redaction import (
+    redact_secrets,
+    sanitize_endpoint,
 )
 from pathfinder.integrations.flowmesh.data_agent_backend import (
     RemoteDataAgentBackend,
@@ -74,17 +88,33 @@ def agent_spec_of(workflow: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 class FakeFlowMeshClient:
+    """A Root that answers worker questions and never mutates anything.
+
+    ``workers_by_alias`` and ``workers_by_id`` both model the same Root view:
+    an entry means the Root reports that worker as current. An ID absent from
+    ``workers_by_id`` is therefore invisible to this Root, which is exactly
+    the state a pin must refuse to run against.
+    """
+
     def __init__(
         self,
         *,
         workers_by_alias: Mapping[str, list[str]] | None = None,
+        workers_by_id: Mapping[str, list[str]] | None = None,
         validation: WorkflowValidation | None = None,
+        terminal: TerminalWorkflow | None = None,
+        task_failure: dict[str, Any] | None = None,
     ) -> None:
         self.submitted_workflow: Mapping[str, Any] | None = None
         self.validated_workflows: list[Mapping[str, Any]] = []
         self.alias_lookups: list[str] = []
+        self.worker_id_lookups: list[str] = []
+        self.task_failure_lookups: list[str] = []
         self._workers_by_alias = dict(workers_by_alias or {})
+        self._workers_by_id = dict(workers_by_id or {})
         self._validation = validation or WorkflowValidation(ok=True)
+        self._terminal = terminal
+        self._task_failure = task_failure
 
     def submit(self, workflow: Mapping[str, Any]) -> SubmittedWorkflow:
         self.submitted_workflow = workflow
@@ -97,25 +127,54 @@ class FakeFlowMeshClient:
         self.validated_workflows.append(workflow)
         return self._validation
 
-    def resolve_worker_alias(self, alias: str) -> str:
-        self.alias_lookups.append(alias)
-        matches = self._workers_by_alias.get(alias, [])
+    def describe_current_worker(
+        self,
+        *,
+        worker_id: str | None = None,
+        alias: str | None = None,
+    ) -> FlowMeshWorkerIdentity:
+        if (worker_id is None) == (alias is None):
+            raise ValueError("exactly one selector is required")
+        if alias is not None:
+            self.alias_lookups.append(alias)
+            selector, value = "alias", alias
+            matches = self._workers_by_alias.get(alias, [])
+        else:
+            self.worker_id_lookups.append(worker_id)
+            selector, value = "ID", worker_id
+            matches = self._workers_by_id.get(worker_id, [])
         if not matches:
             raise WorkerResolutionError(
-                f"FlowMesh worker alias '{alias}' matched no worker"
+                f"FlowMesh worker {selector} '{value}' matched no worker"
             )
         if len(matches) > 1:
             raise WorkerResolutionError(
-                f"FlowMesh worker alias '{alias}' matched "
+                f"FlowMesh worker {selector} '{value}' matched "
                 f"{len(matches)} workers"
             )
-        return matches[0]
+        return FlowMeshWorkerIdentity(
+            worker_id=matches[0],
+            alias=alias,
+            status="ready",
+            namespace="pathfinder-namespace",
+            cluster="pathfinder-cluster",
+            node_alias="pathfinder-node",
+        )
+
+    def resolve_worker_alias(self, alias: str) -> str:
+        return self.describe_current_worker(alias=alias).worker_id
+
+    def describe_task_failure(self, task_id: str) -> dict[str, Any] | None:
+        self.task_failure_lookups.append(task_id)
+        return self._task_failure
 
     def wait(
         self,
         workflow_id: str,
         poll_interval_seconds: float,
     ) -> TerminalWorkflow:
+        if self._terminal is not None:
+            return self._terminal
         return TerminalWorkflow(workflow_id=workflow_id, status="DONE")
 
     def retrieve_result(self, task_id: str) -> dict[str, Any]:
@@ -348,6 +407,387 @@ class SdkWorkerResolutionTest(unittest.TestCase):
         self.assertIn("wkr-16", message)
         self.assertIn("wkr-17", message)
 
+    def test_exact_worker_id_queries_the_root_with_the_same_filter(
+        self,
+    ) -> None:
+        client = self.build(["wkr-000"])
+        identity = client.describe_current_worker(worker_id="wkr-000")
+        self.assertEqual("wkr-000", identity.worker_id)
+        self.assertEqual(
+            [{"worker_id": "wkr-000", "stale": False}],
+            client._client.workers.calls,
+        )
+
+    def test_exact_worker_id_absent_from_the_root_fails_closed(self) -> None:
+        client = self.build([])
+        with self.assertRaises(WorkerResolutionError) as context:
+            client.describe_current_worker(worker_id="wkr-000")
+        self.assertIn("matched no current worker", str(context.exception))
+
+    def test_root_ignoring_the_id_filter_is_not_read_as_a_match(self) -> None:
+        """A Root that returns some other worker has not verified this pin."""
+        client = self.build(["wkr-99"])
+        with self.assertRaises(WorkerResolutionError) as context:
+            client.describe_current_worker(worker_id="wkr-000")
+        self.assertIn("matched no current worker", str(context.exception))
+
+    def test_exactly_one_selector_is_required(self) -> None:
+        client = self.build(["wkr-16"])
+        with self.assertRaises(ValueError):
+            client.describe_current_worker()
+        with self.assertRaises(ValueError):
+            client.describe_current_worker(worker_id="wkr-16", alias="pf")
+        self.assertEqual([], client._client.workers.calls)
+
+
+class DeployedSdkCompatibilityTest(unittest.TestCase):
+    """Pin what this integration assumes about flowmesh-sdk 0.1.8rc1.
+
+    Skipped when the SDK is absent so the suite stays runnable without it.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        try:
+            import flowmesh
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise unittest.SkipTest(f"flowmesh SDK is not installed: {exc}")
+        cls.flowmesh = flowmesh
+
+    def test_pinned_sdk_version_matches_the_deployed_control_plane(
+        self,
+    ) -> None:
+        self.assertEqual(
+            "0.1.8rc1",
+            getattr(type(self).flowmesh, "__version__", None),
+        )
+
+    def test_workers_list_accepts_the_filters_this_client_sends(self) -> None:
+        from flowmesh.resources.workers import Workers
+
+        parameters = inspect.signature(Workers.list).parameters
+        # Both are sent by describe_current_worker; worker_id becomes the
+        # `id` query parameter on this version.
+        self.assertIn("worker_id", parameters)
+        self.assertIn("alias", parameters)
+        self.assertIn("stale", parameters)
+
+    def test_worker_model_exposes_only_the_metadata_we_report(self) -> None:
+        from flowmesh.models.workers import Worker
+
+        fields = Worker.model_fields
+        for name in (
+            "id",
+            "alias",
+            "status",
+            "namespace",
+            "cluster",
+            "node_alias",
+        ):
+            self.assertIn(name, fields)
+        # Present on the model and deliberately never read back: these can
+        # carry deployment secrets.
+        self.assertIn("env", fields)
+
+    def test_task_failure_detail_is_available_through_a_public_method(
+        self,
+    ) -> None:
+        from flowmesh.models.tasks import TaskInfo
+        from flowmesh.resources.tasks import Tasks
+
+        self.assertTrue(callable(getattr(Tasks, "retrieve", None)))
+        self.assertFalse(Tasks.retrieve.__name__.startswith("_"))
+        for name in (
+            "status",
+            "error",
+            "last_error",
+            "attempts",
+            "max_attempts",
+            "assigned_worker",
+            "last_failed_worker",
+        ):
+            self.assertIn(name, TaskInfo.model_fields)
+
+    def test_terminal_workflow_exposes_the_task_lists_we_report(self) -> None:
+        from flowmesh.models.workflows import Workflow
+
+        for name in (
+            "status",
+            "failed_tasks",
+            "cancelled_tasks",
+            "dispatched_tasks",
+        ):
+            self.assertIn(name, Workflow.model_fields)
+
+    def test_client_exposes_workers_and_tasks_as_public_resources(
+        self,
+    ) -> None:
+        source = inspect.getsource(type(self).flowmesh.FlowMesh.__init__)
+        self.assertIn("self.workers", source)
+        self.assertIn("self.tasks", source)
+
+
+class WorkerListFallbackTest(unittest.TestCase):
+    """An SDK without the worker_id filter must not break pin verification."""
+
+    def build(self, workers: list[StubWorker], *, reject_kwargs: bool):
+        client = SdkFlowMeshClient.__new__(SdkFlowMeshClient)
+        client._client = StubSdk(workers)
+        if reject_kwargs:
+            api = client._client.workers
+            original = api.list
+
+            def strict(**filters: Any) -> list[StubWorker]:
+                if "worker_id" in filters or "alias" in filters:
+                    raise TypeError(
+                        "list() got an unexpected keyword argument"
+                    )
+                return original(**filters)
+
+            api.list = strict  # type: ignore[method-assign]
+        return client
+
+    def test_exact_id_falls_back_to_local_filtering(self) -> None:
+        client = self.build(
+            [StubWorker("wkr-000"), StubWorker("wkr-001")],
+            reject_kwargs=True,
+        )
+        identity = client.describe_current_worker(worker_id="wkr-000")
+        self.assertEqual("wkr-000", identity.worker_id)
+        # The unnarrowed current-worker list was still requested with the
+        # stale filter, and the ID was matched locally.
+        self.assertEqual(
+            [{"stale": False}],
+            client._client.workers.calls[-1:],
+        )
+
+    def test_fallback_still_fails_closed_on_an_absent_id(self) -> None:
+        client = self.build([StubWorker("wkr-999")], reject_kwargs=True)
+        with self.assertRaises(WorkerResolutionError) as context:
+            client.describe_current_worker(worker_id="wkr-000")
+        self.assertIn("matched no current worker", str(context.exception))
+
+    def test_fallback_filters_aliases_locally(self) -> None:
+        client = self.build([StubWorker("wkr-000")], reject_kwargs=True)
+        client._client.workers._workers[0].alias = "pf"
+        self.assertEqual(
+            "wkr-000",
+            client.describe_current_worker(alias="pf").worker_id,
+        )
+        with self.assertRaises(WorkerResolutionError):
+            client.describe_current_worker(alias="other")
+
+    def test_task_detail_without_a_public_method_fails_explicitly(
+        self,
+    ) -> None:
+        client = self.build([], reject_kwargs=False)
+        with self.assertRaises(TaskDetailUnavailableError) as context:
+            client.describe_task_failure("tsk-synthetic-1")
+        self.assertIn("no public tasks.retrieve", str(context.exception))
+
+
+class EndpointSanitizationTest(unittest.TestCase):
+    def test_user_info_path_and_query_are_never_echoed(self) -> None:
+        self.assertEqual(
+            "https://root.invalid:9443",
+            sanitize_endpoint(
+                "https://user:not-a-real-pat-fixture@root.invalid:9443/api/v1?token=abc"
+            ),
+        )
+
+    def test_scheme_and_host_survive_without_a_port(self) -> None:
+        self.assertEqual(
+            "http://root.invalid",
+            sanitize_endpoint("http://root.invalid/api"),
+        )
+
+    def test_unparsable_endpoint_is_reported_rather_than_guessed(
+        self,
+    ) -> None:
+        self.assertEqual("<unparsable-endpoint>", sanitize_endpoint("nonsense"))
+
+    def test_bearer_tokens_and_signed_urls_are_redacted(self) -> None:
+        redacted = redact_secrets(
+            "Authorization: Bearer not-a-real-pat-fixture while fetching "
+            "https://root.invalid/results?sig=private"
+        )
+        self.assertNotIn("not-a-real-pat-fixture", redacted)
+        self.assertNotIn("sig=private", redacted)
+        self.assertIn("<redacted>", redacted)
+
+    def test_configured_api_key_value_is_redacted(self) -> None:
+        with patch.dict("os.environ", {"FLOWMESH_API_KEY": "not-a-real-key-fixture"}):
+            self.assertNotIn(
+                "not-a-real-key-fixture",
+                redact_secrets("connect failed for not-a-real-key-fixture"),
+            )
+
+
+class WorkerPreflightTest(unittest.TestCase):
+    """The preflight is read-only: it may only ask the Root questions."""
+
+    def settings(self, **overrides: Any) -> FlowMeshSettings:
+        return FlowMeshSettings(
+            base_url="https://user:not-a-real-pat-fixture@root.invalid:9443/api",
+            **overrides,
+        )
+
+    def test_alias_matching_one_current_worker_reports_sanitized_identity(
+        self,
+    ) -> None:
+        client = FakeFlowMeshClient(workers_by_alias={"pf": ["wkr-000"]})
+        payload = preflight_flowmesh_worker(
+            client,
+            self.settings(worker_alias="pf"),
+        )
+
+        self.assertEqual(PREFLIGHT_SCHEMA_VERSION, payload["schema_version"])
+        self.assertEqual("ok", payload["status"])
+        self.assertEqual(
+            {"kind": "worker_alias", "value": "pf"},
+            payload["requested_pin"],
+        )
+        self.assertEqual(
+            {
+                "worker_id": "wkr-000",
+                "alias": "pf",
+                "status": "ready",
+                "namespace": "pathfinder-namespace",
+                "cluster": "pathfinder-cluster",
+                "node_alias": "pathfinder-node",
+            },
+            payload["worker"],
+        )
+        self.assertEqual(
+            "https://root.invalid:9443",
+            payload["endpoint"]["root_endpoint"],
+        )
+        encoded = json.dumps(payload)
+        self.assertNotIn("not-a-real-pat-fixture", encoded)
+        self.assertNotIn("/api", payload["endpoint"]["root_endpoint"])
+        # Nothing was submitted, validated, or registered.
+        self.assertIsNone(client.submitted_workflow)
+        self.assertEqual([], client.validated_workflows)
+        self.assertFalse(payload["checks"]["workflow_submitted"])
+        self.assertFalse(payload["checks"]["gateway_session_registered"])
+        self.assertFalse(payload["checks"]["mutating_api_called"])
+
+    def test_root_alignment_is_reported_as_verified_and_node_as_unproven(
+        self,
+    ) -> None:
+        client = FakeFlowMeshClient(workers_by_alias={"pf": ["wkr-000"]})
+        payload = preflight_flowmesh_worker(
+            client,
+            self.settings(worker_alias="pf"),
+        )
+        self.assertTrue(payload["checks"]["root_visibility_verified"])
+        self.assertFalse(payload["checks"]["exact_worker_id_bypassed_root"])
+        self.assertIn(
+            "node_server_and_root_agree_on_this_worker",
+            payload["not_verified"],
+        )
+        self.assertIn(
+            "worker_result_upload_endpoint_matches_this_root",
+            payload["not_verified"],
+        )
+        self.assertIn("unverified", payload["interpretation"])
+        self.assertTrue(payload["operator_next_steps"])
+
+    def test_alias_matching_no_worker_fails_closed(self) -> None:
+        client = FakeFlowMeshClient(workers_by_alias={})
+        with self.assertRaises(WorkerPreflightError) as context:
+            preflight_flowmesh_worker(
+                client,
+                self.settings(worker_alias="pf"),
+            )
+        self.assertIn("matched no worker", str(context.exception))
+
+    def test_alias_matching_many_workers_fails_closed(self) -> None:
+        client = FakeFlowMeshClient(
+            workers_by_alias={"pf": ["wkr-000", "wkr-001"]}
+        )
+        with self.assertRaises(WorkerPreflightError) as context:
+            preflight_flowmesh_worker(
+                client,
+                self.settings(worker_alias="pf"),
+            )
+        self.assertIn("matched 2 workers", str(context.exception))
+
+    def test_exact_worker_id_is_verified_through_the_root(self) -> None:
+        client = FakeFlowMeshClient(workers_by_id={"wkr-000": ["wkr-000"]})
+        payload = preflight_flowmesh_worker(
+            client,
+            self.settings(worker_id="wkr-000"),
+        )
+        self.assertEqual(
+            {"kind": "worker_id", "value": "wkr-000"},
+            payload["requested_pin"],
+        )
+        self.assertEqual("wkr-000", payload["worker"]["worker_id"])
+        self.assertEqual(["wkr-000"], client.worker_id_lookups)
+        self.assertEqual([], client.alias_lookups)
+
+    def test_exact_worker_id_absent_from_the_root_fails_closed(self) -> None:
+        client = FakeFlowMeshClient(workers_by_id={})
+        with self.assertRaises(WorkerPreflightError) as context:
+            preflight_flowmesh_worker(
+                client,
+                self.settings(worker_id="wkr-000"),
+            )
+        self.assertIn("matched no worker", str(context.exception))
+        self.assertIsNone(client.submitted_workflow)
+
+    def test_preflight_without_a_requested_pin_fails_closed(self) -> None:
+        with self.assertRaises(WorkerPreflightError) as context:
+            preflight_flowmesh_worker(FakeFlowMeshClient(), self.settings())
+        self.assertIn("nothing to verify", str(context.exception))
+
+    def test_cli_exposes_both_pin_kinds_without_a_system_config(self) -> None:
+        parser = cli_parser()
+        alias = parser.parse_args(
+            [
+                "preflight-flowmesh",
+                "--worker-alias",
+                "pf",
+                "--flowmesh-base-url",
+                "https://root.invalid:9443",
+            ]
+        )
+        self.assertEqual("preflight-flowmesh", alias.command)
+        self.assertEqual("pf", alias.worker_alias)
+        self.assertIsNone(alias.worker_id)
+
+        exact = parser.parse_args(
+            ["preflight-flowmesh", "--worker-id", "wkr-000"]
+        )
+        self.assertEqual("wkr-000", exact.worker_id)
+        self.assertIsNone(exact.worker_alias)
+
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "preflight-flowmesh",
+                    "--worker-id",
+                    "wkr-000",
+                    "--worker-alias",
+                    "pf",
+                ]
+            )
+
+    def test_preflight_error_text_is_redacted(self) -> None:
+        class LeakyClient(FakeFlowMeshClient):
+            def describe_current_worker(self, **kwargs: Any) -> Any:
+                raise RuntimeError("refused: Authorization: Bearer not-a-real-pat-fixture")
+
+        with self.assertRaises(WorkerPreflightError) as context:
+            preflight_flowmesh_worker(
+                LeakyClient(),
+                self.settings(worker_alias="pf"),
+            )
+        message = str(context.exception)
+        self.assertNotIn("not-a-real-pat-fixture", message)
+        self.assertIn("<redacted>", message)
+
 
 class AdapterTelemetryReconciliationTest(unittest.TestCase):
     """End-to-end adapter path: access, terminate, reconcile, finish."""
@@ -508,6 +948,7 @@ class AdapterTelemetryReconciliationTest(unittest.TestCase):
     def test_pin_guard_failure_fails_the_registered_session(self) -> None:
         """The pin guard now reports through the same handler as the rest."""
         client, _, gateway = self.build(settles_after=0)
+        client._workers_by_id = {"wkr-16": ["wkr-16"]}
 
         def unpinning_builder(*args: Any, **kwargs: Any) -> dict[str, Any]:
             kwargs.pop("selected_worker_id", None)
@@ -1097,7 +1538,7 @@ class FlowMeshIntegrationTest(unittest.TestCase):
         )
 
     def test_adapter_pins_explicit_worker_id(self) -> None:
-        client = FakeFlowMeshClient()
+        client = FakeFlowMeshClient(workers_by_id={"wkr-16": ["wkr-16"]})
         FlowMeshAgentAdapter(
             client,
             self.gateway,
@@ -1107,8 +1548,72 @@ class FlowMeshIntegrationTest(unittest.TestCase):
             "wkr-16",
             workflow_selected_worker(client.submitted_workflow),
         )
-        # An explicit ID must not trigger an alias lookup.
+        # An explicit ID must not trigger an alias lookup, but it must still
+        # be verified against the configured Root.
         self.assertEqual([], client.alias_lookups)
+        self.assertEqual(["wkr-16"], client.worker_id_lookups)
+
+    def test_exact_worker_id_absent_from_root_fails_without_submitting(
+        self,
+    ) -> None:
+        """The regression this closes: an ID trusted without asking the Root.
+
+        A worker the local Node Server still lists, but the configured Root
+        does not, used to produce a submitted workflow that was never
+        dispatched and failed minutes later with nothing in the worker log.
+        """
+        client = FakeFlowMeshClient(workers_by_id={})
+        with self.assertRaises(FlowMeshPinningError) as context:
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(worker_id="wkr-000"),
+            ).run(self.request())
+        self.assertIn("matched no worker", str(context.exception))
+        self.assertEqual(["wkr-000"], client.worker_id_lookups)
+        self.assertIsNone(client.submitted_workflow)
+        self.assertEqual([], client.validated_workflows)
+
+    def test_pin_verification_precedes_gateway_session_registration(
+        self,
+    ) -> None:
+        client = FakeFlowMeshClient(workers_by_id={})
+        registered: list[str] = []
+        real_register = self.gateway.register_session
+
+        def spy(request: FlowMeshAgentRunRequest) -> Any:
+            session = real_register(request)
+            registered.append(session.session_id)
+            return session
+
+        self.gateway.register_session = spy  # type: ignore[method-assign]
+        self.addCleanup(delattr, self.gateway, "register_session")
+
+        with self.assertRaises(FlowMeshPinningError):
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(worker_id="wkr-000"),
+            ).run(self.request())
+        # Nothing ran, so nothing may be left behind to audit.
+        self.assertEqual([], registered)
+        self.assertIsNone(client.submitted_workflow)
+
+    def test_client_without_root_verification_cannot_honour_a_pin(
+        self,
+    ) -> None:
+        class UnverifiableClient(FakeFlowMeshClient):
+            describe_current_worker = None  # type: ignore[assignment]
+
+        client = UnverifiableClient()
+        with self.assertRaises(FlowMeshPinningError) as context:
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(worker_id="wkr-16"),
+            ).run(self.request())
+        self.assertIn("configured Root", str(context.exception))
+        self.assertIsNone(client.submitted_workflow)
 
     def test_adapter_resolves_alias_to_current_worker_id(self) -> None:
         client = FakeFlowMeshClient(workers_by_alias={"pf": ["wkr-42"]})
@@ -1163,6 +1668,258 @@ class FlowMeshIntegrationTest(unittest.TestCase):
             workflow_selected_worker(client.submitted_workflow)
         )
         self.assertEqual([], client.alias_lookups)
+
+    # ---------------------------------------------------------------- #
+    # Terminal failure diagnostics
+    # ---------------------------------------------------------------- #
+
+    def test_terminal_failure_carries_flowmesh_reported_detail(self) -> None:
+        client = FakeFlowMeshClient(
+            terminal=TerminalWorkflow(
+                workflow_id="wfl-synthetic-1",
+                status="FAILED",
+                failed_task_ids=("tsk-synthetic-1",),
+                detail="the Root never recorded a dispatched task",
+            ),
+            task_failure={
+                "task_status": "FAILED",
+                "attempts": 1,
+                "detail": "no worker accepted the task",
+                "assigned_worker": None,
+            },
+        )
+        with self.assertRaises(FlowMeshWorkflowFailureError) as context:
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(),
+            ).run(self.request())
+
+        error = context.exception
+        self.assertEqual("wfl-synthetic-1", error.workflow_id)
+        self.assertEqual("tsk-test", error.task_id)
+        self.assertEqual("FAILED", error.terminal_status)
+        message = str(error)
+        self.assertIn("wfl-synthetic-1", message)
+        self.assertIn("tsk-test", message)
+        self.assertIn("FAILED", message)
+        self.assertIn("never recorded a dispatched task", message)
+        self.assertIn("no worker accepted the task", message)
+        self.assertEqual(["tsk-test"], client.task_failure_lookups)
+
+    def test_terminal_failure_without_detail_directs_the_operator(
+        self,
+    ) -> None:
+        client = FakeFlowMeshClient(
+            terminal=TerminalWorkflow(
+                workflow_id="wfl-synthetic-1",
+                status="FAILED",
+            ),
+            task_failure=None,
+        )
+        with self.assertRaises(FlowMeshWorkflowFailureError) as context:
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(),
+            ).run(self.request())
+
+        message = str(context.exception)
+        self.assertIsNone(context.exception.detail)
+        self.assertIn("returned no failure detail", message)
+        self.assertIn("Root scheduling state", message)
+        self.assertIn("Node Server dispatch", message)
+        self.assertIn("worker's logs", message)
+
+    def test_terminal_failure_detail_is_redacted(self) -> None:
+        client = FakeFlowMeshClient(
+            terminal=TerminalWorkflow(
+                workflow_id="wfl-1",
+                status="FAILED",
+                detail="upload rejected: Authorization: Bearer not-a-real-pat-fixture",
+            ),
+        )
+        with self.assertRaises(FlowMeshWorkflowFailureError) as context:
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(),
+            ).run(self.request())
+        message = str(context.exception)
+        self.assertNotIn("not-a-real-pat-fixture", message)
+        self.assertIn("<redacted>", message)
+
+    def test_task_detail_lookup_failure_does_not_mask_the_workflow_failure(
+        self,
+    ) -> None:
+        class ExplodingDetailClient(FakeFlowMeshClient):
+            def describe_task_failure(self, task_id: str) -> Any:
+                raise RuntimeError("task API unavailable")
+
+        client = ExplodingDetailClient(
+            terminal=TerminalWorkflow(workflow_id="wfl-1", status="FAILED"),
+        )
+        with self.assertRaises(FlowMeshWorkflowFailureError) as context:
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(),
+            ).run(self.request())
+        message = str(context.exception)
+        self.assertIn("ended with status FAILED", message)
+        self.assertIn("task detail lookup failed", message)
+
+    def test_client_without_task_detail_still_reports_the_failure(
+        self,
+    ) -> None:
+        class LegacyClient(FakeFlowMeshClient):
+            describe_task_failure = None  # type: ignore[assignment]
+
+        client = LegacyClient(
+            terminal=TerminalWorkflow(workflow_id="wfl-1", status="FAILED"),
+        )
+        with self.assertRaises(FlowMeshWorkflowFailureError) as context:
+            FlowMeshAgentAdapter(
+                client,
+                self.gateway,
+                FlowMeshSettings(),
+            ).run(self.request())
+        self.assertIn("returned no failure detail", str(context.exception))
+        self.assertIn(
+            "no additional detail available",
+            str(context.exception),
+        )
+
+    def _failing_detail_client(self, exception: Exception) -> Any:
+        outer = self
+
+        class FailingDetailClient(FakeFlowMeshClient):
+            def describe_task_failure(self, task_id: str) -> Any:
+                outer.assertEqual("tsk-test", task_id)
+                raise exception
+
+        return FailingDetailClient(
+            terminal=TerminalWorkflow(
+                workflow_id="wfl-synthetic-1",
+                status="FAILED",
+                failed_task_ids=("tsk-synthetic-1",),
+                detail="root-reported failed tasks: tsk-synthetic-1",
+            ),
+        )
+
+    def test_every_detail_lookup_failure_preserves_the_terminal_failure(
+        self,
+    ) -> None:
+        """Timeout, 401/403, 404, malformed response, SDK incompatibility."""
+        cases = {
+            "timeout": TimeoutError("read timed out after 30s"),
+            "unauthorized": RuntimeError("401 Unauthorized"),
+            "forbidden": RuntimeError("403 Forbidden"),
+            "not_found": RuntimeError("404 task not found"),
+            "incompatible_sdk": TypeError(
+                "retrieve() got an unexpected keyword argument"
+            ),
+            "malformed": ValueError("response is not valid JSON"),
+            "attribute": AttributeError("'FlowMesh' object has no 'tasks'"),
+        }
+        for label, exception in cases.items():
+            with self.subTest(failure=label):
+                client = self._failing_detail_client(exception)
+                with self.assertRaises(
+                    FlowMeshWorkflowFailureError
+                ) as context:
+                    FlowMeshAgentAdapter(
+                        client,
+                        self.gateway,
+                        FlowMeshSettings(),
+                    ).run(self.request(trial_id=f"detail-{label}"))
+
+                error = context.exception
+                # The original terminal failure survives intact.
+                self.assertEqual("wfl-synthetic-1", error.workflow_id)
+                self.assertEqual("tsk-test", error.task_id)
+                self.assertEqual("FAILED", error.terminal_status)
+                self.assertIn("tsk-synthetic-1", error.detail or "")
+                message = str(error)
+                self.assertIn("ended with status FAILED", message)
+                self.assertIn("root-reported failed tasks", message)
+                self.assertIn("no additional detail available", message)
+                self.assertIn(type(exception).__name__, message)
+                # The diagnostic exception is described, never propagated in
+                # place of the workflow failure it was meant to explain.
+                self.assertIsNot(error, exception)
+                self.assertIsInstance(error, FlowMeshWorkflowFailureError)
+                self.assertIsNone(error.__cause__)
+
+    def test_a_malformed_detail_response_is_reported_not_trusted(
+        self,
+    ) -> None:
+        for label, payload in (
+            ("string", "unexpected string payload"),
+            ("list", ["unexpected", "list"]),
+            ("empty", {}),
+            ("all_none", {"detail": None, "attempts": None}),
+            ("none", None),
+        ):
+            with self.subTest(payload=label):
+                client = FakeFlowMeshClient(
+                    terminal=TerminalWorkflow(
+                        workflow_id="wfl-synthetic-1",
+                        status="FAILED",
+                    ),
+                    task_failure=payload,
+                )
+                with self.assertRaises(
+                    FlowMeshWorkflowFailureError
+                ) as context:
+                    FlowMeshAgentAdapter(
+                        client,
+                        self.gateway,
+                        FlowMeshSettings(),
+                    ).run(self.request(trial_id=f"malformed-{label}"))
+                message = str(context.exception)
+                self.assertIn("ended with status FAILED", message)
+                self.assertIn("no additional detail available", message)
+                self.assertIsNone(context.exception.detail)
+
+    def test_no_credential_value_appears_in_a_diagnostic_failure(
+        self,
+    ) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "FLOWMESH_API_KEY": "not-a-real-pat-fixture",
+                "PATHFINDER_DATA_AGENT_TOKEN": "not-a-real-token-fixture",
+            },
+        ):
+            client = self._failing_detail_client(
+                RuntimeError(
+                    "401 for Authorization: Bearer not-a-real-pat-fixture at "
+                    "https://root.invalid/tasks/x?sig=private "
+                    "(token not-a-real-token-fixture)"
+                )
+            )
+            with self.assertRaises(FlowMeshWorkflowFailureError) as context:
+                FlowMeshAgentAdapter(
+                    client,
+                    self.gateway,
+                    FlowMeshSettings(),
+                ).run(self.request())
+
+            error = context.exception
+            for rendering in (
+                str(error),
+                error.detail or "",
+                error.lookup_note or "",
+            ):
+                self.assertNotIn("not-a-real-pat-fixture", rendering)
+                self.assertNotIn("not-a-real-token-fixture", rendering)
+                self.assertNotIn("sig=private", rendering)
+            self.assertIn("<redacted>", str(error))
+            # The failure is still fully identified despite the redaction.
+            self.assertIn("wfl-synthetic-1", str(error))
+            self.assertIn("tsk-test", str(error))
+            self.assertIn("FAILED", str(error))
 
     # ---------------------------------------------------------------- #
     # Workflow validation

@@ -18,6 +18,7 @@ from ..integrations.flowmesh.pilot import (
     validate_flowmesh_pilot_config,
 )
 from ..models import SystemConfig
+from ..synthetic_marker import assert_not_synthetic_fixture
 from .contracts import ReducedOracleConfig, ReducedOracleConfigError
 from .objective import analyze_reduced_oracle
 from .transition import FilesystemTransitionExecutor
@@ -174,6 +175,10 @@ def run_reduced_oracle(
             )
 
     output = Path(output_dir).resolve()
+    # Refuse before mkdir: appending real sessions into a fixture's
+    # designs/<id>/runs.jsonl would mix generated and measured records in one
+    # file with no way to separate them afterwards.
+    assert_not_synthetic_fixture(output, command="run-reduced-oracle")
     output.mkdir(parents=True, exist_ok=True)
     plan_path = output / "oracle_plan.json"
     transitions_path = output / "transitions.jsonl"

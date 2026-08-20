@@ -15,6 +15,7 @@ from ..integrations.flowmesh.pilot import (
     load_pilot_records,
 )
 from ..models import SystemConfig
+from ..synthetic_marker import assert_not_synthetic_fixture
 from .contracts import ReducedOracleConfig, load_reduced_oracle_config
 
 
@@ -322,6 +323,9 @@ def analyze_reduced_oracle(
         else config
     )
     output = Path(output_dir).resolve()
+    # Checked before any read of the design records and long before the first
+    # write: this function replaces oracle_table.csv in place.
+    assert_not_synthetic_fixture(output, command="analyze-reduced-oracle")
     workload_pilot = load_flowmesh_pilot_config(
         resolved.workload_pilot_config_path
     )

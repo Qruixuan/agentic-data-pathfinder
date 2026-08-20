@@ -1,0 +1,34 @@
+{
+  "schema_version": "pathfinder.oed/v1alpha1",
+  "controller_id": "synthetic-multi-candidate-oed-v1",
+  "commit_margin": 0.0,
+  "reveal_margin": 0.0,
+  "exploration_budget": 8.0,
+  "per_excursion_cap": 3.0,
+  "max_iterations": 8,
+  "random_seed": 4301,
+  "cost_model_status": "synthetic-engineering-fixture-not-eligible-for-scientific-claims",
+  "reveal_candidates": [
+    {
+      "design_id": "S_local_digest",
+      "reveal_tier": "simultaneous-canonical",
+      "probe_window_loss": 0.5
+    },
+    {
+      "design_id": "S_local_pair",
+      "reveal_tier": "simultaneous-canonical",
+      "probe_window_loss": 0.4
+    },
+    {
+      "design_id": "S_tiered_cache",
+      "reveal_tier": "fallback",
+      "probe_window_loss": 0.25
+    },
+    {
+      "design_id": "S_local_scene_graph",
+      "reveal_tier": "pair-canonical",
+      "probe_window_loss": 1.2
+    }
+  ],
+  "other_design_ids": []
+}

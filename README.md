@@ -150,7 +150,15 @@ The coupling layer includes:
 - an MCP access gateway with persistent session state;
 - atomic budget and access-count checks for the local MVP;
 - worker pinning by exact ID or stable alias, so a session cannot run on an
-  unrelated worker of a shared deployment;
+  unrelated worker of a shared deployment; both pin kinds are verified against
+  the configured Root before a Gateway session is registered or a workflow is
+  submitted, so an exact ID never bypasses Root visibility;
+- a read-only `preflight-flowmesh` control-plane check that reports sanitized
+  endpoint identity and non-secret worker metadata, and states plainly that
+  Node Server / worker alignment cannot be proven through that API;
+- terminal workflow failures enriched with the workflow ID, task ID, terminal
+  status, and redacted FlowMesh-reported detail — or an explicit statement
+  that FlowMesh reported none;
 - workflow validation that does not submit or execute a task;
 - a frozen, block-randomized real-FlowMesh pilot runner with durable per-trial
   records, fail-closed telemetry classification, and resume support;
@@ -182,6 +190,16 @@ confidence sets, baselines, and held-out evaluation are documented in
 The offline Commit/Reveal/Hold/Stop controller, equal-budget baselines, replay
 contract, and Gate B4 boundary are documented in
 [`integrations/flowmesh/OED.md`](integrations/flowmesh/OED.md).
+
+`generate-synthetic-oracle` builds a deterministic five-design engineering
+fixture in the Reduced Oracle output shape, so `evaluate-awm` and
+`run-oed-replay` can be exercised over a genuinely multi-candidate Reveal
+domain with no FlowMesh, Data Agent, MCP, or LLM dependency. Every generated
+record, table row, and manifest carries `synthetic=true` and
+`eligible_for_scientific_claims=false`, and the fixture schema refuses to load
+a config that claims otherwise. Nothing it produces is evidence about a real
+system. See
+[`integrations/flowmesh/REDUCED_ORACLE.md`](integrations/flowmesh/REDUCED_ORACLE.md#offline-multi-candidate-synthetic-fixture).
 
 The Gateway can also use the versioned HTTP `DataAgentClient` and included
 single-node Data Agent server instead of the emulated backend. The server
@@ -250,13 +268,19 @@ pathfinder/
   experiment.py   single-session and factorial pilot runners
   telemetry.py    JSONL persistence and CSV aggregation
   cli.py          command-line interface
+  synthetic_oracle/
+                  deterministic engineering fixtures for the offline
+                  Oracle/AWM/OED pipeline; never physical evidence
   integrations/
-    flowmesh/      FlowMesh SDK, workflow, gateway, and MCP adapters
+    flowmesh/      FlowMesh SDK, workflow, gateway, MCP adapters, read-only
+                   control-plane preflight, and redaction helpers
 
 configs/
   minimal_system.json
   data_agent_manifest.json
   data_object_catalog.example.json
+  synthetic_oracle_fixture.json
+  synthetic_multi_candidate_*.json
 
 integrations/
   data_agent/      Data Agent HTTP protocol
@@ -266,6 +290,7 @@ tests/
   test_data_agent_client.py
   test_minimal_system.py
   test_flowmesh_integration.py
+  test_synthetic_oracle.py
 ```
 
 ## Scientific Boundary
@@ -274,6 +299,14 @@ The default workload is synthetic. Passing this harness only demonstrates that
 the implementation can express and measure the proposed causal chain. It does
 not establish that a real LLM agent has access elasticity or that quoted price
 is sufficient for real physical latency.
+
+The `generate-synthetic-oracle` fixture sits further outside that boundary
+again: it is generated from declared parameters rather than measured at all.
+Its designs, response rates, storage costs, and transition costs are stipulated
+constants, so no `Phi(D)`, regret, gate check, or policy ranking computed from
+it says anything about a real system. It exists solely so the offline AWM and
+OED code paths can be exercised over a multi-candidate domain while real Oracle
+execution is unavailable.
 
 The next research step is to replace `SimulatedAgent` with a fixed real-agent
 adapter and replace selected `LocalDataAgent` paths with real representations,

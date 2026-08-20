@@ -1,0 +1,35 @@
+{
+  "schema_version": "pathfinder.awm/v1alpha1",
+  "model_id": "synthetic-multi-candidate-awm-v1",
+  "confidence_level": 0.9,
+  "holdout_repetitions": 1,
+  "observed_design_ids": ["S_remote_baseline"],
+  "minimum_training_sessions": 120,
+  "maximum_excluded_training_fraction": 0.0,
+  "maximum_excluded_holdout_fraction": 0.0,
+  "substitution_groups": [
+    ["sampled_frames", "multimodal_digest", "scene_graph"]
+  ],
+  "assumptions": {
+    "own_price_monotonicity": {
+      "enabled": false,
+      "status": "disabled-synthetic-fixture-never-validated"
+    },
+    "substitution_group_monotonicity": {
+      "enabled": false,
+      "status": "disabled-synthetic-fixture-never-validated"
+    },
+    "success_monotonicity": {
+      "enabled": false,
+      "status": "disabled-synthetic-fixture-never-validated"
+    },
+    "quoted_price_sufficiency": {
+      "enabled": false,
+      "status": "disabled-synthetic-fixture-never-validated"
+    }
+  },
+  "own_price_requires_other_quotes_equal": true,
+  "cost_relative_radius": 0.1,
+  "transition_relative_radius": 0.1,
+  "commit_margin": 0.0
+}

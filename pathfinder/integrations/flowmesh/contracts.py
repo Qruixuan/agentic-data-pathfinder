@@ -124,9 +124,39 @@ class SubmittedWorkflow:
 
 
 @dataclass(frozen=True)
+class FlowMeshWorkerIdentity:
+    """Non-secret worker metadata as the configured Root reports it.
+
+    Deliberately excludes the worker environment, tags, and hardware block:
+    those can carry deployment secrets, and none of them are needed to decide
+    whether a requested pin names exactly one current worker.
+    """
+
+    worker_id: str
+    alias: str | None = None
+    status: str | None = None
+    namespace: str | None = None
+    cluster: str | None = None
+    node_alias: str | None = None
+
+    def to_public_dict(self) -> dict[str, str | None]:
+        return {
+            "worker_id": self.worker_id,
+            "alias": self.alias,
+            "status": self.status,
+            "namespace": self.namespace,
+            "cluster": self.cluster,
+            "node_alias": self.node_alias,
+        }
+
+
+@dataclass(frozen=True)
 class TerminalWorkflow:
     workflow_id: str
     status: str
+    failed_task_ids: tuple[str, ...] = ()
+    cancelled_task_ids: tuple[str, ...] = ()
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +191,23 @@ class FlowMeshClientProtocol(Protocol):
 
         Must raise unless exactly one worker matches.
         """
+
+    def describe_current_worker(
+        self,
+        *,
+        worker_id: str | None = None,
+        alias: str | None = None,
+    ) -> FlowMeshWorkerIdentity:
+        """Return the one current worker the configured Root reports.
+
+        Exactly one of ``worker_id`` or ``alias`` must be supplied. Must raise
+        unless the configured Root reports exactly one current (non-stale)
+        match: an exact ID is a request to verify a pin, never a licence to
+        skip Root visibility.
+        """
+
+    def describe_task_failure(self, task_id: str) -> dict[str, Any] | None:
+        """Return read-only terminal failure detail for one task, if any."""
 
     def wait(
         self,

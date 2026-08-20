@@ -35,7 +35,8 @@ ground-truth quality, or expected latency from the gateway.
 - `Dockerfile.worker-overlay` copies that definition into an existing
   agent-capable FlowMesh worker image.
 - `pathfinder/integrations/flowmesh/` contains the SDK client, workflow
-  builder, access gateway, SQLite session store, adapter, and MCP server.
+  builder, access gateway, SQLite session store, adapter, MCP server, the
+  read-only control-plane preflight, and the shared redaction helpers.
 
 ## 1. Install the Local Integration
 
@@ -173,6 +174,73 @@ one current** worker — zero or several matches raise `FlowMeshPinningError` an
 nothing is submitted. Pathfinder never falls back to an unpinned run, because
 that would place an experiment task on an arbitrary shared worker and silently
 invalidate the session.
+
+An exact `--worker-id` is verified the same way, through
+`workers.list(worker_id=..., stale=False)` against the configured Root. It no
+longer bypasses Root visibility. The failure this closes is specific: a worker
+that the **local Node API still lists** but the **Root cannot see** used to be
+accepted verbatim, producing a workflow that submits successfully, is never
+dispatched, fails minutes later, and leaves nothing at all in the worker log.
+Verification happens before the Gateway session is registered and before
+anything is submitted, so a pin the Root cannot confirm leaves no session row
+and no workflow behind. The returned identity is also re-checked client side,
+so a Root that ignored the ID filter and answered with some other worker is
+not read as a match.
+
+### Preflight the control plane before a run
+
+`preflight-flowmesh` answers the "is this pin actually dispatchable?" question
+without submitting anything:
+
+```bash
+PYTHONPATH=. python -m pathfinder preflight-flowmesh \
+  --worker-alias "$PF_CONFIRM_WORKER_ALIAS" \
+  --flowmesh-base-url "$FLOWMESH_BASE_URL"
+
+PYTHONPATH=. python -m pathfinder preflight-flowmesh \
+  --worker-id wkr-000 \
+  --flowmesh-base-url "$FLOWMESH_BASE_URL"
+```
+
+It performs one read: `workers.list(..., stale=False)` against the configured
+Root. It never submits or validates a workflow, never registers a Gateway
+session, and never calls a mutating worker, node, or task API. It fails closed
+unless the Root reports exactly one current worker.
+
+The JSON report contains a sanitized endpoint identity (scheme, host, and port
+only — user info, path, and query are stripped, and a digest is included for
+correlation) plus non-secret worker metadata: ID, alias, status, namespace,
+cluster, and node alias. The worker `env`, tags, and hardware blocks are never
+read back, because they can carry deployment secrets.
+
+**What the report does and does not establish.** A successful preflight proves
+Root visibility only. It explicitly reports as *unverified*:
+
+- that the local Node Server and this Root agree on this worker;
+- that the worker's result-upload endpoint matches this Root;
+- that a dispatched task will actually reach the worker; and
+- that the worker's Agent config and MCP URL are correct.
+
+Those cannot be proven through this API, so the command never claims Node and
+Root are aligned. Confirm the worker's own Root registration, and confirm the
+worker logs a received task, before treating scheduling as healthy.
+
+### Reading a terminal workflow failure
+
+When a submitted workflow reaches a non-`DONE` terminal state, Pathfinder
+raises `FlowMeshWorkflowFailureError` carrying the workflow ID, the task ID,
+the terminal status, and whatever FlowMesh actually reported — the Root's
+failed/cancelled task lists, whether any task was ever dispatched, and the
+task's own `error`/`last_error`, attempts, and last failed worker read back
+through a plain `GET /tasks/{id}`. All of it is redacted before it is shown or
+recorded.
+
+If FlowMesh reports nothing, the error says so explicitly and directs the
+operator to inspect Root scheduling state, Node Server dispatch, and the
+pinned worker's logs, rather than leaving an empty detail to be misread as "no
+problem was reported". A workflow that fails while the worker never logs a
+received task is a Root/Node control-plane mismatch, not an Agent, MCP, or
+Data Agent failure.
 
 ### Why every workflow is a one-node graph
 
@@ -366,6 +434,11 @@ Rotate through the secret manager, not by editing files in this repository.
   worker-tenant isolation, so pinning a Pathfinder task to a worker does not
   stop unrelated tasks being dispatched to that same worker. Monitor the
   worker during a run rather than assuming exclusivity.
+- `preflight-flowmesh` verifies Root visibility and nothing more. It cannot
+  prove Node Server / worker / Root alignment, cannot prove a task will be
+  dispatched, and does not check the worker's Agent config or MCP URL. A
+  passing preflight is a necessary, not sufficient, condition for a healthy
+  run. See [Preflight the control plane before a run](#preflight-the-control-plane-before-a-run).
 - The task's declared `cpu` and `memory` are scheduling requests, not enforced
   container limits on v0.1.8-rc.1. See
   [Declared resources are scheduling requests, not enforced limits](#declared-resources-are-scheduling-requests-not-enforced-limits).
