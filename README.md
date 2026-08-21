@@ -24,6 +24,13 @@ The staged experiment and acceptance criteria for moving from the completed
 FlowMesh smoke tests to full Performative Physical Design validation are in
 [PPD_VALIDATION_PROTOCOL.md](PPD_VALIDATION_PROTOCOL.md).
 
+The first preregistered four-design controlled testbed run is defined in
+[MULTI_CANDIDATE_FORMAL_V1_PREREGISTRATION.md](MULTI_CANDIDATE_FORMAL_V1_PREREGISTRATION.md).
+It contains 128 real FlowMesh sessions, paired AWM train/holdout partitions,
+and a three-candidate OED comparison. Its origin/local topology and unit costs
+remain controlled single-node interventions; distributed placement is a later
+gate.
+
 ## Current Scope
 
 The included experiment domain has:

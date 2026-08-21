@@ -136,6 +136,9 @@ engineering output only; see the scientific boundary in
   for every model/design pair;
 - `holdout_truth.json`: the empirical complete response vector hidden from
   model fitting;
+- `holdout_truth_by_repetition.json`: the same hidden truth reported
+  separately for every paired holdout repetition, so rank instability is not
+  concealed by aggregation;
 - `awm_evaluation.json`: joint response-vector containment, `Phi` containment,
   mean width, Commit decisions, and `false_safe_commit` counts; and
 - `awm_manifest.json`: input hashes, split sizes, exclusions, and output paths.

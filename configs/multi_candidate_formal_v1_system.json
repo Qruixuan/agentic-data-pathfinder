@@ -1,0 +1,158 @@
+{
+  "schema_version": "1.0",
+  "price_universe_version": "multi-candidate-formal-v1",
+  "objective": {
+    "resource_cost_weight": 1.0
+  },
+  "representations": [
+    {
+      "id": "sampled_frames",
+      "description": "Question-independent, time-indexed frame observations sampled from the source video.",
+      "size_bytes": 8000000,
+      "task_quality": {"video_qa": 0.7}
+    },
+    {
+      "id": "multimodal_digest",
+      "description": "Question-independent structured temporal digest with events and captions.",
+      "size_bytes": 1000000,
+      "task_quality": {"video_qa": 0.95}
+    }
+  ],
+  "task_classes": [
+    {
+      "id": "video_qa",
+      "description": "Answer a question using one agent-readable video representation.",
+      "candidate_representations": [
+        "sampled_frames",
+        "multimodal_digest"
+      ],
+      "access_budget": 6,
+      "max_accesses": 1,
+      "task_value": 10,
+      "quality_weight": 9,
+      "price_weight": 1.0,
+      "outside_option_utility": 2.0,
+      "choice_noise": 0.35,
+      "success_midpoint": 0.6,
+      "success_temperature": 0.12,
+      "latency_reference_ms": 250,
+      "latency_success_penalty_per_ms": 0.0
+    }
+  ],
+  "price_universes": {
+    "video_qa": {
+      "sampled_frames": [1, 2, 4],
+      "multimodal_digest": [2, 4, 6, 8]
+    }
+  },
+  "physical_designs": [
+    {
+      "id": "D_origin_remote",
+      "description": "Certified safe baseline: both representations remain on their controlled origin-service paths.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "origin_frame_service",
+          "latency_ms": 160,
+          "latency_jitter_ms": 14,
+          "realized_cost": 0.9,
+          "quotes": {"video_qa": 4}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "origin_digest_service",
+          "latency_ms": 210,
+          "latency_jitter_ms": 18,
+          "realized_cost": 1.6,
+          "quotes": {"video_qa": 6}
+        }
+      }
+    },
+    {
+      "id": "D_local_frames",
+      "description": "Materialize sampled frames on the consumer-local tier while leaving the digest at origin.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 20,
+          "latency_jitter_ms": 4,
+          "realized_cost": 0.15,
+          "quotes": {"video_qa": 1}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "origin_digest_service",
+          "latency_ms": 210,
+          "latency_jitter_ms": 18,
+          "realized_cost": 1.6,
+          "quotes": {"video_qa": 6}
+        }
+      }
+    },
+    {
+      "id": "D_local_digest",
+      "description": "Materialize the digest on the consumer-local tier while leaving sampled frames at origin.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "origin_frame_service",
+          "latency_ms": 160,
+          "latency_jitter_ms": 14,
+          "realized_cost": 0.9,
+          "quotes": {"video_qa": 4}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 25,
+          "latency_jitter_ms": 4,
+          "realized_cost": 0.2,
+          "quotes": {"video_qa": 2}
+        }
+      }
+    },
+    {
+      "id": "D_local_pair",
+      "description": "Materialize both sampled frames and digest on the consumer-local tier.",
+      "paths": {
+        "sampled_frames": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 20,
+          "latency_jitter_ms": 4,
+          "realized_cost": 0.15,
+          "quotes": {"video_qa": 1}
+        },
+        "multimodal_digest": {
+          "available": true,
+          "location": "local_nvme",
+          "latency_ms": 25,
+          "latency_jitter_ms": 4,
+          "realized_cost": 0.2,
+          "quotes": {"video_qa": 2}
+        }
+      }
+    }
+  ],
+  "quote_profiles": [
+    {
+      "id": "as_designed",
+      "description": "Use the preregistered quote of each complete physical design.",
+      "overrides": {}
+    }
+  ],
+  "pilot": {
+    "design_ids": [
+      "D_origin_remote",
+      "D_local_frames",
+      "D_local_digest",
+      "D_local_pair"
+    ],
+    "task_class_ids": ["video_qa"],
+    "quote_profile_ids": ["as_designed"],
+    "latency_multipliers": [1.0],
+    "trials_per_cell": 32,
+    "base_seed": 12001
+  }
+}

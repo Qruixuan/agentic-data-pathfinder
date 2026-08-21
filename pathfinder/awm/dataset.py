@@ -43,6 +43,7 @@ class AWMDataset:
     representation_ids: tuple[str, ...]
     training: dict[str, DesignSample]
     holdout: dict[str, DesignSample]
+    holdout_by_repetition: dict[int, dict[str, DesignSample]]
     storage_costs: dict[str, float]
     forward_transition_costs: dict[str, float]
     restoration_transition_costs: dict[str, float]
@@ -208,6 +209,10 @@ def load_oracle_dataset(
     holdout_start = oracle_config.repetitions - model_config.holdout_repetitions
     training: dict[str, DesignSample] = {}
     holdout: dict[str, DesignSample] = {}
+    holdout_by_repetition: dict[int, dict[str, DesignSample]] = {
+        repetition: {}
+        for repetition in range(holdout_start, oracle_config.repetitions)
+    }
     representation_ids = task_class.candidate_representations
     for design_id in oracle_config.design_ids:
         records = audit_pilot_records(
@@ -248,6 +253,17 @@ def load_oracle_dataset(
             representation_ids=representation_ids,
             groups=model_config.substitution_groups,
         )
+        for repetition in holdout_by_repetition:
+            holdout_by_repetition[repetition][design_id] = _sample(
+                design_id,
+                (
+                    record
+                    for record in holdout_rows
+                    if int(record["repetition"]) == repetition
+                ),
+                representation_ids=representation_ids,
+                groups=model_config.substitution_groups,
+            )
         if (
             design_id in model_config.observed_design_ids
             and training[design_id].eligible_sessions
@@ -294,6 +310,7 @@ def load_oracle_dataset(
         representation_ids=representation_ids,
         training=training,
         holdout=holdout,
+        holdout_by_repetition=holdout_by_repetition,
         storage_costs={
             design_id: float(table[design_id]["storage_cost"])
             for design_id in oracle_config.design_ids

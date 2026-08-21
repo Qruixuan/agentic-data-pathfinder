@@ -179,6 +179,19 @@ def evaluate_awm(
         )
         for design_id in dataset.design_ids
     }
+    truths_by_repetition = {
+        str(repetition): {
+            design_id: holdout_truth(
+                dataset,
+                design_id,
+                samples[design_id],
+            )
+            for design_id in dataset.design_ids
+        }
+        for repetition, samples in sorted(
+            dataset.holdout_by_repetition.items()
+        )
+    }
     models = {
         model_kind: AdaptiveWorkloadModel(
             dataset,
@@ -198,9 +211,13 @@ def evaluate_awm(
     bounds_path = output / "awm_bounds.csv"
     evaluation_path = output / "awm_evaluation.json"
     truth_path = output / "holdout_truth.json"
+    truth_by_repetition_path = (
+        output / "holdout_truth_by_repetition.json"
+    )
     manifest_path = output / "awm_manifest.json"
     _write_csv(rows, bounds_path)
     _write_json(truths, truth_path)
+    _write_json(truths_by_repetition, truth_by_repetition_path)
     evaluation = {
         "schema_version": AWM_EVALUATION_SCHEMA_VERSION,
         "model_id": resolved_model.model_id,
@@ -208,6 +225,9 @@ def evaluate_awm(
         "confidence_method": "joint-bonferroni-wilson",
         "coverage_unit": "complete-heldout-design-response-vector",
         "holdout_repetitions": resolved_model.holdout_repetitions,
+        "holdout_repetition_ids": [
+            int(value) for value in truths_by_repetition
+        ],
         "observed_design_ids": list(resolved_model.observed_design_ids),
         "assumptions": {
             name: {
@@ -250,6 +270,9 @@ def evaluate_awm(
         "bounds_path": str(bounds_path),
         "evaluation_path": str(evaluation_path),
         "holdout_truth_path": str(truth_path),
+        "holdout_truth_by_repetition_path": str(
+            truth_by_repetition_path
+        ),
         "manifest_path": str(manifest_path),
         "secrets_recorded": False,
     }

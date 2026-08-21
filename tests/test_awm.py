@@ -460,6 +460,20 @@ class AWMSyntheticOracleTest(unittest.TestCase):
             )
             self.assertTrue((output / "awm_bounds.csv").is_file())
             self.assertTrue((output / "holdout_truth.json").is_file())
+            per_repetition = json.loads(
+                (
+                    output / "holdout_truth_by_repetition.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual([2], evaluation["holdout_repetition_ids"])
+            self.assertEqual(
+                {"D_remote_digest", "D_local_digest"},
+                set(per_repetition["2"]),
+            )
+            self.assertEqual(
+                str(output / "holdout_truth_by_repetition.json"),
+                manifest["holdout_truth_by_repetition_path"],
+            )
 
     def test_evaluator_detects_false_safe_commit_under_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
