@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
-from statistics import NormalDist
+from statistics import NormalDist, mean, variance
 from typing import Any
 
 from .contracts import AWMConfigError
@@ -83,6 +83,50 @@ class DesignBounds:
         }
 
 
+@dataclass(frozen=True)
+class PairedGainCertificate:
+    current_design_id: str
+    candidate_design_id: str
+    method: str
+    pair_count: int
+    family_size: int
+    maximum_looks: int
+    alpha_per_pair_look: float
+    point_estimate_per_session: float
+    support_per_session: Interval
+    gain_per_session: Interval
+    phi_gain: Interval
+    transition_adjusted_gain: Interval
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def to_row(self, *, model_kind: str) -> dict[str, Any]:
+        return {
+            "model_kind": model_kind,
+            "current_design_id": self.current_design_id,
+            "candidate_design_id": self.candidate_design_id,
+            "method": self.method,
+            "pair_count": self.pair_count,
+            "family_size": self.family_size,
+            "maximum_looks": self.maximum_looks,
+            "alpha_per_pair_look": self.alpha_per_pair_look,
+            "point_estimate_per_session": self.point_estimate_per_session,
+            "support_lower_per_session": self.support_per_session.lower,
+            "support_upper_per_session": self.support_per_session.upper,
+            "gain_lower_per_session": self.gain_per_session.lower,
+            "gain_upper_per_session": self.gain_per_session.upper,
+            "phi_gain_lower": self.phi_gain.lower,
+            "phi_gain_upper": self.phi_gain.upper,
+            "transition_adjusted_gain_lower": (
+                self.transition_adjusted_gain.lower
+            ),
+            "transition_adjusted_gain_upper": (
+                self.transition_adjusted_gain.upper
+            ),
+        }
+
+
 def _intervals_jsonable(values: dict[str, Interval]) -> dict[str, Any]:
     return {
         key: {"lower": value.lower, "upper": value.upper}
@@ -111,6 +155,47 @@ def _wilson_interval(successes: int, trials: int, z: float) -> Interval:
     )
 
 
+def _empirical_bernstein_interval(
+    values: tuple[float, ...],
+    *,
+    support: Interval,
+    delta: float,
+) -> Interval:
+    """Two-sided fixed-look Maurer-Pontil empirical Bernstein interval.
+
+    The one-sided bound is applied to both tails with ``delta / 2`` and
+    scaled from [0, 1] to the declared finite support. A caller that consults
+    multiple design pairs or looks must allocate ``delta`` by a union bound.
+    """
+    if not values:
+        return support
+    if not 0.0 < delta < 1.0:
+        raise ValueError("empirical Bernstein delta must be in (0, 1)")
+    for value in values:
+        if not support.contains(value, tolerance=1e-8):
+            raise AWMConfigError(
+                "paired utility difference exceeds its declared support"
+            )
+    sample_mean = mean(values)
+    if len(values) < 2 or support.width <= 0.0:
+        return Interval(
+            max(support.lower, sample_mean),
+            min(support.upper, sample_mean),
+        ) if support.width <= 0.0 else support
+    sample_variance = variance(values)
+    log_term = math.log(4.0 / delta)
+    radius = math.sqrt(
+        2.0 * sample_variance * log_term / len(values)
+    ) + (
+        7.0 * support.width * log_term
+        / (3.0 * (len(values) - 1))
+    )
+    return Interval(
+        max(support.lower, sample_mean - radius),
+        min(support.upper, sample_mean + radius),
+    )
+
+
 def _group_key(group: tuple[str, ...]) -> str:
     return "+".join(group)
 
@@ -124,6 +209,9 @@ class AdaptiveWorkloadModel:
         self.dataset = dataset
         self.model_kind = model_kind
         self._bounds = self._fit()
+        self._paired_gain_cache: dict[
+            tuple[str, str], PairedGainCertificate | None
+        ] = {}
 
     @property
     def bounds(self) -> dict[str, DesignBounds]:
@@ -135,35 +223,196 @@ class AdaptiveWorkloadModel:
     def upper_bound(self, design_id: str) -> float:
         return self._bounds[design_id].phi.upper
 
-    def pessimistic_gain(self, current: str, candidate: str) -> float:
-        return (
+    @property
+    def confidence_contract(self) -> dict[str, Any]:
+        config = self.dataset.model_config
+        return {
+            "family_mode": config.confidence.family_mode,
+            "sampling_unit": "paired-workload-repetition-seed",
+            "confidence_level": config.confidence_level,
+            "total_alpha": 1.0 - config.confidence_level,
+            "marginal_alpha_fraction": (
+                config.confidence.marginal_alpha_fraction
+            ),
+            "marginal_family_size": self._marginal_family_size(),
+            "marginal_alpha_per_metric": self._joint_metric_alpha(),
+            "paired_gain_enabled": (
+                config.confidence.paired_gain_enabled
+            ),
+            "paired_gain_method": config.confidence.paired_gain_method,
+            "paired_gain_alpha_fraction": (
+                config.confidence.paired_gain_alpha_fraction
+            ),
+            "paired_design_pair_count": self._design_pair_count(),
+            "maximum_looks": config.confidence.maximum_looks,
+            "paired_family_size": self._paired_family_size(),
+            "paired_alpha_per_pair_look": self._paired_alpha(),
+            "paired_support_rule": (
+                "task-value-plus-declared-single-access-cost-support"
+            ),
+        }
+
+    def gain_interval(self, current: str, candidate: str) -> Interval:
+        certificate = self.paired_gain_certificate(current, candidate)
+        if certificate is not None:
+            return certificate.transition_adjusted_gain
+        return Interval(
             self.lower_bound(candidate)
             - self.upper_bound(current)
-            - self._bounds[candidate].transition_cost.upper
-        )
-
-    def optimistic_gain(self, current: str, candidate: str) -> float:
-        return (
+            - self._bounds[candidate].transition_cost.upper,
             self.upper_bound(candidate)
             - self.lower_bound(current)
-            - self._bounds[candidate].transition_cost.lower
+            - self._bounds[candidate].transition_cost.lower,
         )
+
+    def gain_interval_source(self, current: str, candidate: str) -> str:
+        return (
+            "paired-fixed-looks-empirical-bernstein"
+            if self.paired_gain_certificate(current, candidate) is not None
+            else "marginal-phi-difference"
+        )
+
+    def pessimistic_gain(self, current: str, candidate: str) -> float:
+        return self.gain_interval(current, candidate).lower
+
+    def optimistic_gain(self, current: str, candidate: str) -> float:
+        return self.gain_interval(current, candidate).upper
+
+    def paired_gain_certificate(
+        self,
+        current: str,
+        candidate: str,
+    ) -> PairedGainCertificate | None:
+        if current == candidate:
+            raise ValueError("paired gain requires two different designs")
+        cache_key = (current, candidate)
+        if cache_key in self._paired_gain_cache:
+            return self._paired_gain_cache[cache_key]
+        config = self.dataset.model_config.confidence
+        if not config.paired_gain_enabled:
+            self._paired_gain_cache[cache_key] = None
+            return None
+        if not (
+            self._bounds[current].observed
+            and self._bounds[candidate].observed
+        ):
+            self._paired_gain_cache[cache_key] = None
+            return None
+
+        current_observations = {
+            value.pairing_key: value
+            for value in self.dataset.training[current].observations
+        }
+        candidate_observations = {
+            value.pairing_key: value
+            for value in self.dataset.training[candidate].observations
+        }
+        keys = tuple(sorted(
+            set(current_observations).intersection(candidate_observations)
+        ))
+        if len(keys) < config.paired_gain_minimum_pairs:
+            self._paired_gain_cache[cache_key] = None
+            return None
+
+        task_value = self.dataset.task_class.task_value
+        resource_weight = self.dataset.system.resource_cost_weight
+        values = tuple(
+            task_value
+            * (
+                candidate_observations[key].success
+                - current_observations[key].success
+            )
+            - resource_weight
+            * (
+                candidate_observations[key].service_cost
+                - current_observations[key].service_cost
+            )
+            for key in keys
+        )
+        current_cost_upper = self._service_cost_support_upper(current)
+        candidate_cost_upper = self._service_cost_support_upper(candidate)
+        support = Interval(
+            -task_value - resource_weight * candidate_cost_upper,
+            task_value + resource_weight * current_cost_upper,
+        )
+        per_session = _empirical_bernstein_interval(
+            values,
+            support=support,
+            delta=self._paired_alpha(),
+        )
+        storage_delta = (
+            self.dataset.storage_costs[candidate]
+            - self.dataset.storage_costs[current]
+        )
+        horizon = self.dataset.horizon_sessions
+        phi_gain = Interval(
+            horizon * per_session.lower - storage_delta,
+            horizon * per_session.upper - storage_delta,
+        )
+        transition = self._bounds[candidate].transition_cost
+        adjusted = Interval(
+            phi_gain.lower - transition.upper,
+            phi_gain.upper - transition.lower,
+        )
+        certificate = PairedGainCertificate(
+            current_design_id=current,
+            candidate_design_id=candidate,
+            method=config.paired_gain_method,
+            pair_count=len(keys),
+            family_size=self._paired_family_size(),
+            maximum_looks=config.maximum_looks,
+            alpha_per_pair_look=self._paired_alpha(),
+            point_estimate_per_session=mean(values),
+            support_per_session=support,
+            gain_per_session=per_session,
+            phi_gain=phi_gain,
+            transition_adjusted_gain=adjusted,
+        )
+        self._paired_gain_cache[cache_key] = certificate
+        return certificate
 
     def _joint_z(self) -> float:
         alpha = self._joint_metric_alpha()
         return NormalDist().inv_cdf(1.0 - alpha / 2.0)
 
     def _joint_metric_alpha(self) -> float:
-        observed = len(self.dataset.model_config.observed_design_ids)
-        metric_count = observed * (
+        alpha = 1.0 - self.dataset.model_config.confidence_level
+        alpha *= self.dataset.model_config.confidence.marginal_alpha_fraction
+        return alpha / self._marginal_family_size()
+
+    def _marginal_family_size(self) -> int:
+        config = self.dataset.model_config.confidence
+        design_count = (
+            len(self.dataset.design_ids)
+            if config.family_mode == "fixed-full-domain"
+            else len(self.dataset.model_config.observed_design_ids)
+        )
+        metric_count = design_count * (
             len(self.dataset.representation_ids)
             + 2
             + len(self.dataset.model_config.substitution_groups)
         )
-        metric_count = max(1, metric_count)
+        return max(1, metric_count)
+
+    def _design_pair_count(self) -> int:
+        count = len(self.dataset.design_ids)
+        return max(1, count * (count - 1) // 2)
+
+    def _paired_family_size(self) -> int:
+        if not self.dataset.model_config.confidence.paired_gain_enabled:
+            return 0
         return (
-            1.0 - self.dataset.model_config.confidence_level
-        ) / metric_count
+            self._design_pair_count()
+            * self.dataset.model_config.confidence.maximum_looks
+        )
+
+    def _paired_alpha(self) -> float:
+        config = self.dataset.model_config
+        if not config.confidence.paired_gain_enabled:
+            return 0.0
+        alpha = 1.0 - config.confidence_level
+        alpha *= config.confidence.paired_gain_alpha_fraction
+        return alpha / self._paired_family_size()
 
     def _initial_envelopes(self) -> dict[str, dict[str, Any]]:
         z = self._joint_z()
@@ -466,6 +715,12 @@ class AdaptiveWorkloadModel:
             )
             for representation_id in self.dataset.representation_ids
         }
+
+    def _service_cost_support_upper(self, design_id: str) -> float:
+        return max(
+            interval.upper
+            for interval in self._unit_cost_intervals(design_id).values()
+        )
 
     def _observed_service_cost_interval(
         self,

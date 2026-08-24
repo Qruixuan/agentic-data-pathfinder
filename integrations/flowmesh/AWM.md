@@ -76,6 +76,56 @@ The v1alpha1 analytic solver supports `max_accesses=1`; it solves the resulting
 access-cost extrema exactly under individual bounds, disjoint group floors,
 affordability, and the class access cap.
 
+### AWM v2 paired-gain contract
+
+`pathfinder.awm/v2alpha1` is an opt-in, backward-compatible confidence
+contract. It addresses two limitations found in the first four-design run:
+
+- the marginal Bonferroni family is fixed over the complete preregistered
+  design domain, so revealing another design cannot change an existing
+  design's alpha allocation; and
+- when both designs have observations for the same workload, task class,
+  quote profile, latency multiplier, repetition, and Pathfinder seed, Commit
+  uses the paired per-session utility difference directly.
+
+For candidate `c` and incumbent `i`, each paired observation is
+
+```text
+task_value * (success_c - success_i)
+  - resource_weight * (service_cost_c - service_cost_i)
+```
+
+The implementation places a two-sided empirical Bernstein interval on that
+bounded difference, scales it by the declared horizon, subtracts the storage
+difference, and finally subtracts the candidate's forward-transition
+interval. Alpha is allocated across every unordered design pair and a fixed
+preregistered maximum number of looks. OED refuses to run if its configured
+maximum iterations exceed that look budget.
+
+Pairing fails closed. With `require_complete_pairs=true`, the eligible keys
+must be identical across every observed design in the training partition and
+across every design in the holdout partition. Missing, duplicated, or
+misaligned keys are rejected rather than silently converted to independent
+samples. When either design is unobserved, the controller falls back to the
+old marginal `Phi`-difference interval and records that source explicitly.
+
+Within the OED path, this is a fixed-look sequential guarantee under the
+declared bounded, independent paired-sampling-unit model; it is not an
+anytime-valid confidence sequence. Changing the design domain, alpha split,
+maximum looks, pairing rule, or sampling-unit interpretation after seeing the
+result creates a new exploratory analysis. The fixed-look bound follows the
+empirical Bernstein construction of Maurer and Pontil (2009); an anytime-valid
+replacement is future work rather than a current claim.
+
+References:
+
+- Andreas Maurer and Massimiliano Pontil, “Empirical Bernstein Bounds and
+  Sample Variance Penalization,” COLT 2009:
+  <https://www.cs.mcgill.ca/~colt2009/papers/012.pdf>
+- Steven R. Howard et al., “Time-uniform, nonparametric, nonasymptotic
+  confidence sequences,” *Annals of Statistics*, 2021:
+  <https://doi.org/10.1214/20-AOS1991>
+
 The committed [`awm_reduced_mvp.json`](../../configs/awm_reduced_mvp.json)
 keeps every empirical assumption disabled. This is intentional: coupled AWM
 should initially match the independent model. After Phase B is reviewed, copy
@@ -134,6 +184,9 @@ engineering output only; see the scientific boundary in
 
 - `awm_bounds.csv`: access, group, success, cost, transition, and `Phi` bounds
   for every model/design pair;
+- `awm_paired_gain_bounds.csv`: every available directed paired-gain
+  certificate, including pair count, family size, per-look alpha, finite
+  support, and transition-adjusted interval (empty for v1);
 - `holdout_truth.json`: the empirical complete response vector hidden from
   model fitting;
 - `holdout_truth_by_repetition.json`: the same hidden truth reported
@@ -146,6 +199,24 @@ engineering output only; see the scientific boundary in
 The evaluator reports complete-vector containment, not a set of unrelated
 marginal success claims. A pessimistic Commit is marked false-safe whenever its
 held-out gain fails the same configured margin.
+
+## Post-hoc AWM v2 Diagnostic on the Frozen Four-Design Run
+
+The frozen v1 result must remain unchanged. The v2 configuration is therefore
+named and labelled as a post-hoc method diagnostic:
+
+```bash
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v2_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V2_OUT"
+```
+
+The output can diagnose whether paired intervals are materially narrower and
+whether their held-out gains are covered. It cannot retroactively turn the
+frozen v1 experiment into confirmatory evidence. Any Commit rule selected
+from this diagnostic must be frozen and rerun on independent objects or seeds.
 
 ## Current Boundary
 

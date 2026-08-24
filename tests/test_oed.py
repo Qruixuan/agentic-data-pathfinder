@@ -29,6 +29,9 @@ from tests.test_awm import (
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMITTED_OED_CONFIG = ROOT / "configs" / "oed_reduced_mvp.json"
+COMMITTED_OED_V2_CONFIG = (
+    ROOT / "configs" / "multi_candidate_formal_v1_oed_v2_diagnostic.json"
+)
 
 
 def _oed_config(
@@ -100,6 +103,14 @@ class OEDConfigTest(unittest.TestCase):
             )
             self.assertEqual(2.0, config.exploration_budget)
             self.assertEqual(5.0, config.per_excursion_cap)
+
+    def test_committed_v2_diagnostic_respects_look_budget(self) -> None:
+        config = load_oed_config(COMMITTED_OED_V2_CONFIG)
+        self.assertEqual(
+            "multi-candidate-formal-v1-oed-v2-diagnostic",
+            config.controller_id,
+        )
+        self.assertEqual(4, config.max_iterations)
 
 
 class OEDControllerTest(unittest.TestCase):
@@ -193,6 +204,72 @@ class OEDControllerTest(unittest.TestCase):
 
 
 class OEDReplayTest(unittest.TestCase):
+    def test_v2_replay_switches_to_paired_gain_after_reveal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle_path = _oracle_config(root)
+            awm_path = _awm_config(
+                root,
+                confidence_level=0.5,
+                quoted_price_sufficiency=False,
+                schema_version="pathfinder.awm/v2alpha1",
+            )
+            output = root / "oed-v2-output"
+            run_oed_replay(
+                _oed_config(root),
+                awm_path,
+                oracle_path,
+                oracle_output_dir=_synthetic_oracle_output(root),
+                output_dir=output,
+            )
+            traces = [
+                json.loads(line)
+                for line in (output / "oed_trace.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            full = [
+                row for row in traces
+                if row["policy_kind"] == "full_oed"
+            ]
+            self.assertGreaterEqual(len(full), 2)
+            self.assertEqual("REVEAL", full[0]["selected_action"])
+            candidate = next(
+                score
+                for score in full[1]["candidate_scores"]
+                if score["design_id"] == "D_local_digest"
+            )
+            self.assertEqual(
+                "paired-fixed-looks-empirical-bernstein",
+                candidate["gain_interval_source"],
+            )
+            self.assertEqual(16, candidate["paired_gain_pair_count"])
+            self.assertGreater(candidate["commit_gain_width"], 0.0)
+            evaluation = json.loads(
+                (output / "oed_evaluation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "pathfinder.oed-replay/v2alpha1",
+                evaluation["schema_version"],
+            )
+
+    def test_v2_replay_rejects_more_looks_than_preregistered(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            awm_path = _awm_config(
+                root,
+                schema_version="pathfinder.awm/v2alpha1",
+                maximum_looks=2,
+            )
+            with self.assertRaisesRegex(ValueError, "maximum_looks"):
+                run_oed_replay(
+                    _oed_config(root),
+                    awm_path,
+                    _oracle_config(root),
+                    oracle_output_dir=_synthetic_oracle_output(root),
+                    output_dir=root / "oed-v2-output",
+                )
+
     def test_replay_restores_after_reveal_then_commits_separately(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

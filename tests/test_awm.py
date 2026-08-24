@@ -20,6 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_PATH = ROOT / "configs" / "phase_b_confirmatory_small_system.json"
 PILOT_PATH = ROOT / "configs" / "phase_b_confirmatory_small.json"
 COMMITTED_AWM_CONFIG = ROOT / "configs" / "awm_reduced_mvp.json"
+COMMITTED_AWM_V2_CONFIG = (
+    ROOT / "configs" / "multi_candidate_formal_v1_awm_v2_diagnostic.json"
+)
 DESIGNS = ("D_remote_digest", "D_local_digest")
 
 
@@ -89,47 +92,59 @@ def _awm_config(
     observed_design_ids: tuple[str, ...] = ("D_remote_digest",),
     confidence_level: float = 0.9,
     quoted_price_sufficiency: bool = True,
+    schema_version: str = "pathfinder.awm/v1alpha1",
+    maximum_looks: int = 8,
 ) -> Path:
     enabled = quoted_price_sufficiency
     path = root / "awm.json"
-    _write_json(
-        path,
-        {
-            "schema_version": "pathfinder.awm/v1alpha1",
-            "model_id": "synthetic-awm",
-            "confidence_level": confidence_level,
-            "holdout_repetitions": 1,
-            "observed_design_ids": list(observed_design_ids),
-            "minimum_training_sessions": 8,
-            "maximum_excluded_training_fraction": 0,
-            "maximum_excluded_holdout_fraction": 0,
-            "substitution_groups": [
-                ["sampled_frames", "multimodal_digest"]
-            ],
-            "assumptions": {
-                "own_price_monotonicity": {
-                    "enabled": enabled,
-                    "status": "synthetic-pass",
-                },
-                "substitution_group_monotonicity": {
-                    "enabled": enabled,
-                    "status": "synthetic-pass",
-                },
-                "success_monotonicity": {
-                    "enabled": enabled,
-                    "status": "synthetic-pass",
-                },
-                "quoted_price_sufficiency": {
-                    "enabled": quoted_price_sufficiency,
-                    "status": "synthetic-pass",
-                },
+    payload = {
+        "schema_version": schema_version,
+        "model_id": "synthetic-awm",
+        "confidence_level": confidence_level,
+        "holdout_repetitions": 1,
+        "observed_design_ids": list(observed_design_ids),
+        "minimum_training_sessions": 8,
+        "maximum_excluded_training_fraction": 0,
+        "maximum_excluded_holdout_fraction": 0,
+        "substitution_groups": [
+            ["sampled_frames", "multimodal_digest"]
+        ],
+        "assumptions": {
+            "own_price_monotonicity": {
+                "enabled": enabled,
+                "status": "synthetic-pass",
             },
-            "own_price_requires_other_quotes_equal": True,
-            "cost_relative_radius": 0.1,
-            "transition_relative_radius": 0.1,
-            "commit_margin": 0,
+            "substitution_group_monotonicity": {
+                "enabled": enabled,
+                "status": "synthetic-pass",
+            },
+            "success_monotonicity": {
+                "enabled": enabled,
+                "status": "synthetic-pass",
+            },
+            "quoted_price_sufficiency": {
+                "enabled": quoted_price_sufficiency,
+                "status": "synthetic-pass",
+            },
         },
-    )
+        "own_price_requires_other_quotes_equal": True,
+        "cost_relative_radius": 0.1,
+        "transition_relative_radius": 0.1,
+        "commit_margin": 0,
+    }
+    if schema_version == "pathfinder.awm/v2alpha1":
+        payload["confidence"] = {
+            "family_mode": "fixed-full-domain",
+            "marginal_alpha_fraction": 0.5,
+            "paired_gain_alpha_fraction": 0.5,
+            "paired_gain_method": (
+                "fixed-looks-empirical-bernstein"
+            ),
+            "paired_gain_minimum_pairs": 8,
+            "maximum_looks": maximum_looks,
+            "require_complete_pairs": True,
+        }
+    _write_json(path, payload)
     return path
 
 
@@ -144,10 +159,13 @@ def _record(
     realized_cost = 0.2 if selected == "multimodal_digest" else 0.35
     return {
         "trial_key": f"{design_id}|r{repetition}|i{index}",
+        "workload_id": f"workload-{index:04d}",
         "design_id": design_id,
         "task_class_id": "video_qa",
         "quote_profile_id": "as_designed",
         "repetition": repetition,
+        "seed": 11 + repetition,
+        "latency_multiplier": 1.0,
         "outcome_type": "completed",
         "telemetry_complete": True,
         "task_success": success,
@@ -249,6 +267,41 @@ class AWMConfigTest(unittest.TestCase):
         self.assertTrue(
             all(not assumption.enabled for assumption in config.assumptions.values())
         )
+        self.assertEqual("dynamic-observed-v1", config.confidence.family_mode)
+        self.assertFalse(config.confidence.paired_gain_enabled)
+
+    def test_v2_requires_fixed_family_and_paired_gain_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = load_awm_config(_awm_config(
+                root,
+                schema_version="pathfinder.awm/v2alpha1",
+            ))
+            self.assertEqual("fixed-full-domain", config.confidence.family_mode)
+            self.assertTrue(config.confidence.paired_gain_enabled)
+            self.assertEqual(8, config.confidence.maximum_looks)
+
+    def test_committed_v2_diagnostic_freezes_four_looks(self) -> None:
+        config = load_awm_config(COMMITTED_AWM_V2_CONFIG)
+        self.assertEqual(
+            "multi-candidate-formal-v1-awm-v2-diagnostic",
+            config.model_id,
+        )
+        self.assertEqual(4, config.confidence.maximum_looks)
+        self.assertEqual(16, config.confidence.paired_gain_minimum_pairs)
+
+    def test_v2_alpha_fractions_must_sum_to_one(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = _awm_config(
+                root,
+                schema_version="pathfinder.awm/v2alpha1",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["confidence"]["paired_gain_alpha_fraction"] = 0.4
+            _write_json(path, payload)
+            with self.assertRaisesRegex(AWMConfigError, "must sum to 1"):
+                load_awm_config(path)
 
     def test_structural_constraints_require_price_sufficiency(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -282,6 +335,142 @@ class AWMConfigTest(unittest.TestCase):
 
 
 class AWMSyntheticOracleTest(unittest.TestCase):
+    def test_v2_fixed_marginal_family_does_not_expand_after_reveal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            oracle_output = _synthetic_oracle_output(root)
+            one = load_awm_config(_awm_config(
+                root,
+                schema_version="pathfinder.awm/v2alpha1",
+            ))
+            one_model = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    one,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            )
+            both = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v2alpha1",
+            ))
+            both_model = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    both,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            )
+            self.assertEqual(
+                one_model.confidence_contract["marginal_family_size"],
+                both_model.confidence_contract["marginal_family_size"],
+            )
+            self.assertEqual(
+                one_model.confidence_contract["marginal_alpha_per_metric"],
+                both_model.confidence_contract["marginal_alpha_per_metric"],
+            )
+
+    def test_v2_paired_gain_certificate_is_auditable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            config = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v2alpha1",
+            ))
+            oracle_output = _synthetic_oracle_output(root)
+            model = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    config,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            )
+            certificate = model.paired_gain_certificate(*DESIGNS)
+            self.assertIsNotNone(certificate)
+            assert certificate is not None
+            self.assertEqual(16, certificate.pair_count)
+            self.assertEqual(8, certificate.maximum_looks)
+            self.assertEqual(8, certificate.family_size)
+            self.assertEqual(
+                "paired-fixed-looks-empirical-bernstein",
+                model.gain_interval_source(*DESIGNS),
+            )
+            self.assertEqual(
+                certificate.transition_adjusted_gain,
+                model.gain_interval(*DESIGNS),
+            )
+
+            evaluation_output = root / "awm-v2-output"
+            manifest = evaluate_awm(
+                config,
+                oracle,
+                oracle_output_dir=oracle_output,
+                output_dir=evaluation_output,
+            )
+            evaluation = json.loads(
+                (evaluation_output / "awm_evaluation.json")
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "pathfinder.awm-evaluation/v2alpha1",
+                evaluation["schema_version"],
+            )
+            self.assertEqual(
+                1,
+                evaluation["models"]["coupled_awm"][
+                    "paired_gain_decision_count"
+                ],
+            )
+            self.assertEqual(
+                str(evaluation_output / "awm_paired_gain_bounds.csv"),
+                manifest["paired_gain_bounds_path"],
+            )
+            with (
+                evaluation_output / "awm_paired_gain_bounds.csv"
+            ).open(encoding="utf-8", newline="") as handle:
+                paired_rows = list(csv.DictReader(handle))
+            self.assertEqual(4, len(paired_rows))
+
+    def test_v2_rejects_misaligned_training_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            config = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v2alpha1",
+            ))
+            output = _synthetic_oracle_output(root)
+            path = output / "designs" / DESIGNS[1] / "runs.jsonl"
+            records = [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+            ]
+            records[0]["workload_id"] = "different-workload"
+            path.write_text(
+                "".join(
+                    json.dumps(record, sort_keys=True) + "\n"
+                    for record in records
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                AWMConfigError,
+                "identical eligible training keys",
+            ):
+                load_oracle_dataset(
+                    config,
+                    oracle,
+                    oracle_output_dir=output,
+                )
+
     def test_oracle_table_requires_complete_reveal_cost_columns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

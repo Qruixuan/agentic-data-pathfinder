@@ -31,6 +31,12 @@ and a three-candidate OED comparison. Its origin/local topology and unit costs
 remain controlled single-node interventions; distributed placement is a later
 gate.
 
+The initial frozen results and their claim boundaries are summarized in
+[MULTI_CANDIDATE_FORMAL_V1_RESULTS.md](MULTI_CANDIDATE_FORMAL_V1_RESULTS.md).
+AWM v2 is now available as an opt-in post-hoc diagnostic with a fixed
+full-domain confidence family and fixed-look paired gain certificates; it does
+not alter the frozen v1 evidence.
+
 ## Current Scope
 
 The included experiment domain has:

@@ -41,6 +41,10 @@ class CandidateScore:
     observed: bool
     unresolved_price_states: tuple[str, ...]
     constraints_applied: tuple[str, ...]
+    gain_interval_source: str
+    commit_gain_width: float
+    paired_gain_pair_count: int | None
+    paired_gain_alpha_per_pair_look: float | None
     pessimistic_commit_gain: float
     optimistic_reveal_gain: float
     candidate_width: float
@@ -198,10 +202,18 @@ class OEDController:
             bounds.transition_cost.lower + restoration.lower + probe_loss,
             bounds.transition_cost.upper + restoration.upper + probe_loss,
         )
+        commit_gain = model.gain_interval(
+            state.safe_design_id,
+            design_id,
+        )
+        paired_certificate = model.paired_gain_certificate(
+            state.safe_design_id,
+            design_id,
+        )
         optimistic = (
-            bounds.phi.upper
-            - incumbent.phi.lower
-            - reveal.lower
+            commit_gain.upper
+            - restoration.lower
+            - probe_loss
         )
         return CandidateScore(
             design_id=design_id,
@@ -213,10 +225,21 @@ class OEDController:
                 design_id,
             ),
             constraints_applied=bounds.constraints_applied,
-            pessimistic_commit_gain=model.pessimistic_gain(
-                state.safe_design_id,
-                design_id,
+            gain_interval_source=model.gain_interval_source(
+                state.safe_design_id, design_id
             ),
+            commit_gain_width=commit_gain.width,
+            paired_gain_pair_count=(
+                paired_certificate.pair_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_alpha_per_pair_look=(
+                paired_certificate.alpha_per_pair_look
+                if paired_certificate is not None
+                else None
+            ),
+            pessimistic_commit_gain=commit_gain.lower,
             optimistic_reveal_gain=optimistic,
             candidate_width=bounds.phi.width,
             incumbent_width=incumbent.phi.width,
@@ -395,9 +418,7 @@ class OEDController:
         certifiable = set(partitions["G_cert"])
         delta = max(
             (
-                score.candidate_width
-                + score.incumbent_width
-                + score.transition_width
+                score.commit_gain_width
                 for score in scores
                 if score.design_id in certifiable
             ),

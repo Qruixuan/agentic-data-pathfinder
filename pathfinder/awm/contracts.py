@@ -10,6 +10,19 @@ from typing import Any, Mapping
 
 
 AWM_CONFIG_SCHEMA_VERSION = "pathfinder.awm/v1alpha1"
+AWM_CONFIG_SCHEMA_VERSION_V2 = "pathfinder.awm/v2alpha1"
+AWM_CONFIG_SCHEMA_VERSIONS = (
+    AWM_CONFIG_SCHEMA_VERSION,
+    AWM_CONFIG_SCHEMA_VERSION_V2,
+)
+CONFIDENCE_FAMILY_MODES = (
+    "dynamic-observed-v1",
+    "fixed-full-domain",
+)
+PAIRED_GAIN_METHODS = (
+    "disabled",
+    "fixed-looks-empirical-bernstein",
+)
 _ASSUMPTION_NAMES = (
     "own_price_monotonicity",
     "substitution_group_monotonicity",
@@ -26,6 +39,21 @@ class AWMConfigError(ValueError):
 class AssumptionConfig:
     enabled: bool
     status: str
+
+
+@dataclass(frozen=True)
+class ConfidenceConfig:
+    family_mode: str
+    marginal_alpha_fraction: float
+    paired_gain_alpha_fraction: float
+    paired_gain_method: str
+    paired_gain_minimum_pairs: int
+    maximum_looks: int
+    require_complete_pairs: bool
+
+    @property
+    def paired_gain_enabled(self) -> bool:
+        return self.paired_gain_method != "disabled"
 
 
 @dataclass(frozen=True)
@@ -46,6 +74,7 @@ class AWMConfig:
     cost_relative_radius: float
     transition_relative_radius: float
     commit_margin: float
+    confidence: ConfidenceConfig
 
     def assumption_enabled(self, name: str) -> bool:
         try:
@@ -107,6 +136,92 @@ def _fraction(value: Any, name: str) -> float:
     return result
 
 
+def _positive_integer(value: Any, name: str) -> int:
+    result = _nonnegative_integer(value, name)
+    if result == 0:
+        raise AWMConfigError(f"{name} must be a positive integer")
+    return result
+
+
+def _load_confidence_config(
+    root: Mapping[str, Any],
+    *,
+    schema_version: str,
+) -> ConfidenceConfig:
+    if schema_version == AWM_CONFIG_SCHEMA_VERSION:
+        if "confidence" in root:
+            raise AWMConfigError(
+                "confidence is available only in pathfinder.awm/v2alpha1"
+            )
+        return ConfidenceConfig(
+            family_mode="dynamic-observed-v1",
+            marginal_alpha_fraction=1.0,
+            paired_gain_alpha_fraction=0.0,
+            paired_gain_method="disabled",
+            paired_gain_minimum_pairs=0,
+            maximum_looks=1,
+            require_complete_pairs=False,
+        )
+
+    raw = _mapping(root.get("confidence"), "confidence")
+    family_mode = _string(
+        raw.get("family_mode"),
+        "confidence.family_mode",
+    )
+    if family_mode != "fixed-full-domain":
+        raise AWMConfigError(
+            "v2 confidence.family_mode must be fixed-full-domain"
+        )
+    method = _string(
+        raw.get("paired_gain_method"),
+        "confidence.paired_gain_method",
+    )
+    if method not in PAIRED_GAIN_METHODS or method == "disabled":
+        raise AWMConfigError(
+            "v2 confidence.paired_gain_method must be "
+            "fixed-looks-empirical-bernstein"
+        )
+    marginal_fraction = _fraction(
+        raw.get("marginal_alpha_fraction"),
+        "confidence.marginal_alpha_fraction",
+    )
+    paired_fraction = _fraction(
+        raw.get("paired_gain_alpha_fraction"),
+        "confidence.paired_gain_alpha_fraction",
+    )
+    if marginal_fraction <= 0.0 or paired_fraction <= 0.0:
+        raise AWMConfigError(
+            "v2 confidence alpha fractions must both be positive"
+        )
+    if not math.isclose(
+        marginal_fraction + paired_fraction,
+        1.0,
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    ):
+        raise AWMConfigError(
+            "confidence alpha fractions must sum to 1"
+        )
+    return ConfidenceConfig(
+        family_mode=family_mode,
+        marginal_alpha_fraction=marginal_fraction,
+        paired_gain_alpha_fraction=paired_fraction,
+        paired_gain_method=method,
+        paired_gain_minimum_pairs=_positive_integer(
+            raw.get("paired_gain_minimum_pairs"),
+            "confidence.paired_gain_minimum_pairs",
+        ),
+        maximum_looks=_positive_integer(
+            raw.get("maximum_looks"),
+            "confidence.maximum_looks",
+        ),
+        require_complete_pairs=_boolean(
+            raw.get("require_complete_pairs", True),
+            "confidence.require_complete_pairs",
+        ),
+    )
+
+
 def load_awm_config(path: str | Path) -> AWMConfig:
     source_path = Path(path).resolve()
     try:
@@ -121,7 +236,8 @@ def load_awm_config(path: str | Path) -> AWMConfig:
             f"invalid AWM configuration {source_path}: {exc}"
         ) from exc
     root = _mapping(raw, "AWM configuration")
-    if root.get("schema_version") != AWM_CONFIG_SCHEMA_VERSION:
+    schema_version = root.get("schema_version")
+    if schema_version not in AWM_CONFIG_SCHEMA_VERSIONS:
         raise AWMConfigError("unsupported AWM schema_version")
     model_id = _string(root.get("model_id"), "model_id")
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_id) is None:
@@ -227,7 +343,7 @@ def load_awm_config(path: str | Path) -> AWMConfig:
         )
 
     return AWMConfig(
-        schema_version=AWM_CONFIG_SCHEMA_VERSION,
+        schema_version=str(schema_version),
         model_id=model_id,
         source_path=source_path,
         source_sha256=sha256(raw_bytes).hexdigest(),
@@ -266,5 +382,9 @@ def load_awm_config(path: str | Path) -> AWMConfig:
         commit_margin=_finite_number(
             root.get("commit_margin", 0.0),
             "commit_margin",
+        ),
+        confidence=_load_confidence_config(
+            root,
+            schema_version=str(schema_version),
         ),
     )

@@ -10,12 +10,17 @@ from ..reduced_oracle.contracts import (
     ReducedOracleConfig,
     load_reduced_oracle_config,
 )
-from .contracts import AWMConfig, load_awm_config
+from .contracts import (
+    AWM_CONFIG_SCHEMA_VERSION_V2,
+    AWMConfig,
+    load_awm_config,
+)
 from .dataset import AWMDataset, DesignSample, load_oracle_dataset
 from .model import AWM_MODEL_KINDS, AdaptiveWorkloadModel
 
 
 AWM_EVALUATION_SCHEMA_VERSION = "pathfinder.awm-evaluation/v1alpha1"
+AWM_EVALUATION_SCHEMA_VERSION_V2 = "pathfinder.awm-evaluation/v2alpha1"
 
 
 def holdout_truth(
@@ -101,6 +106,14 @@ def _evaluate_model(
             safe_design_id,
             candidate,
         )
+        gain_interval_source = model.gain_interval_source(
+            safe_design_id,
+            candidate,
+        )
+        paired_certificate = model.paired_gain_certificate(
+            safe_design_id,
+            candidate,
+        )
         actual_gain = (
             float(truths[candidate]["phi"])
             - float(truths[safe_design_id]["phi"])
@@ -117,14 +130,32 @@ def _evaluate_model(
                 "candidate_design_id": candidate,
                 "pessimistic_gain": pessimistic_gain,
                 "optimistic_gain": optimistic_gain,
+                "gain_interval_source": gain_interval_source,
+                "paired_gain_certificate": (
+                    paired_certificate.to_dict()
+                    if paired_certificate is not None
+                    else None
+                ),
                 "actual_holdout_gain": actual_gain,
+                "actual_holdout_gain_covered": (
+                    model.gain_interval(
+                        safe_design_id,
+                        candidate,
+                    ).contains(actual_gain)
+                ),
                 "commit_margin": dataset.model_config.commit_margin,
                 "would_commit": would_commit,
                 "false_safe_commit": false_safe,
             }
         )
+    paired_decisions = [
+        decision
+        for decision in commit_decisions
+        if decision["paired_gain_certificate"] is not None
+    ]
     return {
         "model_kind": model.model_kind,
+        "confidence_contract": model.confidence_contract,
         "joint_response_vector_covered": all(
             value["response_vector_covered"]
             for value in per_design.values()
@@ -140,6 +171,15 @@ def _evaluate_model(
         ),
         "commit_count": sum(
             decision["would_commit"] for decision in commit_decisions
+        ),
+        "paired_gain_decision_count": len(paired_decisions),
+        "joint_paired_gain_covered": (
+            all(
+                decision["actual_holdout_gain_covered"]
+                for decision in paired_decisions
+            )
+            if paired_decisions
+            else None
         ),
         "per_design": per_design,
         "commit_decisions": commit_decisions,
@@ -204,11 +244,26 @@ def evaluate_awm(
         for model in models.values()
         for bounds in model.bounds.values()
     ]
+    paired_rows = []
+    for model in models.values():
+        for current in dataset.design_ids:
+            for candidate in dataset.design_ids:
+                if current == candidate:
+                    continue
+                certificate = model.paired_gain_certificate(
+                    current,
+                    candidate,
+                )
+                if certificate is not None:
+                    paired_rows.append(
+                        certificate.to_row(model_kind=model.model_kind)
+                    )
     results = {
         model_kind: _evaluate_model(dataset, model, truths)
         for model_kind, model in models.items()
     }
     bounds_path = output / "awm_bounds.csv"
+    paired_bounds_path = output / "awm_paired_gain_bounds.csv"
     evaluation_path = output / "awm_evaluation.json"
     truth_path = output / "holdout_truth.json"
     truth_by_repetition_path = (
@@ -216,13 +271,28 @@ def evaluate_awm(
     )
     manifest_path = output / "awm_manifest.json"
     _write_csv(rows, bounds_path)
+    _write_csv(paired_rows, paired_bounds_path)
     _write_json(truths, truth_path)
     _write_json(truths_by_repetition, truth_by_repetition_path)
+    evaluation_schema = (
+        AWM_EVALUATION_SCHEMA_VERSION_V2
+        if resolved_model.schema_version == AWM_CONFIG_SCHEMA_VERSION_V2
+        else AWM_EVALUATION_SCHEMA_VERSION
+    )
     evaluation = {
-        "schema_version": AWM_EVALUATION_SCHEMA_VERSION,
+        "schema_version": evaluation_schema,
+        "awm_config_schema_version": resolved_model.schema_version,
         "model_id": resolved_model.model_id,
         "confidence_level": resolved_model.confidence_level,
-        "confidence_method": "joint-bonferroni-wilson",
+        "confidence_method": (
+            "fixed-family-bonferroni-wilson-and-fixed-looks-"
+            "empirical-bernstein"
+            if resolved_model.confidence.paired_gain_enabled
+            else "joint-bonferroni-wilson"
+        ),
+        "confidence_contract": models[
+            "coupled_awm"
+        ].confidence_contract,
         "coverage_unit": "complete-heldout-design-response-vector",
         "holdout_repetitions": resolved_model.holdout_repetitions,
         "holdout_repetition_ids": [
@@ -242,7 +312,7 @@ def evaluate_awm(
     }
     _write_json(evaluation, evaluation_path)
     manifest = {
-        "schema_version": AWM_EVALUATION_SCHEMA_VERSION,
+        "schema_version": evaluation_schema,
         "status": "COMPLETE",
         "model_id": resolved_model.model_id,
         "model_config_path": str(resolved_model.source_path),
@@ -268,6 +338,7 @@ def evaluate_awm(
             for design_id, sample in dataset.holdout.items()
         },
         "bounds_path": str(bounds_path),
+        "paired_gain_bounds_path": str(paired_bounds_path),
         "evaluation_path": str(evaluation_path),
         "holdout_truth_path": str(truth_path),
         "holdout_truth_by_repetition_path": str(

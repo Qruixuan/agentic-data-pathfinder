@@ -17,6 +17,14 @@ from .contracts import AWMConfig, AWMConfigError
 
 
 @dataclass(frozen=True)
+class TrialObservation:
+    pairing_key: str
+    repetition: int
+    success: int
+    service_cost: float
+
+
+@dataclass(frozen=True)
 class DesignSample:
     design_id: str
     attempted_sessions: int
@@ -26,6 +34,7 @@ class DesignSample:
     success_count: int
     service_costs: tuple[float, ...]
     repetitions: tuple[int, ...]
+    observations: tuple[TrialObservation, ...]
 
     @property
     def excluded_sessions(self) -> int:
@@ -80,12 +89,59 @@ def _eligible_record(record: dict[str, Any]) -> bool:
     )
 
 
+def _pairing_key(record: dict[str, Any]) -> str:
+    workload_id = record.get("workload_id")
+    task_class_id = record.get("task_class_id")
+    quote_profile_id = record.get("quote_profile_id")
+    repetition = record.get("repetition")
+    seed = record.get("seed")
+    latency_multiplier = record.get("latency_multiplier")
+    if not isinstance(workload_id, str) or not workload_id:
+        raise AWMConfigError(
+            "paired AWM record is missing a non-empty workload_id"
+        )
+    if not isinstance(task_class_id, str) or not task_class_id:
+        raise AWMConfigError(
+            "paired AWM record is missing a non-empty task_class_id"
+        )
+    if not isinstance(quote_profile_id, str) or not quote_profile_id:
+        raise AWMConfigError(
+            "paired AWM record is missing a non-empty quote_profile_id"
+        )
+    if isinstance(repetition, bool) or not isinstance(repetition, int):
+        raise AWMConfigError(
+            "paired AWM record is missing an integer repetition"
+        )
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise AWMConfigError(
+            "paired AWM record is missing an integer seed"
+        )
+    if isinstance(latency_multiplier, bool) or not isinstance(
+        latency_multiplier,
+        (int, float),
+    ):
+        raise AWMConfigError(
+            "paired AWM record is missing a numeric latency_multiplier"
+        )
+    return "|".join(
+        (
+            workload_id,
+            task_class_id,
+            quote_profile_id,
+            format(float(latency_multiplier), ".12g"),
+            f"r{repetition:04d}",
+            f"s{seed}",
+        )
+    )
+
+
 def _sample(
     design_id: str,
     records: Iterable[dict[str, Any]],
     *,
     representation_ids: tuple[str, ...],
     groups: tuple[tuple[str, ...], ...],
+    require_pairing: bool,
 ) -> DesignSample:
     rows = list(records)
     eligible = [record for record in rows if _eligible_record(record)]
@@ -94,6 +150,8 @@ def _sample(
     successes = 0
     costs: list[float] = []
     repetitions: set[int] = set()
+    observations: list[TrialObservation] = []
+    pairing_keys: set[str] = set()
     for record in eligible:
         repetitions.add(int(record["repetition"]))
         selected = {
@@ -108,13 +166,27 @@ def _sample(
                 bool(selected.intersection(group))
             )
         successes += int(bool(record["task_success"]))
-        costs.append(
-            sum(
-                float(event.get("realized_cost", 0.0))
-                for event in record.get("access_events", [])
-                if event.get("accepted")
-            )
+        service_cost = sum(
+            float(event.get("realized_cost", 0.0))
+            for event in record.get("access_events", [])
+            if event.get("accepted")
         )
+        costs.append(service_cost)
+        if require_pairing:
+            key = _pairing_key(record)
+            if key in pairing_keys:
+                raise AWMConfigError(
+                    f"duplicate paired AWM key for {design_id}: {key}"
+                )
+            pairing_keys.add(key)
+            observations.append(
+                TrialObservation(
+                    pairing_key=key,
+                    repetition=int(record["repetition"]),
+                    success=int(bool(record["task_success"])),
+                    service_cost=service_cost,
+                )
+            )
     return DesignSample(
         design_id=design_id,
         attempted_sessions=len(rows),
@@ -124,7 +196,47 @@ def _sample(
         success_count=successes,
         service_costs=tuple(costs),
         repetitions=tuple(sorted(repetitions)),
+        observations=tuple(observations),
     )
+
+
+def _validate_pairs(
+    model_config: AWMConfig,
+    samples: dict[str, DesignSample],
+    design_ids: tuple[str, ...],
+    *,
+    partition_name: str,
+    minimum_pairs: int,
+) -> None:
+    if not model_config.confidence.paired_gain_enabled:
+        return
+    for left_index, left_id in enumerate(design_ids):
+        left_keys = {
+            observation.pairing_key
+            for observation in samples[left_id].observations
+        }
+        for right_id in design_ids[left_index + 1 :]:
+            right_keys = {
+                observation.pairing_key
+                for observation in samples[right_id].observations
+            }
+            common = left_keys.intersection(right_keys)
+            if (
+                model_config.confidence.require_complete_pairs
+                and left_keys != right_keys
+            ):
+                raise AWMConfigError(
+                    "paired AWM requires identical eligible "
+                    f"{partition_name} keys "
+                    f"for {left_id} and {right_id}; "
+                    f"left_only={len(left_keys - right_keys)}, "
+                    f"right_only={len(right_keys - left_keys)}"
+                )
+            if len(common) < minimum_pairs:
+                raise AWMConfigError(
+                    f"{left_id} and {right_id} have only {len(common)} "
+                    f"eligible paired {partition_name} sessions"
+                )
 
 
 def _load_oracle_table(path: Path) -> dict[str, dict[str, str]]:
@@ -176,7 +288,7 @@ def load_oracle_dataset(
     task_class = system.task_classes[pilot.task_class_id]
     if task_class.max_accesses != 1:
         raise AWMConfigError(
-            "AWM v1alpha1 requires max_accesses=1 for its exact analytic "
+            "the AWM analytic envelope requires max_accesses=1 for its exact "
             "envelope solver"
         )
     unknown_designs = set(model_config.observed_design_ids) - set(
@@ -246,12 +358,14 @@ def load_oracle_dataset(
             train_rows,
             representation_ids=representation_ids,
             groups=model_config.substitution_groups,
+            require_pairing=model_config.confidence.paired_gain_enabled,
         )
         holdout[design_id] = _sample(
             design_id,
             holdout_rows,
             representation_ids=representation_ids,
             groups=model_config.substitution_groups,
+            require_pairing=model_config.confidence.paired_gain_enabled,
         )
         for repetition in holdout_by_repetition:
             holdout_by_repetition[repetition][design_id] = _sample(
@@ -263,6 +377,7 @@ def load_oracle_dataset(
                 ),
                 representation_ids=representation_ids,
                 groups=model_config.substitution_groups,
+                require_pairing=model_config.confidence.paired_gain_enabled,
             )
         if (
             design_id in model_config.observed_design_ids
@@ -300,6 +415,22 @@ def load_oracle_dataset(
             "oracle_table.csv is missing designs: "
             + ", ".join(sorted(missing_rows))
         )
+    _validate_pairs(
+        model_config,
+        training,
+        tuple(model_config.observed_design_ids),
+        partition_name="training",
+        minimum_pairs=(
+            model_config.confidence.paired_gain_minimum_pairs
+        ),
+    )
+    _validate_pairs(
+        model_config,
+        holdout,
+        oracle_config.design_ids,
+        partition_name="holdout",
+        minimum_pairs=1,
+    )
     return AWMDataset(
         model_config=model_config,
         oracle_config=oracle_config,

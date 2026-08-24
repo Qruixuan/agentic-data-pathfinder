@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..awm import (
+    AWM_CONFIG_SCHEMA_VERSION_V2,
     AWMDataset,
     AWMConfig,
     AdaptiveWorkloadModel,
@@ -24,6 +25,7 @@ from .controller import OEDController, OEDState
 
 
 OED_REPLAY_SCHEMA_VERSION = "pathfinder.oed-replay/v1alpha1"
+OED_REPLAY_SCHEMA_VERSION_V2 = "pathfinder.oed-replay/v2alpha1"
 _ACTIVE_POLICIES = (
     "full_oed",
     "passive_awm",
@@ -133,6 +135,8 @@ def _run_active_policy(
                 "controller_id": oed_config.controller_id,
                 "awm_model_id": iteration_config.model_id,
                 "awm_model_kind": model.model_kind,
+                "awm_config_schema_version": iteration_config.schema_version,
+                "awm_confidence_contract": model.confidence_contract,
                 "cost_model_status": oed_config.cost_model_status,
                 "candidate_domain": list(dataset.design_ids),
                 "safe_design_id_after": safe,
@@ -360,6 +364,15 @@ def run_oed_replay(
         oracle_output_dir=oracle_output,
     )
     truths = _truths(base_dataset)
+    if (
+        resolved_awm.confidence.paired_gain_enabled
+        and resolved_oed.max_iterations
+        > resolved_awm.confidence.maximum_looks
+    ):
+        raise ValueError(
+            "OED max_iterations exceeds the AWM v2 preregistered "
+            "maximum_looks"
+        )
     unknown_candidates = set(resolved_oed.reveal_candidates).union(
         resolved_oed.other_design_ids
     ) - set(base_dataset.design_ids)
@@ -423,8 +436,18 @@ def run_oed_replay(
         [results[name] for name in sorted(results)],
         summary_path,
     )
+    replay_schema = (
+        OED_REPLAY_SCHEMA_VERSION_V2
+        if resolved_awm.schema_version == AWM_CONFIG_SCHEMA_VERSION_V2
+        else OED_REPLAY_SCHEMA_VERSION
+    )
     evaluation = {
-        "schema_version": OED_REPLAY_SCHEMA_VERSION,
+        "schema_version": replay_schema,
+        "awm_config_schema_version": resolved_awm.schema_version,
+        "awm_confidence_contract": AdaptiveWorkloadModel(
+            base_dataset,
+            model_kind="coupled_awm",
+        ).confidence_contract,
         "controller_id": resolved_oed.controller_id,
         "decision_data": "training_partition_only",
         "evaluation_data": "paired_holdout_partition_only",
@@ -454,7 +477,7 @@ def run_oed_replay(
     }
     _write_json(evaluation, evaluation_path)
     manifest = {
-        "schema_version": OED_REPLAY_SCHEMA_VERSION,
+        "schema_version": replay_schema,
         "status": "COMPLETE",
         "controller_id": resolved_oed.controller_id,
         "oed_config_path": str(resolved_oed.source_path),

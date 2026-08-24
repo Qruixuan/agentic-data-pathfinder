@@ -43,6 +43,15 @@ unaffordable probe produces `budget_limited_stop`; unreachable `G_other`
 produces `structural_hold`. These outcomes do not certify the unexplored
 frontier.
 
+With an AWM v2 config, the trace additionally reports
+`gain_interval_source`, `commit_gain_width`, the paired sample count, and the
+per-pair/per-look alpha. Before a candidate is observed, the source is
+`marginal-phi-difference`. After a valid paired Reveal, Commit and optimistic
+value use `paired-fixed-looks-empirical-bernstein`. The OED stability radius is
+the width of the actual Commit-gain interval, rather than reconstructing it
+from separate marginal widths. The configured OED iteration limit may not
+exceed AWM v2's preregistered maximum number of looks.
+
 The committed
 [`oed_reduced_mvp.json`](../../configs/oed_reduced_mvp.json) declares the
 finite Reveal set, tier, budget, cap, and probe-window loss. Its cost status is
@@ -144,6 +153,25 @@ a real system. See the scientific boundary in
   checks; and
 - `oed_manifest.json`: input hashes, output paths, data-role declaration, and
   confirmation that no deployment mutation was performed.
+
+## Post-hoc OED v2 Diagnostic
+
+After producing the AWM v2 diagnostic above, replay the same frozen Oracle
+with the separately labelled controller config:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-oed-replay \
+  --oed-config configs/multi_candidate_formal_v1_oed_v2_diagnostic.json \
+  --awm-config configs/multi_candidate_formal_v1_awm_v2_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_OED_V2_OUT"
+```
+
+This run is offline and performs no worker, Data Agent, FlowMesh, or physical
+storage mutation. Its purpose is to determine whether the revised certificate
+changes the width or terminal action on already-frozen data. It remains
+post-hoc method development, not a new confirmatory OED result.
 
 ## Current Boundary
 
