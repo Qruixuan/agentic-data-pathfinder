@@ -8,6 +8,7 @@ from typing import Any
 
 from ..awm import (
     AWM_CONFIG_SCHEMA_VERSION_V2,
+    AWM_CONFIG_SCHEMA_VERSION_V2_1,
     AWMDataset,
     AWMConfig,
     AdaptiveWorkloadModel,
@@ -26,6 +27,7 @@ from .controller import OEDController, OEDState
 
 OED_REPLAY_SCHEMA_VERSION = "pathfinder.oed-replay/v1alpha1"
 OED_REPLAY_SCHEMA_VERSION_V2 = "pathfinder.oed-replay/v2alpha1"
+OED_REPLAY_SCHEMA_VERSION_V2_1 = "pathfinder.oed-replay/v2alpha2"
 _ACTIVE_POLICIES = (
     "full_oed",
     "passive_awm",
@@ -366,6 +368,8 @@ def run_oed_replay(
     truths = _truths(base_dataset)
     if (
         resolved_awm.confidence.paired_gain_enabled
+        and resolved_awm.confidence.look_semantics
+        == "controller-iteration-upper-bound"
         and resolved_oed.max_iterations
         > resolved_awm.confidence.maximum_looks
     ):
@@ -436,11 +440,10 @@ def run_oed_replay(
         [results[name] for name in sorted(results)],
         summary_path,
     )
-    replay_schema = (
-        OED_REPLAY_SCHEMA_VERSION_V2
-        if resolved_awm.schema_version == AWM_CONFIG_SCHEMA_VERSION_V2
-        else OED_REPLAY_SCHEMA_VERSION
-    )
+    replay_schema = {
+        AWM_CONFIG_SCHEMA_VERSION_V2: OED_REPLAY_SCHEMA_VERSION_V2,
+        AWM_CONFIG_SCHEMA_VERSION_V2_1: OED_REPLAY_SCHEMA_VERSION_V2_1,
+    }.get(resolved_awm.schema_version, OED_REPLAY_SCHEMA_VERSION)
     evaluation = {
         "schema_version": replay_schema,
         "awm_config_schema_version": resolved_awm.schema_version,

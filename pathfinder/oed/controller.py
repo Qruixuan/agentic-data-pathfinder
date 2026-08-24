@@ -44,7 +44,12 @@ class CandidateScore:
     gain_interval_source: str
     commit_gain_width: float
     paired_gain_pair_count: int | None
+    paired_gain_training_snapshot_sha256: str | None
     paired_gain_alpha_per_pair_look: float | None
+    paired_gain_point_estimate_per_session: float | None
+    paired_gain_variance_radius_per_session: float | None
+    paired_gain_range_radius_per_session: float | None
+    paired_gain_clipped_to_support: bool | None
     pessimistic_commit_gain: float
     optimistic_reveal_gain: float
     candidate_width: float
@@ -234,8 +239,33 @@ class OEDController:
                 if paired_certificate is not None
                 else None
             ),
+            paired_gain_training_snapshot_sha256=(
+                paired_certificate.training_snapshot_sha256
+                if paired_certificate is not None
+                else None
+            ),
             paired_gain_alpha_per_pair_look=(
                 paired_certificate.alpha_per_pair_look
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_point_estimate_per_session=(
+                paired_certificate.point_estimate_per_session
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_variance_radius_per_session=(
+                paired_certificate.variance_radius_per_session
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_range_radius_per_session=(
+                paired_certificate.range_radius_per_session
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_clipped_to_support=(
+                paired_certificate.clipped_to_support
                 if paired_certificate is not None
                 else None
             ),

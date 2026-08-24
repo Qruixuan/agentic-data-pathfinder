@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from statistics import NormalDist, mean, variance
 from typing import Any
 
@@ -89,12 +90,24 @@ class PairedGainCertificate:
     candidate_design_id: str
     method: str
     pair_count: int
+    training_snapshot_sha256: str
     family_size: int
     maximum_looks: int
     alpha_per_pair_look: float
     point_estimate_per_session: float
+    success_difference_point_estimate: float
+    service_cost_difference_point_estimate: float
+    sample_variance_per_session: float
+    success_difference_sample_variance: float
+    service_cost_difference_sample_variance: float
+    success_cost_sample_covariance: float
+    variance_radius_per_session: float
+    range_radius_per_session: float
+    total_radius_per_session: float
     support_per_session: Interval
+    unclipped_gain_per_session: Interval
     gain_per_session: Interval
+    clipped_to_support: bool
     phi_gain: Interval
     transition_adjusted_gain: Interval
 
@@ -108,14 +121,46 @@ class PairedGainCertificate:
             "candidate_design_id": self.candidate_design_id,
             "method": self.method,
             "pair_count": self.pair_count,
+            "training_snapshot_sha256": self.training_snapshot_sha256,
             "family_size": self.family_size,
             "maximum_looks": self.maximum_looks,
             "alpha_per_pair_look": self.alpha_per_pair_look,
             "point_estimate_per_session": self.point_estimate_per_session,
+            "success_difference_point_estimate": (
+                self.success_difference_point_estimate
+            ),
+            "service_cost_difference_point_estimate": (
+                self.service_cost_difference_point_estimate
+            ),
+            "sample_variance_per_session": (
+                self.sample_variance_per_session
+            ),
+            "success_difference_sample_variance": (
+                self.success_difference_sample_variance
+            ),
+            "service_cost_difference_sample_variance": (
+                self.service_cost_difference_sample_variance
+            ),
+            "success_cost_sample_covariance": (
+                self.success_cost_sample_covariance
+            ),
+            "variance_radius_per_session": (
+                self.variance_radius_per_session
+            ),
+            "range_radius_per_session": self.range_radius_per_session,
+            "total_radius_per_session": self.total_radius_per_session,
             "support_lower_per_session": self.support_per_session.lower,
             "support_upper_per_session": self.support_per_session.upper,
+            "support_width_per_session": self.support_per_session.width,
+            "unclipped_gain_lower_per_session": (
+                self.unclipped_gain_per_session.lower
+            ),
+            "unclipped_gain_upper_per_session": (
+                self.unclipped_gain_per_session.upper
+            ),
             "gain_lower_per_session": self.gain_per_session.lower,
             "gain_upper_per_session": self.gain_per_session.upper,
+            "clipped_to_support": self.clipped_to_support,
             "phi_gain_lower": self.phi_gain.lower,
             "phi_gain_upper": self.phi_gain.upper,
             "transition_adjusted_gain_lower": (
@@ -125,6 +170,45 @@ class PairedGainCertificate:
                 self.transition_adjusted_gain.upper
             ),
         }
+
+
+@dataclass(frozen=True)
+class EmpiricalBernsteinEstimate:
+    interval: Interval
+    unclipped_interval: Interval
+    sample_mean: float
+    sample_variance: float
+    variance_radius: float
+    range_radius: float
+    total_radius: float
+    clipped_to_support: bool
+
+
+@dataclass(frozen=True)
+class PairedGainPowerAnalysis:
+    current_design_id: str
+    candidate_design_id: str
+    method: str
+    planning_status: str
+    current_pair_count: int
+    alpha_per_pair_look: float
+    assumed_point_estimate_per_session: float
+    assumed_sample_variance_per_session: float
+    support_width_per_session: float
+    current_total_radius_per_session: float
+    current_clipped_to_support: bool
+    estimated_pairs_for_unclipped_interval: int | None
+    estimated_pairs_for_50pct_support_width: int | None
+    estimated_pairs_for_25pct_support_width: int | None
+    estimated_pairs_for_10pct_support_width: int | None
+    estimated_pairs_for_positive_commit_lower: int | None
+    commit_margin: float
+    maximum_planning_pairs: int
+    caveat: str
+
+    def to_row(self, *, model_kind: str) -> dict[str, Any]:
+        payload = asdict(self)
+        return {"model_kind": model_kind, **payload}
 
 
 def _intervals_jsonable(values: dict[str, Interval]) -> dict[str, Any]:
@@ -155,12 +239,12 @@ def _wilson_interval(successes: int, trials: int, z: float) -> Interval:
     )
 
 
-def _empirical_bernstein_interval(
+def _empirical_bernstein_estimate(
     values: tuple[float, ...],
     *,
     support: Interval,
     delta: float,
-) -> Interval:
+) -> EmpiricalBernsteinEstimate:
     """Two-sided fixed-look Maurer-Pontil empirical Bernstein interval.
 
     The one-sided bound is applied to both tails with ``delta / 2`` and
@@ -168,7 +252,7 @@ def _empirical_bernstein_interval(
     multiple design pairs or looks must allocate ``delta`` by a union bound.
     """
     if not values:
-        return support
+        raise ValueError("empirical Bernstein values cannot be empty")
     if not 0.0 < delta < 1.0:
         raise ValueError("empirical Bernstein delta must be in (0, 1)")
     for value in values:
@@ -178,22 +262,105 @@ def _empirical_bernstein_interval(
             )
     sample_mean = mean(values)
     if len(values) < 2 or support.width <= 0.0:
-        return Interval(
-            max(support.lower, sample_mean),
-            min(support.upper, sample_mean),
-        ) if support.width <= 0.0 else support
+        interval = (
+            Interval(sample_mean, sample_mean)
+            if support.width <= 0.0
+            else support
+        )
+        return EmpiricalBernsteinEstimate(
+            interval=interval,
+            unclipped_interval=interval,
+            sample_mean=sample_mean,
+            sample_variance=0.0,
+            variance_radius=0.0,
+            range_radius=(0.0 if support.width <= 0.0 else support.width),
+            total_radius=(0.0 if support.width <= 0.0 else support.width),
+            clipped_to_support=False,
+        )
     sample_variance = variance(values)
     log_term = math.log(4.0 / delta)
-    radius = math.sqrt(
+    variance_radius = math.sqrt(
         2.0 * sample_variance * log_term / len(values)
-    ) + (
+    )
+    range_radius = (
         7.0 * support.width * log_term
         / (3.0 * (len(values) - 1))
     )
-    return Interval(
-        max(support.lower, sample_mean - radius),
-        min(support.upper, sample_mean + radius),
+    radius = variance_radius + range_radius
+    unclipped = Interval(sample_mean - radius, sample_mean + radius)
+    interval = Interval(
+        max(support.lower, unclipped.lower),
+        min(support.upper, unclipped.upper),
     )
+    return EmpiricalBernsteinEstimate(
+        interval=interval,
+        unclipped_interval=unclipped,
+        sample_mean=sample_mean,
+        sample_variance=sample_variance,
+        variance_radius=variance_radius,
+        range_radius=range_radius,
+        total_radius=radius,
+        clipped_to_support=(interval != unclipped),
+    )
+
+
+def _sample_variance(values: tuple[float, ...]) -> float:
+    return variance(values) if len(values) >= 2 else 0.0
+
+
+def _sample_covariance(
+    left: tuple[float, ...],
+    right: tuple[float, ...],
+) -> float:
+    if len(left) != len(right):
+        raise ValueError("covariance inputs must have equal length")
+    if len(left) < 2:
+        return 0.0
+    left_mean = mean(left)
+    right_mean = mean(right)
+    return sum(
+        (left_value - left_mean) * (right_value - right_mean)
+        for left_value, right_value in zip(left, right, strict=True)
+    ) / (len(left) - 1)
+
+
+def _projected_empirical_bernstein_radius(
+    *,
+    sample_variance: float,
+    support_width: float,
+    delta: float,
+    pair_count: int,
+) -> float:
+    if pair_count < 2:
+        return math.inf
+    log_term = math.log(4.0 / delta)
+    return math.sqrt(
+        2.0 * sample_variance * log_term / pair_count
+    ) + (
+        7.0 * support_width * log_term
+        / (3.0 * (pair_count - 1))
+    )
+
+
+def _minimum_projected_pairs(
+    predicate: Any,
+    *,
+    start: int,
+    maximum: int,
+) -> int | None:
+    lower = max(2, start)
+    if predicate(lower):
+        return lower
+    if not predicate(maximum):
+        return None
+    upper = maximum
+    while lower + 1 < upper:
+        middle = (lower + upper) // 2
+        if predicate(middle):
+            upper = middle
+        else:
+            lower = middle
+    return upper
 
 
 def _group_key(group: tuple[str, ...]) -> str:
@@ -243,8 +410,17 @@ class AdaptiveWorkloadModel:
             "paired_gain_alpha_fraction": (
                 config.confidence.paired_gain_alpha_fraction
             ),
+            "paired_comparisons": [
+                list(comparison)
+                for comparison in self._declared_paired_comparisons()
+            ],
             "paired_design_pair_count": self._design_pair_count(),
             "maximum_looks": config.confidence.maximum_looks,
+            "look_semantics": config.confidence.look_semantics,
+            "repeated_fixed_snapshot_reads_count_as_new_looks": (
+                config.confidence.look_semantics
+                != "fixed-training-snapshot-per-pair"
+            ),
             "paired_family_size": self._paired_family_size(),
             "paired_alpha_per_pair_look": self._paired_alpha(),
             "paired_support_rule": (
@@ -266,11 +442,14 @@ class AdaptiveWorkloadModel:
         )
 
     def gain_interval_source(self, current: str, candidate: str) -> str:
-        return (
-            "paired-fixed-looks-empirical-bernstein"
-            if self.paired_gain_certificate(current, candidate) is not None
-            else "marginal-phi-difference"
-        )
+        if self.paired_gain_certificate(current, candidate) is None:
+            return "marginal-phi-difference"
+        if (
+            self.dataset.model_config.confidence.look_semantics
+            == "fixed-training-snapshot-per-pair"
+        ):
+            return "paired-fixed-snapshot-empirical-bernstein"
+        return "paired-fixed-looks-empirical-bernstein"
 
     def pessimistic_gain(self, current: str, candidate: str) -> float:
         return self.gain_interval(current, candidate).lower
@@ -290,6 +469,9 @@ class AdaptiveWorkloadModel:
             return self._paired_gain_cache[cache_key]
         config = self.dataset.model_config.confidence
         if not config.paired_gain_enabled:
+            self._paired_gain_cache[cache_key] = None
+            return None
+        if not self._paired_comparison_declared(current, candidate):
             self._paired_gain_cache[cache_key] = None
             return None
         if not (
@@ -316,30 +498,62 @@ class AdaptiveWorkloadModel:
 
         task_value = self.dataset.task_class.task_value
         resource_weight = self.dataset.system.resource_cost_weight
-        values = tuple(
-            task_value
-            * (
-                candidate_observations[key].success
-                - current_observations[key].success
-            )
-            - resource_weight
-            * (
-                candidate_observations[key].service_cost
-                - current_observations[key].service_cost
-            )
+        success_differences = tuple(
+            candidate_observations[key].success
+            - current_observations[key].success
             for key in keys
         )
+        service_cost_differences = tuple(
+            candidate_observations[key].service_cost
+            - current_observations[key].service_cost
+            for key in keys
+        )
+        values = tuple(
+            task_value * success_difference
+            - resource_weight * service_cost_difference
+            for success_difference, service_cost_difference in zip(
+                success_differences,
+                service_cost_differences,
+                strict=True,
+            )
+        )
+        snapshot_payload = [
+            {
+                "pairing_key": key,
+                "current_success": current_observations[key].success,
+                "candidate_success": candidate_observations[key].success,
+                "current_service_cost": (
+                    current_observations[key].service_cost
+                ),
+                "candidate_service_cost": (
+                    candidate_observations[key].service_cost
+                ),
+            }
+            for key in keys
+        ]
+        training_snapshot_sha256 = sha256(
+            json.dumps(
+                {
+                    "current_design_id": current,
+                    "candidate_design_id": candidate,
+                    "observations": snapshot_payload,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         current_cost_upper = self._service_cost_support_upper(current)
         candidate_cost_upper = self._service_cost_support_upper(candidate)
         support = Interval(
             -task_value - resource_weight * candidate_cost_upper,
             task_value + resource_weight * current_cost_upper,
         )
-        per_session = _empirical_bernstein_interval(
+        estimate = _empirical_bernstein_estimate(
             values,
             support=support,
             delta=self._paired_alpha(),
         )
+        per_session = estimate.interval
         storage_delta = (
             self.dataset.storage_costs[candidate]
             - self.dataset.storage_costs[current]
@@ -359,17 +573,143 @@ class AdaptiveWorkloadModel:
             candidate_design_id=candidate,
             method=config.paired_gain_method,
             pair_count=len(keys),
+            training_snapshot_sha256=training_snapshot_sha256,
             family_size=self._paired_family_size(),
             maximum_looks=config.maximum_looks,
             alpha_per_pair_look=self._paired_alpha(),
-            point_estimate_per_session=mean(values),
+            point_estimate_per_session=estimate.sample_mean,
+            success_difference_point_estimate=mean(success_differences),
+            service_cost_difference_point_estimate=mean(
+                service_cost_differences
+            ),
+            sample_variance_per_session=estimate.sample_variance,
+            success_difference_sample_variance=_sample_variance(
+                success_differences
+            ),
+            service_cost_difference_sample_variance=_sample_variance(
+                service_cost_differences
+            ),
+            success_cost_sample_covariance=_sample_covariance(
+                success_differences,
+                service_cost_differences,
+            ),
+            variance_radius_per_session=estimate.variance_radius,
+            range_radius_per_session=estimate.range_radius,
+            total_radius_per_session=estimate.total_radius,
             support_per_session=support,
+            unclipped_gain_per_session=estimate.unclipped_interval,
             gain_per_session=per_session,
+            clipped_to_support=estimate.clipped_to_support,
             phi_gain=phi_gain,
             transition_adjusted_gain=adjusted,
         )
         self._paired_gain_cache[cache_key] = certificate
         return certificate
+
+    def paired_gain_power_analysis(
+        self,
+        current: str,
+        candidate: str,
+        *,
+        maximum_planning_pairs: int = 10_000_000,
+    ) -> PairedGainPowerAnalysis | None:
+        """Return plug-in sample-size planning, never a confidence claim."""
+        certificate = self.paired_gain_certificate(current, candidate)
+        if certificate is None:
+            return None
+        if maximum_planning_pairs < 2:
+            raise ValueError("maximum_planning_pairs must be at least 2")
+        if maximum_planning_pairs < certificate.pair_count:
+            raise ValueError(
+                "maximum_planning_pairs cannot be smaller than the current "
+                "pair count"
+            )
+
+        support = certificate.support_per_session
+        sample_mean = certificate.point_estimate_per_session
+        sample_variance = certificate.sample_variance_per_session
+        delta = certificate.alpha_per_pair_look
+
+        def radius(pair_count: int) -> float:
+            return _projected_empirical_bernstein_radius(
+                sample_variance=sample_variance,
+                support_width=support.width,
+                delta=delta,
+                pair_count=pair_count,
+            )
+
+        def projected_interval(pair_count: int) -> Interval:
+            projected_radius = radius(pair_count)
+            return Interval(
+                max(support.lower, sample_mean - projected_radius),
+                min(support.upper, sample_mean + projected_radius),
+            )
+
+        start = certificate.pair_count
+        unclipped = _minimum_projected_pairs(
+            lambda pair_count: (
+                sample_mean - radius(pair_count) >= support.lower
+                and sample_mean + radius(pair_count) <= support.upper
+            ),
+            start=start,
+            maximum=maximum_planning_pairs,
+        )
+
+        width_targets = {
+            fraction: _minimum_projected_pairs(
+                lambda pair_count, fraction=fraction: (
+                    projected_interval(pair_count).width
+                    <= fraction * support.width
+                ),
+                start=start,
+                maximum=maximum_planning_pairs,
+            )
+            for fraction in (0.5, 0.25, 0.1)
+        }
+        storage_delta = (
+            self.dataset.storage_costs[candidate]
+            - self.dataset.storage_costs[current]
+        )
+        transition_upper = self._bounds[candidate].transition_cost.upper
+        horizon = self.dataset.horizon_sessions
+        commit_margin = self.dataset.model_config.commit_margin
+        positive_commit = _minimum_projected_pairs(
+            lambda pair_count: (
+                horizon * projected_interval(pair_count).lower
+                - storage_delta
+                - transition_upper
+                > commit_margin
+            ),
+            start=start,
+            maximum=maximum_planning_pairs,
+        )
+        return PairedGainPowerAnalysis(
+            current_design_id=current,
+            candidate_design_id=candidate,
+            method="plug-in-fixed-variance-empirical-bernstein-planning",
+            planning_status="posthoc-planning-not-a-confidence-guarantee",
+            current_pair_count=certificate.pair_count,
+            alpha_per_pair_look=delta,
+            assumed_point_estimate_per_session=sample_mean,
+            assumed_sample_variance_per_session=sample_variance,
+            support_width_per_session=support.width,
+            current_total_radius_per_session=(
+                certificate.total_radius_per_session
+            ),
+            current_clipped_to_support=certificate.clipped_to_support,
+            estimated_pairs_for_unclipped_interval=unclipped,
+            estimated_pairs_for_50pct_support_width=width_targets[0.5],
+            estimated_pairs_for_25pct_support_width=width_targets[0.25],
+            estimated_pairs_for_10pct_support_width=width_targets[0.1],
+            estimated_pairs_for_positive_commit_lower=positive_commit,
+            commit_margin=commit_margin,
+            maximum_planning_pairs=maximum_planning_pairs,
+            caveat=(
+                "Plug-in projection holds the observed mean and variance "
+                "fixed, assumes bounded independent paired sampling units, "
+                "and must not be interpreted as achieved power or coverage."
+            ),
+        )
 
     def _joint_z(self) -> float:
         alpha = self._joint_metric_alpha()
@@ -395,8 +735,32 @@ class AdaptiveWorkloadModel:
         return max(1, metric_count)
 
     def _design_pair_count(self) -> int:
-        count = len(self.dataset.design_ids)
-        return max(1, count * (count - 1) // 2)
+        return max(1, len(self._declared_paired_comparisons()))
+
+    def _declared_paired_comparisons(
+        self,
+    ) -> tuple[tuple[str, str], ...]:
+        configured = self.dataset.model_config.confidence.paired_comparisons
+        if configured:
+            return configured
+        return tuple(
+            (left_id, right_id)
+            for left_index, left_id in enumerate(self.dataset.design_ids)
+            for right_id in self.dataset.design_ids[left_index + 1 :]
+        )
+
+    def _paired_comparison_declared(
+        self,
+        current: str,
+        candidate: str,
+    ) -> bool:
+        configured = self.dataset.model_config.confidence.paired_comparisons
+        if configured:
+            return (current, candidate) in configured
+        return frozenset((current, candidate)) in {
+            frozenset(comparison)
+            for comparison in self._declared_paired_comparisons()
+        }
 
     def _paired_family_size(self) -> int:
         if not self.dataset.model_config.confidence.paired_gain_enabled:

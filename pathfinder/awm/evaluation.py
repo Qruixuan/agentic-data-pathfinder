@@ -12,6 +12,7 @@ from ..reduced_oracle.contracts import (
 )
 from .contracts import (
     AWM_CONFIG_SCHEMA_VERSION_V2,
+    AWM_CONFIG_SCHEMA_VERSION_V2_1,
     AWMConfig,
     load_awm_config,
 )
@@ -21,6 +22,7 @@ from .model import AWM_MODEL_KINDS, AdaptiveWorkloadModel
 
 AWM_EVALUATION_SCHEMA_VERSION = "pathfinder.awm-evaluation/v1alpha1"
 AWM_EVALUATION_SCHEMA_VERSION_V2 = "pathfinder.awm-evaluation/v2alpha1"
+AWM_EVALUATION_SCHEMA_VERSION_V2_1 = "pathfinder.awm-evaluation/v2alpha2"
 
 
 def holdout_truth(
@@ -245,6 +247,7 @@ def evaluate_awm(
         for bounds in model.bounds.values()
     ]
     paired_rows = []
+    power_rows = []
     for model in models.values():
         for current in dataset.design_ids:
             for candidate in dataset.design_ids:
@@ -258,12 +261,21 @@ def evaluate_awm(
                     paired_rows.append(
                         certificate.to_row(model_kind=model.model_kind)
                     )
+                    power = model.paired_gain_power_analysis(
+                        current,
+                        candidate,
+                    )
+                    if power is not None:
+                        power_rows.append(
+                            power.to_row(model_kind=model.model_kind)
+                        )
     results = {
         model_kind: _evaluate_model(dataset, model, truths)
         for model_kind, model in models.items()
     }
     bounds_path = output / "awm_bounds.csv"
     paired_bounds_path = output / "awm_paired_gain_bounds.csv"
+    paired_power_path = output / "awm_paired_power_analysis.csv"
     evaluation_path = output / "awm_evaluation.json"
     truth_path = output / "holdout_truth.json"
     truth_by_repetition_path = (
@@ -272,21 +284,23 @@ def evaluate_awm(
     manifest_path = output / "awm_manifest.json"
     _write_csv(rows, bounds_path)
     _write_csv(paired_rows, paired_bounds_path)
+    _write_csv(power_rows, paired_power_path)
     _write_json(truths, truth_path)
     _write_json(truths_by_repetition, truth_by_repetition_path)
-    evaluation_schema = (
-        AWM_EVALUATION_SCHEMA_VERSION_V2
-        if resolved_model.schema_version == AWM_CONFIG_SCHEMA_VERSION_V2
-        else AWM_EVALUATION_SCHEMA_VERSION
-    )
+    evaluation_schema = {
+        AWM_CONFIG_SCHEMA_VERSION_V2: AWM_EVALUATION_SCHEMA_VERSION_V2,
+        AWM_CONFIG_SCHEMA_VERSION_V2_1: (
+            AWM_EVALUATION_SCHEMA_VERSION_V2_1
+        ),
+    }.get(resolved_model.schema_version, AWM_EVALUATION_SCHEMA_VERSION)
     evaluation = {
         "schema_version": evaluation_schema,
         "awm_config_schema_version": resolved_model.schema_version,
         "model_id": resolved_model.model_id,
         "confidence_level": resolved_model.confidence_level,
         "confidence_method": (
-            "fixed-family-bonferroni-wilson-and-fixed-looks-"
-            "empirical-bernstein"
+            "fixed-family-bonferroni-wilson-and-"
+            + resolved_model.confidence.paired_gain_method
             if resolved_model.confidence.paired_gain_enabled
             else "joint-bonferroni-wilson"
         ),
@@ -339,6 +353,7 @@ def evaluate_awm(
         },
         "bounds_path": str(bounds_path),
         "paired_gain_bounds_path": str(paired_bounds_path),
+        "paired_gain_power_analysis_path": str(paired_power_path),
         "evaluation_path": str(evaluation_path),
         "holdout_truth_path": str(truth_path),
         "holdout_truth_by_repetition_path": str(

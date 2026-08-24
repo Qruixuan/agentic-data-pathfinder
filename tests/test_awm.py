@@ -23,6 +23,16 @@ COMMITTED_AWM_CONFIG = ROOT / "configs" / "awm_reduced_mvp.json"
 COMMITTED_AWM_V2_CONFIG = (
     ROOT / "configs" / "multi_candidate_formal_v1_awm_v2_diagnostic.json"
 )
+COMMITTED_AWM_V2_ALPHA2_CONFIG = (
+    ROOT
+    / "configs"
+    / "multi_candidate_formal_v1_awm_v2alpha2_oed_diagnostic.json"
+)
+COMMITTED_AWM_V2_ALPHA2_POWER_CONFIG = (
+    ROOT
+    / "configs"
+    / "multi_candidate_formal_v1_awm_v2alpha2_power_diagnostic.json"
+)
 DESIGNS = ("D_remote_digest", "D_local_digest")
 
 
@@ -132,7 +142,10 @@ def _awm_config(
         "transition_relative_radius": 0.1,
         "commit_margin": 0,
     }
-    if schema_version == "pathfinder.awm/v2alpha1":
+    if schema_version in (
+        "pathfinder.awm/v2alpha1",
+        "pathfinder.awm/v2alpha2",
+    ):
         payload["confidence"] = {
             "family_mode": "fixed-full-domain",
             "marginal_alpha_fraction": 0.5,
@@ -144,6 +157,15 @@ def _awm_config(
             "maximum_looks": maximum_looks,
             "require_complete_pairs": True,
         }
+        if schema_version == "pathfinder.awm/v2alpha2":
+            payload["confidence"].update({
+                "paired_gain_method": (
+                    "fixed-snapshot-empirical-bernstein"
+                ),
+                "maximum_looks": 1,
+                "look_semantics": "fixed-training-snapshot-per-pair",
+                "paired_comparisons": [list(DESIGNS)],
+            })
     _write_json(path, payload)
     return path
 
@@ -290,6 +312,53 @@ class AWMConfigTest(unittest.TestCase):
         self.assertEqual(4, config.confidence.maximum_looks)
         self.assertEqual(16, config.confidence.paired_gain_minimum_pairs)
 
+    def test_v2alpha2_preregisters_three_one_look_comparisons(self) -> None:
+        config = load_awm_config(COMMITTED_AWM_V2_ALPHA2_CONFIG)
+        self.assertEqual(
+            "fixed-training-snapshot-per-pair",
+            config.confidence.look_semantics,
+        )
+        self.assertEqual(1, config.confidence.maximum_looks)
+        self.assertEqual(3, len(config.confidence.paired_comparisons))
+        self.assertEqual(
+            ("D_origin_remote", "D_local_pair"),
+            config.confidence.paired_comparisons[-1],
+        )
+        power = load_awm_config(COMMITTED_AWM_V2_ALPHA2_POWER_CONFIG)
+        self.assertEqual(4, len(power.observed_design_ids))
+        self.assertEqual(
+            config.confidence.paired_comparisons,
+            power.confidence.paired_comparisons,
+        )
+
+    def test_v2alpha2_rejects_duplicate_unordered_comparisons(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = _awm_config(
+                root,
+                schema_version="pathfinder.awm/v2alpha2",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["confidence"]["paired_comparisons"].append(
+                list(reversed(DESIGNS))
+            )
+            _write_json(path, payload)
+            with self.assertRaisesRegex(AWMConfigError, "duplicate unordered"):
+                load_awm_config(path)
+
+    def test_v2alpha2_fixed_snapshot_requires_one_look(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = _awm_config(
+                root,
+                schema_version="pathfinder.awm/v2alpha2",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["confidence"]["maximum_looks"] = 2
+            _write_json(path, payload)
+            with self.assertRaisesRegex(AWMConfigError, "maximum_looks=1"):
+                load_awm_config(path)
+
     def test_v2_alpha_fractions_must_sum_to_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -335,6 +404,94 @@ class AWMConfigTest(unittest.TestCase):
 
 
 class AWMSyntheticOracleTest(unittest.TestCase):
+    def test_v2alpha2_certificate_decomposition_and_power_are_auditable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            config = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v2alpha2",
+            ))
+            oracle_output = _synthetic_oracle_output(root)
+            model = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    config,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            )
+            certificate = model.paired_gain_certificate(*DESIGNS)
+            self.assertIsNotNone(certificate)
+            assert certificate is not None
+            self.assertAlmostEqual(
+                certificate.total_radius_per_session,
+                certificate.variance_radius_per_session
+                + certificate.range_radius_per_session,
+            )
+            self.assertAlmostEqual(
+                certificate.point_estimate_per_session,
+                model.dataset.task_class.task_value
+                * certificate.success_difference_point_estimate
+                - model.dataset.system.resource_cost_weight
+                * certificate.service_cost_difference_point_estimate,
+            )
+            self.assertEqual(1, certificate.family_size)
+            self.assertEqual(64, len(certificate.training_snapshot_sha256))
+            self.assertAlmostEqual(0.05, certificate.alpha_per_pair_look)
+            self.assertEqual(
+                "paired-fixed-snapshot-empirical-bernstein",
+                model.gain_interval_source(*DESIGNS),
+            )
+            self.assertIsNone(
+                model.paired_gain_certificate(*reversed(DESIGNS))
+            )
+            self.assertEqual(
+                "marginal-phi-difference",
+                model.gain_interval_source(*reversed(DESIGNS)),
+            )
+
+            planning = model.paired_gain_power_analysis(*DESIGNS)
+            self.assertIsNotNone(planning)
+            assert planning is not None
+            self.assertEqual(16, planning.current_pair_count)
+            self.assertEqual(
+                "posthoc-planning-not-a-confidence-guarantee",
+                planning.planning_status,
+            )
+            self.assertGreaterEqual(
+                planning.estimated_pairs_for_50pct_support_width or 0,
+                planning.current_pair_count,
+            )
+
+            output = root / "awm-v2alpha2-output"
+            manifest = evaluate_awm(
+                config,
+                oracle,
+                oracle_output_dir=oracle_output,
+                output_dir=output,
+            )
+            self.assertEqual(
+                str(output / "awm_paired_power_analysis.csv"),
+                manifest["paired_gain_power_analysis_path"],
+            )
+            with (output / "awm_paired_power_analysis.csv").open(
+                encoding="utf-8",
+                newline="",
+            ) as handle:
+                power_rows = list(csv.DictReader(handle))
+            self.assertGreaterEqual(len(power_rows), 1)
+            evaluation = json.loads(
+                (output / "awm_evaluation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "pathfinder.awm-evaluation/v2alpha2",
+                evaluation["schema_version"],
+            )
+
     def test_v2_fixed_marginal_family_does_not_expand_after_reveal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

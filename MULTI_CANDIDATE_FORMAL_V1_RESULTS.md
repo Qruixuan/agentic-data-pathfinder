@@ -226,6 +226,23 @@ been recomputed or overwritten. The v2 configs are explicitly suffixed
 `_diagnostic`; their results remain to be run and must be interpreted as
 post-hoc method development.
 
+The completed v2alpha1 replay showed that this first correction was not
+informative at 16 training pairs. Although all six diagnostic holdout checks
+were covered, the three final origin-to-candidate paired intervals were about
+21,980--23,520 objective units wide and were effectively clipped to the full
+declared utility support. Full OED again revealed all three candidates and
+stopped without a Commit. The result isolates the finite-support range term,
+the broad six-pair/four-look family, and the small paired sample count as the
+dominant limitations; it does not indicate a telemetry or execution failure.
+
+`pathfinder.awm/v2alpha2` is the next post-hoc method diagnostic. It fixes the
+comparison family to the three origin-to-candidate decisions, treats repeated
+reads of one frozen snapshot as one simultaneous look, decomposes every
+certificate radius, and emits plug-in sample-size planning. The all-observed
+power config and origin-only OED config are deliberately separate. Their
+outputs must not replace the frozen v1 result, and any selected sample size or
+decision rule must be preregistered and tested on independent data.
+
 ## Supported Claims
 
 The current evidence supports the following controlled-testbed claims:

@@ -11,9 +11,11 @@ from typing import Any, Mapping
 
 AWM_CONFIG_SCHEMA_VERSION = "pathfinder.awm/v1alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V2 = "pathfinder.awm/v2alpha1"
+AWM_CONFIG_SCHEMA_VERSION_V2_1 = "pathfinder.awm/v2alpha2"
 AWM_CONFIG_SCHEMA_VERSIONS = (
     AWM_CONFIG_SCHEMA_VERSION,
     AWM_CONFIG_SCHEMA_VERSION_V2,
+    AWM_CONFIG_SCHEMA_VERSION_V2_1,
 )
 CONFIDENCE_FAMILY_MODES = (
     "dynamic-observed-v1",
@@ -22,6 +24,11 @@ CONFIDENCE_FAMILY_MODES = (
 PAIRED_GAIN_METHODS = (
     "disabled",
     "fixed-looks-empirical-bernstein",
+    "fixed-snapshot-empirical-bernstein",
+)
+PAIRED_LOOK_SEMANTICS = (
+    "controller-iteration-upper-bound",
+    "fixed-training-snapshot-per-pair",
 )
 _ASSUMPTION_NAMES = (
     "own_price_monotonicity",
@@ -50,6 +57,8 @@ class ConfidenceConfig:
     paired_gain_minimum_pairs: int
     maximum_looks: int
     require_complete_pairs: bool
+    paired_comparisons: tuple[tuple[str, str], ...]
+    look_semantics: str
 
     @property
     def paired_gain_enabled(self) -> bool:
@@ -151,7 +160,7 @@ def _load_confidence_config(
     if schema_version == AWM_CONFIG_SCHEMA_VERSION:
         if "confidence" in root:
             raise AWMConfigError(
-                "confidence is available only in pathfinder.awm/v2alpha1"
+                "confidence is available only in AWM v2 schemas"
             )
         return ConfidenceConfig(
             family_mode="dynamic-observed-v1",
@@ -161,6 +170,8 @@ def _load_confidence_config(
             paired_gain_minimum_pairs=0,
             maximum_looks=1,
             require_complete_pairs=False,
+            paired_comparisons=(),
+            look_semantics="controller-iteration-upper-bound",
         )
 
     raw = _mapping(root.get("confidence"), "confidence")
@@ -176,10 +187,14 @@ def _load_confidence_config(
         raw.get("paired_gain_method"),
         "confidence.paired_gain_method",
     )
-    if method not in PAIRED_GAIN_METHODS or method == "disabled":
+    expected_method = (
+        "fixed-snapshot-empirical-bernstein"
+        if schema_version == AWM_CONFIG_SCHEMA_VERSION_V2_1
+        else "fixed-looks-empirical-bernstein"
+    )
+    if method not in PAIRED_GAIN_METHODS or method != expected_method:
         raise AWMConfigError(
-            "v2 confidence.paired_gain_method must be "
-            "fixed-looks-empirical-bernstein"
+            "confidence.paired_gain_method must be " + expected_method
         )
     marginal_fraction = _fraction(
         raw.get("marginal_alpha_fraction"),
@@ -202,6 +217,69 @@ def _load_confidence_config(
         raise AWMConfigError(
             "confidence alpha fractions must sum to 1"
         )
+    maximum_looks = _positive_integer(
+        raw.get("maximum_looks"),
+        "confidence.maximum_looks",
+    )
+    paired_comparisons: tuple[tuple[str, str], ...] = ()
+    look_semantics = "controller-iteration-upper-bound"
+    if schema_version == AWM_CONFIG_SCHEMA_VERSION_V2_1:
+        raw_comparisons = _list(
+            raw.get("paired_comparisons"),
+            "confidence.paired_comparisons",
+        )
+        comparisons: list[tuple[str, str]] = []
+        unordered_seen: set[frozenset[str]] = set()
+        for index, raw_comparison in enumerate(raw_comparisons):
+            values = _list(
+                raw_comparison,
+                f"confidence.paired_comparisons[{index}]",
+            )
+            if len(values) != 2:
+                raise AWMConfigError(
+                    "each confidence.paired_comparisons entry must contain "
+                    "exactly [current_design_id, candidate_design_id]"
+                )
+            comparison = (
+                _string(
+                    values[0],
+                    f"confidence.paired_comparisons[{index}][0]",
+                ),
+                _string(
+                    values[1],
+                    f"confidence.paired_comparisons[{index}][1]",
+                ),
+            )
+            if comparison[0] == comparison[1]:
+                raise AWMConfigError(
+                    "paired comparison designs must be different"
+                )
+            unordered = frozenset(comparison)
+            if unordered in unordered_seen:
+                raise AWMConfigError(
+                    "paired_comparisons contains a duplicate unordered pair"
+                )
+            unordered_seen.add(unordered)
+            comparisons.append(comparison)
+        if not comparisons:
+            raise AWMConfigError(
+                "v2alpha2 confidence.paired_comparisons cannot be empty"
+            )
+        paired_comparisons = tuple(comparisons)
+        look_semantics = _string(
+            raw.get("look_semantics"),
+            "confidence.look_semantics",
+        )
+        if look_semantics != "fixed-training-snapshot-per-pair":
+            raise AWMConfigError(
+                "v2alpha2 confidence.look_semantics must be "
+                "fixed-training-snapshot-per-pair"
+            )
+        if maximum_looks != 1:
+            raise AWMConfigError(
+                "fixed-training-snapshot-per-pair requires maximum_looks=1"
+            )
+
     return ConfidenceConfig(
         family_mode=family_mode,
         marginal_alpha_fraction=marginal_fraction,
@@ -211,14 +289,13 @@ def _load_confidence_config(
             raw.get("paired_gain_minimum_pairs"),
             "confidence.paired_gain_minimum_pairs",
         ),
-        maximum_looks=_positive_integer(
-            raw.get("maximum_looks"),
-            "confidence.maximum_looks",
-        ),
+        maximum_looks=maximum_looks,
         require_complete_pairs=_boolean(
             raw.get("require_complete_pairs", True),
             "confidence.require_complete_pairs",
         ),
+        paired_comparisons=paired_comparisons,
+        look_semantics=look_semantics,
     )
 
 

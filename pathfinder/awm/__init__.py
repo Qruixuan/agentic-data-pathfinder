@@ -3,6 +3,7 @@
 from .contracts import (
     AWM_CONFIG_SCHEMA_VERSION,
     AWM_CONFIG_SCHEMA_VERSION_V2,
+    AWM_CONFIG_SCHEMA_VERSION_V2_1,
     AWM_CONFIG_SCHEMA_VERSIONS,
     AWMConfig,
     AWMConfigError,
@@ -21,13 +22,16 @@ from .model import (
     AWM_MODEL_KINDS,
     AdaptiveWorkloadModel,
     DesignBounds,
+    EmpiricalBernsteinEstimate,
     Interval,
     PairedGainCertificate,
+    PairedGainPowerAnalysis,
 )
 
 __all__ = [
     "AWM_CONFIG_SCHEMA_VERSION",
     "AWM_CONFIG_SCHEMA_VERSION_V2",
+    "AWM_CONFIG_SCHEMA_VERSION_V2_1",
     "AWM_CONFIG_SCHEMA_VERSIONS",
     "AWM_MODEL_KINDS",
     "AWMConfig",
@@ -38,8 +42,10 @@ __all__ = [
     "ConfidenceConfig",
     "DesignBounds",
     "DesignSample",
+    "EmpiricalBernsteinEstimate",
     "Interval",
     "PairedGainCertificate",
+    "PairedGainPowerAnalysis",
     "TrialObservation",
     "evaluate_awm",
     "holdout_truth",

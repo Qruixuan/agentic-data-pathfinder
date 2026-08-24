@@ -210,33 +210,46 @@ def _validate_pairs(
 ) -> None:
     if not model_config.confidence.paired_gain_enabled:
         return
-    for left_index, left_id in enumerate(design_ids):
+    design_set = set(design_ids)
+    comparisons = model_config.confidence.paired_comparisons
+    if comparisons:
+        pairs = tuple(
+            (left_id, right_id)
+            for left_id, right_id in comparisons
+            if left_id in design_set and right_id in design_set
+        )
+    else:
+        pairs = tuple(
+            (left_id, right_id)
+            for left_index, left_id in enumerate(design_ids)
+            for right_id in design_ids[left_index + 1 :]
+        )
+    for left_id, right_id in pairs:
         left_keys = {
             observation.pairing_key
             for observation in samples[left_id].observations
         }
-        for right_id in design_ids[left_index + 1 :]:
-            right_keys = {
-                observation.pairing_key
-                for observation in samples[right_id].observations
-            }
-            common = left_keys.intersection(right_keys)
-            if (
-                model_config.confidence.require_complete_pairs
-                and left_keys != right_keys
-            ):
-                raise AWMConfigError(
-                    "paired AWM requires identical eligible "
-                    f"{partition_name} keys "
-                    f"for {left_id} and {right_id}; "
-                    f"left_only={len(left_keys - right_keys)}, "
-                    f"right_only={len(right_keys - left_keys)}"
-                )
-            if len(common) < minimum_pairs:
-                raise AWMConfigError(
-                    f"{left_id} and {right_id} have only {len(common)} "
-                    f"eligible paired {partition_name} sessions"
-                )
+        right_keys = {
+            observation.pairing_key
+            for observation in samples[right_id].observations
+        }
+        common = left_keys.intersection(right_keys)
+        if (
+            model_config.confidence.require_complete_pairs
+            and left_keys != right_keys
+        ):
+            raise AWMConfigError(
+                "paired AWM requires identical eligible "
+                f"{partition_name} keys "
+                f"for {left_id} and {right_id}; "
+                f"left_only={len(left_keys - right_keys)}, "
+                f"right_only={len(right_keys - left_keys)}"
+            )
+        if len(common) < minimum_pairs:
+            raise AWMConfigError(
+                f"{left_id} and {right_id} have only {len(common)} "
+                f"eligible paired {partition_name} sessions"
+            )
 
 
 def _load_oracle_table(path: Path) -> dict[str, dict[str, str]]:
@@ -298,6 +311,19 @@ def load_oracle_dataset(
         raise AWMConfigError(
             "observed_design_ids are absent from the Reduced Oracle: "
             + ", ".join(sorted(unknown_designs))
+        )
+    comparison_designs = {
+        design_id
+        for comparison in model_config.confidence.paired_comparisons
+        for design_id in comparison
+    }
+    unknown_comparison_designs = comparison_designs - set(
+        oracle_config.design_ids
+    )
+    if unknown_comparison_designs:
+        raise AWMConfigError(
+            "paired_comparisons reference designs absent from the Reduced "
+            "Oracle: " + ", ".join(sorted(unknown_comparison_designs))
         )
     if model_config.holdout_repetitions >= oracle_config.repetitions:
         raise AWMConfigError(

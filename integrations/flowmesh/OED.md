@@ -52,6 +52,15 @@ the width of the actual Commit-gain interval, rather than reconstructing it
 from separate marginal widths. The configured OED iteration limit may not
 exceed AWM v2's preregistered maximum number of looks.
 
+For `pathfinder.awm/v2alpha2`, the look is instead the immutable training
+snapshot for one explicitly preregistered directed comparison. Re-reading the
+same snapshot in later controller iterations is not a new look, so the OED
+iteration count is not compared with `maximum_looks=1`. Any change to the
+underlying paired observations invalidates that reuse and requires a new
+analysis. The trace records the paired point estimate, variance-radius term,
+range-radius term, and support-clipping flag so a
+`certificate_limited_stop` can be attributed to its uncertainty source.
+
 The committed
 [`oed_reduced_mvp.json`](../../configs/oed_reduced_mvp.json) declares the
 finite Reveal set, tier, budget, cap, and probe-window loss. Its cost status is
@@ -172,6 +181,17 @@ This run is offline and performs no worker, Data Agent, FlowMesh, or physical
 storage mutation. Its purpose is to determine whether the revised certificate
 changes the width or terminal action on already-frozen data. It remains
 post-hoc method development, not a new confirmatory OED result.
+
+The follow-up fixed-snapshot replay is also separate and post-hoc:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-oed-replay \
+  --oed-config configs/multi_candidate_formal_v1_oed_v2alpha2_diagnostic.json \
+  --awm-config configs/multi_candidate_formal_v1_awm_v2alpha2_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_OED_V2_ALPHA2_OUT"
+```
 
 ## Current Boundary
 

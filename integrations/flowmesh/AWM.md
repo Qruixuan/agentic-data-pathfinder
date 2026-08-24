@@ -117,6 +117,41 @@ result creates a new exploratory analysis. The fixed-look bound follows the
 empirical Bernstein construction of Maurer and Pontil (2009); an anytime-valid
 replacement is future work rather than a current claim.
 
+### AWM v2alpha2 fixed-snapshot diagnostic
+
+`pathfinder.awm/v2alpha2` narrows the preregistered paired family without
+changing or overwriting the frozen v1 or v2alpha1 results. Its confidence
+block must list directed `paired_comparisons` explicitly. For the current
+four-design diagnostic, the family contains only the three decision-relevant
+comparisons from `D_origin_remote` to each candidate. Candidate-to-candidate
+and reverse comparisons fall back to marginal bounds and cannot silently
+reuse the paired certificate.
+
+The required `look_semantics` is
+`fixed-training-snapshot-per-pair`, with `maximum_looks=1`. OED may read the
+same immutable training snapshot in several controller iterations because
+the fixed-family intervals do not change. Adding, removing, repairing, or
+otherwise changing a training observation creates a new statistical look and
+is outside this contract. Each certificate records a canonical SHA-256 of the
+paired success/cost snapshot so repeated OED reads can be audited without
+recording prompts, answers, or credentials. v2alpha1 retains its old
+controller-iteration look accounting for reproducibility.
+
+Each paired certificate exposes the quantities needed to diagnose a vacuous
+interval: paired success and service-cost means and variances, their sample
+covariance, the empirical-variance radius, the bounded-range radius, the
+unclipped interval, and whether the final interval was clipped to support.
+The direct paired utility difference remains the certified statistic; the
+component breakdown is diagnostic and does not assume success and cost are
+independent.
+
+The evaluator also writes a plug-in sample-size table. It projects the sample
+counts at which the interval would become unclipped, reach 50%, 25%, and 10%
+of support width, or obtain a positive Commit lower bound while holding the
+observed mean and variance fixed. These are planning estimates, not achieved
+power or coverage guarantees. They additionally rely on bounded, independent
+paired sampling units; clustered workloads require a cluster-aware analysis.
+
 References:
 
 - Andreas Maurer and Massimiliano Pontil, “Empirical Bernstein Bounds and
@@ -186,7 +221,10 @@ engineering output only; see the scientific boundary in
   for every model/design pair;
 - `awm_paired_gain_bounds.csv`: every available directed paired-gain
   certificate, including pair count, family size, per-look alpha, finite
-  support, and transition-adjusted interval (empty for v1);
+  support, radius decomposition, clipping status, and transition-adjusted
+  interval (empty for v1);
+- `awm_paired_power_analysis.csv`: post-hoc plug-in sample-size planning for
+  every available paired certificate, with an explicit non-guarantee label;
 - `holdout_truth.json`: the empirical complete response vector hidden from
   model fitting;
 - `holdout_truth_by_repetition.json`: the same hidden truth reported
@@ -217,6 +255,28 @@ The output can diagnose whether paired intervals are materially narrower and
 whether their held-out gains are covered. It cannot retroactively turn the
 frozen v1 experiment into confirmatory evidence. Any Commit rule selected
 from this diagnostic must be frozen and rerun on independent objects or seeds.
+
+After the v2alpha1 diagnostic, run v2alpha2 in two offline passes. The first
+observes all designs only to produce decomposition and sample-size planning;
+the second starts from the origin only and exercises the normal Reveal path:
+
+```bash
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v2alpha2_power_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V2_ALPHA2_POWER_OUT"
+
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v2alpha2_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V2_ALPHA2_OUT"
+```
+
+Both passes are post-hoc method development on an already inspected Oracle.
+Only a newly frozen configuration run on independent objects or seeds can be
+used as confirmatory evidence.
 
 ## Current Boundary
 
