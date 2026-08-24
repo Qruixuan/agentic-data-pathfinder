@@ -209,6 +209,51 @@ Additional references for this construction:
   the fail-closed v3 certificate):
   <https://pubmed.ncbi.nlm.nih.gov/9839354/>
 
+### AWM v3alpha2 complete-block cluster-mean diagnostic
+
+`pathfinder.awm/v3alpha2` is an isolated correction to the v3alpha1
+first-repetition rule. The server sensitivity check showed that a candidate's
+paired utility could change sign between the two fixed training repetitions.
+Selecting only the lowest repetition was therefore deterministic but not a
+stable point estimator. v3alpha2 preserves the independent sampling unit—the
+workload object—while using every preregistered repetition inside that
+workload's fixed block.
+
+For each workload cluster, v3alpha2 computes:
+
+- the mean paired success difference across the complete repetition block;
+- the mean paired service-cost difference;
+- the fraction of repetitions with positive and negative success
+  discordance; and
+- the mean paired utility difference.
+
+The eight workload-level values, not the 16 raw Agent runs, enter the
+cross-workload confidence calculation. All clusters must contain exactly one
+paired observation for every common repetition ID. Missing repetitions or
+duplicate `(workload, repetition)` observations fail closed. The frozen
+snapshot hash covers all raw observations in the block, so changing a later
+repetition invalidates the certificate.
+
+The positive and negative discordance fractions are independent bounded
+variables in `[0,1]` across workload clusters. v3alpha2 applies the same
+binary-KL inversion to their sample means as a conservative bounded-variable
+Chernoff/Hoeffding construction; it does not claim that the cluster means are
+Bernoulli trials. The cost component remains empirical Bernstein over
+workload-level mean cost differences. The trace additionally reports
+per-repetition utility means and whether their signs disagree. A sign flip is
+a sensitivity warning, not an automatic rejection of the pooled certificate.
+
+Power planning grows only the number of independent workloads while holding
+the number of repetitions per workload fixed. It reports the current interval
+width explicitly and remains a post-hoc planning diagnostic, not achieved
+power.
+
+Additional reference for the bounded-variable construction:
+
+- Wassily Hoeffding, “Probability Inequalities for Sums of Bounded Random
+  Variables,” *Journal of the American Statistical Association*, 1963:
+  <https://doi.org/10.1080/01621459.1963.10500830>
+
 The committed [`awm_reduced_mvp.json`](../../configs/awm_reduced_mvp.json)
 keeps every empirical assumption disabled. This is intentional: coupled AWM
 should initially match the independent model. After Phase B is reviewed, copy
@@ -345,6 +390,27 @@ PYTHONPATH=. python -m pathfinder evaluate-awm \
 For the frozen four-design run, 16 raw training pairs reduce to eight
 independent workload units under this contract. A new output directory is
 mandatory; do not point these commands at a v1 or v2 result directory.
+
+Run v3alpha2 in two further isolated directories. These commands read the
+same frozen Oracle and do not call FlowMesh:
+
+```bash
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha2_power_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_ALPHA2_POWER_OUT"
+
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha2_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_ALPHA2_OUT"
+```
+
+Do not reuse either v3alpha1 output directory. Compare the snapshot hash,
+pooled point estimate, repetition sign-flip flag, component widths, and
+cluster-only power projections before choosing a method for independent data.
 
 ## Current Boundary
 

@@ -13,11 +13,13 @@ AWM_CONFIG_SCHEMA_VERSION = "pathfinder.awm/v1alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V2 = "pathfinder.awm/v2alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V2_1 = "pathfinder.awm/v2alpha2"
 AWM_CONFIG_SCHEMA_VERSION_V3 = "pathfinder.awm/v3alpha1"
+AWM_CONFIG_SCHEMA_VERSION_V3_1 = "pathfinder.awm/v3alpha2"
 AWM_CONFIG_SCHEMA_VERSIONS = (
     AWM_CONFIG_SCHEMA_VERSION,
     AWM_CONFIG_SCHEMA_VERSION_V2,
     AWM_CONFIG_SCHEMA_VERSION_V2_1,
     AWM_CONFIG_SCHEMA_VERSION_V3,
+    AWM_CONFIG_SCHEMA_VERSION_V3_1,
 )
 CONFIDENCE_FAMILY_MODES = (
     "dynamic-observed-v1",
@@ -28,6 +30,7 @@ PAIRED_GAIN_METHODS = (
     "fixed-looks-empirical-bernstein",
     "fixed-snapshot-empirical-bernstein",
     "cluster-first-decomposed-kl-empirical-bernstein",
+    "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
 )
 PAIRED_LOOK_SEMANTICS = (
     "controller-iteration-upper-bound",
@@ -205,6 +208,9 @@ def _load_confidence_config(
         AWM_CONFIG_SCHEMA_VERSION_V3: (
             "cluster-first-decomposed-kl-empirical-bernstein"
         ),
+        AWM_CONFIG_SCHEMA_VERSION_V3_1: (
+            "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+        ),
     }[schema_version]
     if method not in PAIRED_GAIN_METHODS or method != expected_method:
         raise AWMConfigError(
@@ -240,6 +246,7 @@ def _load_confidence_config(
     if schema_version in (
         AWM_CONFIG_SCHEMA_VERSION_V2_1,
         AWM_CONFIG_SCHEMA_VERSION_V3,
+        AWM_CONFIG_SCHEMA_VERSION_V3_1,
     ):
         raw_comparisons = _list(
             raw.get("paired_comparisons"),
@@ -302,15 +309,23 @@ def _load_confidence_config(
     cluster_reduction = "disabled"
     success_alpha_fraction = 0.0
     cost_alpha_fraction = 0.0
-    if schema_version == AWM_CONFIG_SCHEMA_VERSION_V3:
+    if schema_version in (
+        AWM_CONFIG_SCHEMA_VERSION_V3,
+        AWM_CONFIG_SCHEMA_VERSION_V3_1,
+    ):
         sampling_unit = _string(
             raw.get("sampling_unit"),
             "confidence.sampling_unit",
         )
-        if sampling_unit != "workload-cluster-first-paired-observation":
+        expected_sampling_unit = (
+            "workload-cluster-mean-paired-observation"
+            if schema_version == AWM_CONFIG_SCHEMA_VERSION_V3_1
+            else "workload-cluster-first-paired-observation"
+        )
+        if sampling_unit != expected_sampling_unit:
             raise AWMConfigError(
                 "v3 confidence.sampling_unit must be "
-                "workload-cluster-first-paired-observation"
+                + expected_sampling_unit
             )
         cluster_key_fields = tuple(
             _string(value, "confidence.cluster_key_fields")
@@ -328,10 +343,15 @@ def _load_confidence_config(
             raw.get("cluster_reduction"),
             "confidence.cluster_reduction",
         )
-        if cluster_reduction != "lowest-repetition-then-seed":
+        expected_cluster_reduction = (
+            "mean-over-complete-repetition-block"
+            if schema_version == AWM_CONFIG_SCHEMA_VERSION_V3_1
+            else "lowest-repetition-then-seed"
+        )
+        if cluster_reduction != expected_cluster_reduction:
             raise AWMConfigError(
                 "v3 confidence.cluster_reduction must be "
-                "lowest-repetition-then-seed"
+                + expected_cluster_reduction
             )
         success_alpha_fraction = _fraction(
             raw.get("success_alpha_fraction"),
@@ -355,6 +375,18 @@ def _load_confidence_config(
                 "v3 success and cost alpha fractions must sum to 1"
             )
 
+    require_complete_pairs = _boolean(
+        raw.get("require_complete_pairs", True),
+        "confidence.require_complete_pairs",
+    )
+    if (
+        schema_version == AWM_CONFIG_SCHEMA_VERSION_V3_1
+        and not require_complete_pairs
+    ):
+        raise AWMConfigError(
+            "v3alpha2 confidence.require_complete_pairs must be true"
+        )
+
     return ConfidenceConfig(
         family_mode=family_mode,
         marginal_alpha_fraction=marginal_fraction,
@@ -365,10 +397,7 @@ def _load_confidence_config(
             "confidence.paired_gain_minimum_pairs",
         ),
         maximum_looks=maximum_looks,
-        require_complete_pairs=_boolean(
-            raw.get("require_complete_pairs", True),
-            "confidence.require_complete_pairs",
-        ),
+        require_complete_pairs=require_complete_pairs,
         paired_comparisons=paired_comparisons,
         look_semantics=look_semantics,
         sampling_unit=sampling_unit,

@@ -120,10 +120,18 @@ class PairedGainCertificate:
     cost_alpha_per_pair: float | None = None
     positive_discordance_count: int | None = None
     negative_discordance_count: int | None = None
+    positive_discordance_mass: float | None = None
+    negative_discordance_mass: float | None = None
+    positive_discordance_point_estimate: float | None = None
+    negative_discordance_point_estimate: float | None = None
     positive_discordance_probability: Interval | None = None
     negative_discordance_probability: Interval | None = None
     success_difference: Interval | None = None
     service_cost_difference: Interval | None = None
+    within_cluster_repetition_count: int | None = None
+    within_cluster_repetition_ids: tuple[int, ...] = ()
+    repetition_utility_means: tuple[tuple[int, float], ...] = ()
+    repetition_sign_flip: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -197,6 +205,25 @@ class PairedGainCertificate:
             "negative_discordance_count": (
                 self.negative_discordance_count
             ),
+            "positive_discordance_mass": self.positive_discordance_mass,
+            "negative_discordance_mass": self.negative_discordance_mass,
+            "positive_discordance_point_estimate": (
+                self.positive_discordance_point_estimate
+            ),
+            "negative_discordance_point_estimate": (
+                self.negative_discordance_point_estimate
+            ),
+            "within_cluster_repetition_count": (
+                self.within_cluster_repetition_count
+            ),
+            "within_cluster_repetition_ids": ";".join(
+                str(value) for value in self.within_cluster_repetition_ids
+            ),
+            "repetition_utility_means_json": json.dumps(
+                dict(self.repetition_utility_means),
+                sort_keys=True,
+            ),
+            "repetition_sign_flip": self.repetition_sign_flip,
         }
         for prefix, interval in (
             (
@@ -258,9 +285,16 @@ class PairedGainPowerAnalysis:
     assumed_negative_discordance_probability: float | None = None
     current_success_difference_width: float | None = None
     current_service_cost_difference_width: float | None = None
+    current_interval_width_per_session: float | None = None
+    within_cluster_repetition_count: int | None = None
+    within_cluster_repetition_ids: tuple[int, ...] = ()
+    repetition_sign_flip: bool = False
 
     def to_row(self, *, model_kind: str) -> dict[str, Any]:
         payload = asdict(self)
+        payload["within_cluster_repetition_ids"] = ";".join(
+            str(value) for value in self.within_cluster_repetition_ids
+        )
         return {"model_kind": model_kind, **payload}
 
 
@@ -352,6 +386,25 @@ def _bernoulli_kl_mean_interval(
                 inside = middle
         upper = inside
     return Interval(lower, upper)
+
+
+def _bounded_kl_mean_interval(
+    sample_mean: float,
+    independent_units: int,
+    delta: float,
+) -> Interval:
+    """Hoeffding/Chernoff KL inversion for independent [0, 1] means.
+
+    Bernoulli variables are extremal for the moment-generating function of a
+    bounded variable. The resulting binary-relative-entropy inversion applies
+    to the mean of independent bounded units without asserting that each unit
+    itself is Bernoulli.
+    """
+    return _bernoulli_kl_mean_interval(
+        sample_mean,
+        independent_units,
+        delta,
+    )
 
 
 def _bernoulli_kl_interval(
@@ -579,9 +632,18 @@ class AdaptiveWorkloadModel:
     def gain_interval_source(self, current: str, candidate: str) -> str:
         if self.paired_gain_certificate(current, candidate) is None:
             return "marginal-phi-difference"
-        if (
+        paired_method = (
             self.dataset.model_config.confidence.paired_gain_method
-            == "cluster-first-decomposed-kl-empirical-bernstein"
+        )
+        if paired_method == (
+            "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+        ):
+            return (
+                "paired-cluster-mean-decomposed-bounded-kl-"
+                "empirical-bernstein"
+            )
+        if paired_method == (
+            "cluster-first-decomposed-kl-empirical-bernstein"
         ):
             return "paired-cluster-decomposed-kl-empirical-bernstein"
         if (
@@ -632,8 +694,8 @@ class AdaptiveWorkloadModel:
         raw_keys = tuple(sorted(
             set(current_observations).intersection(candidate_observations)
         ))
+        keys_by_cluster: dict[str, list[str]] = {}
         if config.cluster_key_fields:
-            keys_by_cluster: dict[str, list[str]] = {}
             for key in raw_keys:
                 current_cluster = current_observations[key].cluster_key
                 candidate_cluster = candidate_observations[key].cluster_key
@@ -642,34 +704,109 @@ class AdaptiveWorkloadModel:
                         "paired observations disagree on workload cluster"
                     )
                 keys_by_cluster.setdefault(current_cluster, []).append(key)
-            keys = tuple(
-                min(
-                    cluster_keys,
-                    key=lambda value: (
-                        current_observations[value].repetition,
-                        current_observations[value].seed,
-                        value,
-                    ),
+            if config.cluster_reduction == "lowest-repetition-then-seed":
+                unit_key_groups = tuple(
+                    (
+                        min(
+                            cluster_keys,
+                            key=lambda value: (
+                                current_observations[value].repetition,
+                                current_observations[value].seed,
+                                value,
+                            ),
+                        ),
+                    )
+                    for _, cluster_keys in sorted(keys_by_cluster.items())
                 )
-                for _, cluster_keys in sorted(keys_by_cluster.items())
-            )
+                within_cluster_repetition_ids: tuple[int, ...] = ()
+            elif config.cluster_reduction == (
+                "mean-over-complete-repetition-block"
+            ):
+                groups: list[tuple[str, ...]] = []
+                expected_repetitions: tuple[int, ...] | None = None
+                for cluster_key, cluster_keys in sorted(
+                    keys_by_cluster.items()
+                ):
+                    keys_by_repetition: dict[int, list[str]] = {}
+                    for key in cluster_keys:
+                        repetition = current_observations[key].repetition
+                        keys_by_repetition.setdefault(repetition, []).append(
+                            key
+                        )
+                    if any(
+                        len(values) != 1
+                        for values in keys_by_repetition.values()
+                    ):
+                        raise AWMConfigError(
+                            "cluster-mean paired AWM requires exactly one "
+                            "observation per workload and repetition; "
+                            f"cluster={cluster_key}"
+                        )
+                    repetition_ids = tuple(sorted(keys_by_repetition))
+                    if expected_repetitions is None:
+                        expected_repetitions = repetition_ids
+                    elif repetition_ids != expected_repetitions:
+                        raise AWMConfigError(
+                            "cluster-mean paired AWM requires a complete "
+                            "common repetition block for every workload "
+                            "cluster"
+                        )
+                    groups.append(tuple(
+                        keys_by_repetition[repetition][0]
+                        for repetition in repetition_ids
+                    ))
+                within_cluster_repetition_ids = (
+                    expected_repetitions or ()
+                )
+                if not within_cluster_repetition_ids:
+                    raise AWMConfigError(
+                        "cluster-mean paired AWM requires at least one "
+                        "repetition per workload cluster"
+                    )
+                unit_key_groups = tuple(groups)
+            else:
+                raise AWMConfigError(
+                    "unsupported clustered AWM reduction: "
+                    + config.cluster_reduction
+                )
         else:
-            keys = raw_keys
-        if len(keys) < config.paired_gain_minimum_pairs:
+            unit_key_groups = tuple((key,) for key in raw_keys)
+            within_cluster_repetition_ids = ()
+        if len(unit_key_groups) < config.paired_gain_minimum_pairs:
             self._paired_gain_cache[cache_key] = None
             return None
 
         task_value = self.dataset.task_class.task_value
         resource_weight = self.dataset.system.resource_cost_weight
+        raw_success_differences = {
+            key: (
+                candidate_observations[key].success
+                - current_observations[key].success
+            )
+            for key in raw_keys
+        }
+        raw_service_cost_differences = {
+            key: (
+                candidate_observations[key].service_cost
+                - current_observations[key].service_cost
+            )
+            for key in raw_keys
+        }
         success_differences = tuple(
-            candidate_observations[key].success
-            - current_observations[key].success
-            for key in keys
+            mean(raw_success_differences[key] for key in group)
+            for group in unit_key_groups
         )
         service_cost_differences = tuple(
-            candidate_observations[key].service_cost
-            - current_observations[key].service_cost
-            for key in keys
+            mean(raw_service_cost_differences[key] for key in group)
+            for group in unit_key_groups
+        )
+        positive_discordance_rates = tuple(
+            mean(raw_success_differences[key] == 1 for key in group)
+            for group in unit_key_groups
+        )
+        negative_discordance_rates = tuple(
+            mean(raw_success_differences[key] == -1 for key in group)
+            for group in unit_key_groups
         )
         values = tuple(
             task_value * success_difference
@@ -679,6 +816,12 @@ class AdaptiveWorkloadModel:
                 service_cost_differences,
                 strict=True,
             )
+        )
+        snapshot_keys = (
+            raw_keys
+            if config.cluster_reduction
+            == "mean-over-complete-repetition-block"
+            else tuple(key for group in unit_key_groups for key in group)
         )
         snapshot_payload = [
             {
@@ -695,8 +838,32 @@ class AdaptiveWorkloadModel:
                     candidate_observations[key].service_cost
                 ),
             }
-            for key in keys
+            for key in snapshot_keys
         ]
+        repetition_utility_means: tuple[tuple[int, float], ...] = ()
+        repetition_sign_flip = False
+        if within_cluster_repetition_ids:
+            repetition_utility_means = tuple(
+                (
+                    repetition,
+                    mean(
+                        task_value * raw_success_differences[key]
+                        - resource_weight
+                        * raw_service_cost_differences[key]
+                        for key in raw_keys
+                        if current_observations[key].repetition
+                        == repetition
+                    ),
+                )
+                for repetition in within_cluster_repetition_ids
+            )
+            repetition_sign_flip = (
+                any(value > 1e-12 for _, value in repetition_utility_means)
+                and any(
+                    value < -1e-12
+                    for _, value in repetition_utility_means
+                )
+            )
         training_snapshot_sha256 = sha256(
             json.dumps(
                 {
@@ -728,30 +895,50 @@ class AdaptiveWorkloadModel:
         cost_alpha: float | None = None
         positive_count: int | None = None
         negative_count: int | None = None
+        positive_mass: float | None = None
+        negative_mass: float | None = None
+        positive_point: float | None = None
+        negative_point: float | None = None
         positive_probability: Interval | None = None
         negative_probability: Interval | None = None
         success_interval: Interval | None = None
         cost_interval: Interval | None = None
         unclipped_per_session = diagnostic_estimate.unclipped_interval
         clipped_to_support = diagnostic_estimate.clipped_to_support
-        if (
-            config.paired_gain_method
-            == "cluster-first-decomposed-kl-empirical-bernstein"
+        if config.paired_gain_method in (
+            "cluster-first-decomposed-kl-empirical-bernstein",
+            "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
         ):
             success_alpha = (
                 self._paired_alpha() * config.success_alpha_fraction
             )
             cost_alpha = self._paired_alpha() * config.cost_alpha_fraction
-            positive_count = sum(value == 1 for value in success_differences)
-            negative_count = sum(value == -1 for value in success_differences)
-            positive_probability = _bernoulli_kl_interval(
-                positive_count,
-                len(keys),
+            positive_count = sum(
+                raw_success_differences[key] == 1
+                for key in snapshot_keys
+            )
+            negative_count = sum(
+                raw_success_differences[key] == -1
+                for key in snapshot_keys
+            )
+            positive_mass = sum(positive_discordance_rates)
+            negative_mass = sum(negative_discordance_rates)
+            positive_point = mean(positive_discordance_rates)
+            negative_point = mean(negative_discordance_rates)
+            mean_interval = (
+                _bounded_kl_mean_interval
+                if config.paired_gain_method
+                == "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+                else _bernoulli_kl_mean_interval
+            )
+            positive_probability = mean_interval(
+                positive_point,
+                len(unit_key_groups),
                 success_alpha / 2.0,
             )
-            negative_probability = _bernoulli_kl_interval(
-                negative_count,
-                len(keys),
+            negative_probability = mean_interval(
+                negative_point,
+                len(unit_key_groups),
                 success_alpha / 2.0,
             )
             success_interval = Interval(
@@ -782,7 +969,11 @@ class AdaptiveWorkloadModel:
             )
             clipped_to_support = per_session != unclipped_per_session
             certificate_construction = (
-                "paired-discordance-bernoulli-kl-plus-"
+                "paired-cluster-mean-discordance-bounded-kl-plus-"
+                "cluster-mean-service-cost-empirical-bernstein"
+                if config.paired_gain_method
+                == "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+                else "paired-discordance-bernoulli-kl-plus-"
                 "service-cost-empirical-bernstein"
             )
         storage_delta = (
@@ -803,7 +994,7 @@ class AdaptiveWorkloadModel:
             current_design_id=current,
             candidate_design_id=candidate,
             method=config.paired_gain_method,
-            pair_count=len(keys),
+            pair_count=len(unit_key_groups),
             training_snapshot_sha256=training_snapshot_sha256,
             family_size=self._paired_family_size(),
             maximum_looks=config.maximum_looks,
@@ -838,17 +1029,29 @@ class AdaptiveWorkloadModel:
             certificate_construction=certificate_construction,
             sampling_unit=config.sampling_unit,
             raw_pair_count=len(raw_keys),
-            independent_unit_count=len(keys),
+            independent_unit_count=len(unit_key_groups),
             cluster_key_fields=config.cluster_key_fields,
             cluster_reduction=config.cluster_reduction,
             success_alpha_per_pair=success_alpha,
             cost_alpha_per_pair=cost_alpha,
             positive_discordance_count=positive_count,
             negative_discordance_count=negative_count,
+            positive_discordance_mass=positive_mass,
+            negative_discordance_mass=negative_mass,
+            positive_discordance_point_estimate=positive_point,
+            negative_discordance_point_estimate=negative_point,
             positive_discordance_probability=positive_probability,
             negative_discordance_probability=negative_probability,
             success_difference=success_interval,
             service_cost_difference=cost_interval,
+            within_cluster_repetition_count=(
+                len(within_cluster_repetition_ids)
+                if within_cluster_repetition_ids
+                else None
+            ),
+            within_cluster_repetition_ids=within_cluster_repetition_ids,
+            repetition_utility_means=repetition_utility_means,
+            repetition_sign_flip=repetition_sign_flip,
         )
         self._paired_gain_cache[cache_key] = certificate
         return certificate
@@ -871,9 +1074,9 @@ class AdaptiveWorkloadModel:
                 "maximum_planning_pairs cannot be smaller than the current "
                 "pair count"
             )
-        if (
-            certificate.method
-            == "cluster-first-decomposed-kl-empirical-bernstein"
+        if certificate.method in (
+            "cluster-first-decomposed-kl-empirical-bernstein",
+            "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
         ):
             return self._cluster_decomposed_power_analysis(
                 certificate,
@@ -974,20 +1177,19 @@ class AdaptiveWorkloadModel:
     ) -> PairedGainPowerAnalysis:
         """Plug-in planning in independent workload-cluster units."""
         if (
-            certificate.positive_discordance_count is None
-            or certificate.negative_discordance_count is None
+            certificate.positive_discordance_point_estimate is None
+            or certificate.negative_discordance_point_estimate is None
             or certificate.success_alpha_per_pair is None
             or certificate.cost_alpha_per_pair is None
             or certificate.success_difference is None
             or certificate.service_cost_difference is None
         ):
             raise RuntimeError("v3 certificate is missing component bounds")
-        count = certificate.pair_count
         positive_probability = (
-            certificate.positive_discordance_count / count
+            certificate.positive_discordance_point_estimate
         )
         negative_probability = (
-            certificate.negative_discordance_count / count
+            certificate.negative_discordance_point_estimate
         )
         success_alpha = certificate.success_alpha_per_pair
         cost_alpha = certificate.cost_alpha_per_pair
@@ -1007,12 +1209,18 @@ class AdaptiveWorkloadModel:
         )
 
         def projected_interval(cluster_count: int) -> Interval:
-            positive = _bernoulli_kl_mean_interval(
+            mean_interval = (
+                _bounded_kl_mean_interval
+                if certificate.method
+                == "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+                else _bernoulli_kl_mean_interval
+            )
+            positive = mean_interval(
                 positive_probability,
                 cluster_count,
                 success_alpha / 2.0,
             )
-            negative = _bernoulli_kl_mean_interval(
+            negative = mean_interval(
                 negative_probability,
                 cluster_count,
                 success_alpha / 2.0,
@@ -1079,7 +1287,11 @@ class AdaptiveWorkloadModel:
             current_design_id=certificate.current_design_id,
             candidate_design_id=certificate.candidate_design_id,
             method=(
-                "plug-in-cluster-decomposed-kl-empirical-"
+                "plug-in-cluster-mean-decomposed-bounded-kl-"
+                "empirical-bernstein-planning"
+                if certificate.method
+                == "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+                else "plug-in-cluster-decomposed-kl-empirical-"
                 "bernstein-planning"
             ),
             planning_status="posthoc-planning-not-a-confidence-guarantee",
@@ -1106,8 +1318,15 @@ class AdaptiveWorkloadModel:
             caveat=(
                 "Plug-in projection holds discordance probabilities and "
                 "cost moments fixed, counts independent workload clusters, "
-                "assumes a common target distribution, and is not achieved "
-                "power or coverage."
+                + (
+                    "holds the complete within-cluster repetition block "
+                    "fixed, "
+                    if certificate.within_cluster_repetition_count
+                    is not None
+                    else ""
+                )
+                + "assumes a common target distribution, and is not "
+                "achieved power or coverage."
             ),
             sampling_unit=certificate.sampling_unit,
             raw_pair_count=certificate.raw_pair_count,
@@ -1123,6 +1342,16 @@ class AdaptiveWorkloadModel:
             current_service_cost_difference_width=(
                 certificate.service_cost_difference.width
             ),
+            current_interval_width_per_session=(
+                certificate.gain_per_session.width
+            ),
+            within_cluster_repetition_count=(
+                certificate.within_cluster_repetition_count
+            ),
+            within_cluster_repetition_ids=(
+                certificate.within_cluster_repetition_ids
+            ),
+            repetition_sign_flip=certificate.repetition_sign_flip,
         )
 
     def _joint_z(self) -> float:

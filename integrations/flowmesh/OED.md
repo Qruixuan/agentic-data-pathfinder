@@ -70,6 +70,16 @@ cost-difference interval. Its `gain_interval_source` is
 `paired-cluster-decomposed-kl-empirical-bernstein`. OED never substitutes the
 more aggressive direct-utility diagnostic radius for this primary interval.
 
+With `pathfinder.awm/v3alpha2`, OED still counts independent workload
+clusters, but each cluster observation is the mean over its complete fixed
+repetition block. The trace covers all raw paired runs and exposes the
+repetition IDs, within-cluster repetition count, positive and negative
+discordance point estimates, per-repetition utility means, and a sign-flip
+flag. Its `gain_interval_source` is
+`paired-cluster-mean-decomposed-bounded-kl-empirical-bernstein`. Missing or
+duplicate repetition cells prevent the certificate from being constructed;
+OED cannot silently fall back to a first-repetition estimate.
+
 The committed
 [`oed_reduced_mvp.json`](../../configs/oed_reduced_mvp.json) declares the
 finite Reveal set, tier, budget, cap, and probe-window loss. Its cost status is
@@ -216,6 +226,18 @@ PYTHONPATH=. python -m pathfinder run-oed-replay \
 This command is read-only with respect to FlowMesh and physical data. Its
 actions are controller replays, not live transitions, and its output remains
 post-hoc until the v3 contract is frozen on independent workload objects.
+
+The v3alpha2 replay uses the complete-block cluster mean and must also write
+to a fresh directory:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-oed-replay \
+  --oed-config configs/multi_candidate_formal_v1_oed_v3alpha2_diagnostic.json \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha2_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_OED_V3_ALPHA2_OUT"
+```
 
 ## Current Boundary
 

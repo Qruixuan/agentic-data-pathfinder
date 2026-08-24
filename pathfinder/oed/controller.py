@@ -56,6 +56,14 @@ class CandidateScore:
     paired_gain_clipped_to_support: bool | None
     paired_gain_success_difference: Interval | None
     paired_gain_service_cost_difference: Interval | None
+    paired_gain_positive_discordance_point_estimate: float | None
+    paired_gain_negative_discordance_point_estimate: float | None
+    paired_gain_within_cluster_repetition_count: int | None
+    paired_gain_within_cluster_repetition_ids: tuple[int, ...] | None
+    paired_gain_repetition_utility_means: (
+        tuple[tuple[int, float], ...] | None
+    )
+    paired_gain_repetition_sign_flip: bool | None
     pessimistic_commit_gain: float
     optimistic_reveal_gain: float
     candidate_width: float
@@ -302,6 +310,36 @@ class OEDController:
             ),
             paired_gain_service_cost_difference=(
                 paired_certificate.service_cost_difference
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_positive_discordance_point_estimate=(
+                paired_certificate.positive_discordance_point_estimate
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_negative_discordance_point_estimate=(
+                paired_certificate.negative_discordance_point_estimate
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_within_cluster_repetition_count=(
+                paired_certificate.within_cluster_repetition_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_within_cluster_repetition_ids=(
+                paired_certificate.within_cluster_repetition_ids
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_repetition_utility_means=(
+                paired_certificate.repetition_utility_means
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_repetition_sign_flip=(
+                paired_certificate.repetition_sign_flip
                 if paired_certificate is not None
                 else None
             ),

@@ -252,14 +252,35 @@ much larger counts were projected for narrow intervals or a positive Commit
 lower bound. This identifies the broad direct-utility support and the treatment
 of repeated runs as independent units as the next statistical bottlenecks.
 
-The repository therefore also contains `pathfinder.awm/v3alpha1` as a new,
+The repository therefore also contains `pathfinder.awm/v3alpha1` as an
 isolated post-hoc diagnostic. It reduces the frozen 16 training pairs to eight
 independent workload clusters, takes one deterministic paired observation per
 cluster, constructs success uncertainty from paired discordance Bernoulli-KL
 intervals, and constructs service-cost uncertainty separately with empirical
-Bernstein. OED is required to use the combined component certificate. v3 has
-not yet been run on the frozen Oracle in this results record, so no statement
-about width, Commit, or policy outcome is made here.
+Bernstein. OED is required to use the combined component certificate.
+
+The v3alpha1 replay has now been run against the frozen Oracle. The component
+construction narrowed the three primary intervals to approximately 55--58%
+of their declared utility support, but no candidate obtained a positive
+Commit lower bound. Full OED revealed local digest, local pair, then local
+frames and stopped with `certificate_limited_stop`. This is an uncertainty
+result, not a system failure.
+
+A repetition-sensitivity check then exposed a limitation of v3alpha1's
+lowest-repetition rule. For local frames, the mean paired utility difference
+was `+0.64375` in training repetition 0 and `-0.6125` in repetition 1; for
+local pair it was `+1.14375` and `-1.16875`. Local digest remained positive
+but changed from `+1.05` to `+0.0625`. The pooled two-repetition means were
+`+0.015625`, `-0.0125`, and `+0.55625`, respectively. Thus, selecting the
+first repetition can materially change both the point estimate and post-hoc
+power projection.
+
+`pathfinder.awm/v3alpha2` is implemented as a separate, not-yet-run method
+diagnostic. It averages the complete fixed repetition block inside each
+workload cluster, still counts only eight workloads as independent, hashes all
+16 raw observations, and reports repetition sign flips. It does not overwrite
+the v3alpha1 output or convert this post-hoc analysis into confirmatory
+evidence.
 
 ## Supported Claims
 
@@ -293,12 +314,14 @@ The current evidence does not support the following claims:
 The frozen v1 results should not be overwritten or retuned into confirmatory
 evidence. The next phase is:
 
-1. replay the implemented AWM v3 method on this frozen Oracle as explicitly
-   post-hoc method development;
-2. inspect component interval width, held-out containment, cluster counts, and
-   OED actions without changing the frozen configuration;
-3. freeze the selected method and sample size, then run it on independent
-   NExT-QA objects rather than adding more within-object repetitions; and
+1. replay the implemented AWM v3alpha2 method on this frozen Oracle as
+   explicitly post-hoc method development;
+2. compare v3alpha1 and v3alpha2 point estimates, interval widths, held-out
+   containment, repetition sign flips, and OED actions without changing either
+   frozen configuration;
+3. freeze the selected method and independent-workload sample size, then run
+   it on independent NExT-QA objects rather than adding more within-object
+   repetitions; and
 4. move to a multi-node storage and network testbed only after the safe
    AWM/OED loop becomes informative enough to Commit.
 

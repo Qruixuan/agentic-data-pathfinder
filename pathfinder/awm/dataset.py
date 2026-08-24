@@ -289,6 +289,36 @@ def _validate_pairs(
                     "paired AWM records disagree on cluster identity for "
                     f"{left_id} and {right_id}"
                 )
+            if model_config.confidence.cluster_reduction == (
+                "mean-over-complete-repetition-block"
+            ):
+                repetitions_by_cluster: dict[str, list[int]] = {}
+                for key in common:
+                    observation = left_by_key[key]
+                    repetitions_by_cluster.setdefault(
+                        observation.cluster_key,
+                        [],
+                    ).append(observation.repetition)
+                expected_repetitions: tuple[int, ...] | None = None
+                for cluster_key, repetitions in sorted(
+                    repetitions_by_cluster.items()
+                ):
+                    unique_repetitions = tuple(sorted(set(repetitions)))
+                    if len(unique_repetitions) != len(repetitions):
+                        raise AWMConfigError(
+                            "cluster-mean paired AWM requires exactly one "
+                            "observation per workload and repetition; "
+                            f"partition={partition_name}, "
+                            f"cluster={cluster_key}"
+                        )
+                    if expected_repetitions is None:
+                        expected_repetitions = unique_repetitions
+                    elif unique_repetitions != expected_repetitions:
+                        raise AWMConfigError(
+                            "cluster-mean paired AWM requires a complete "
+                            "common repetition block for every workload "
+                            f"cluster in the {partition_name} partition"
+                        )
             effective_count = len({
                 left_by_key[key].cluster_key for key in common
             })

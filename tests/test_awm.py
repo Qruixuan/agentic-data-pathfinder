@@ -39,6 +39,11 @@ COMMITTED_AWM_V3_POWER_CONFIG = (
     / "configs"
     / "multi_candidate_formal_v1_awm_v3_power_diagnostic.json"
 )
+COMMITTED_AWM_V3_ALPHA2_POWER_CONFIG = (
+    ROOT
+    / "configs"
+    / "multi_candidate_formal_v1_awm_v3alpha2_power_diagnostic.json"
+)
 DESIGNS = ("D_remote_digest", "D_local_digest")
 
 
@@ -152,6 +157,7 @@ def _awm_config(
         "pathfinder.awm/v2alpha1",
         "pathfinder.awm/v2alpha2",
         "pathfinder.awm/v3alpha1",
+        "pathfinder.awm/v3alpha2",
     ):
         payload["confidence"] = {
             "family_mode": "fixed-full-domain",
@@ -186,6 +192,26 @@ def _awm_config(
                 ),
                 "cluster_key_fields": ["workload_id"],
                 "cluster_reduction": "lowest-repetition-then-seed",
+                "success_alpha_fraction": 0.8,
+                "cost_alpha_fraction": 0.2,
+                "paired_comparisons": [list(DESIGNS)],
+            })
+        if schema_version == "pathfinder.awm/v3alpha2":
+            payload["confidence"].update({
+                "paired_gain_method": (
+                    "cluster-mean-decomposed-bounded-kl-"
+                    "empirical-bernstein"
+                ),
+                "paired_gain_minimum_pairs": 8,
+                "maximum_looks": 1,
+                "look_semantics": "fixed-training-snapshot-per-pair",
+                "sampling_unit": (
+                    "workload-cluster-mean-paired-observation"
+                ),
+                "cluster_key_fields": ["workload_id"],
+                "cluster_reduction": (
+                    "mean-over-complete-repetition-block"
+                ),
                 "success_alpha_fraction": 0.8,
                 "cost_alpha_fraction": 0.2,
                 "paired_comparisons": [list(DESIGNS)],
@@ -429,6 +455,41 @@ class AWMConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(AWMConfigError, "workload_id"):
                 load_awm_config(path)
 
+    def test_v3alpha2_committed_config_declares_cluster_mean_contract(
+        self,
+    ) -> None:
+        config = load_awm_config(COMMITTED_AWM_V3_ALPHA2_POWER_CONFIG)
+        self.assertEqual("pathfinder.awm/v3alpha2", config.schema_version)
+        self.assertEqual(
+            "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
+            config.confidence.paired_gain_method,
+        )
+        self.assertEqual(
+            "workload-cluster-mean-paired-observation",
+            config.confidence.sampling_unit,
+        )
+        self.assertEqual(
+            "mean-over-complete-repetition-block",
+            config.confidence.cluster_reduction,
+        )
+        self.assertEqual(1, config.confidence.maximum_looks)
+
+    def test_v3alpha2_requires_complete_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = _awm_config(
+                root,
+                schema_version="pathfinder.awm/v3alpha2",
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["confidence"]["require_complete_pairs"] = False
+            _write_json(path, payload)
+            with self.assertRaisesRegex(
+                AWMConfigError,
+                "require_complete_pairs must be true",
+            ):
+                load_awm_config(path)
+
     def test_v2_alpha_fractions_must_sum_to_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -625,6 +686,204 @@ class AWMSyntheticOracleTest(unittest.TestCase):
                 before.training_snapshot_sha256,
                 changed.training_snapshot_sha256,
             )
+
+    def test_v3alpha2_aggregates_complete_repetition_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            oracle_output = _synthetic_oracle_output(root)
+            v3alpha2 = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v3alpha2",
+            ))
+            model = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    v3alpha2,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            )
+            certificate = model.paired_gain_certificate(*DESIGNS)
+            self.assertIsNotNone(certificate)
+            assert certificate is not None
+            self.assertEqual(16, certificate.raw_pair_count)
+            self.assertEqual(8, certificate.pair_count)
+            self.assertEqual(8, certificate.independent_unit_count)
+            self.assertEqual(2, certificate.within_cluster_repetition_count)
+            self.assertEqual(
+                (0, 1),
+                certificate.within_cluster_repetition_ids,
+            )
+            self.assertEqual(8, certificate.positive_discordance_count)
+            self.assertEqual(0, certificate.negative_discordance_count)
+            self.assertAlmostEqual(
+                4.0,
+                certificate.positive_discordance_mass or 0.0,
+            )
+            self.assertAlmostEqual(
+                0.5,
+                certificate.positive_discordance_point_estimate or 0.0,
+            )
+            self.assertFalse(certificate.repetition_sign_flip)
+            self.assertEqual(
+                "paired-cluster-mean-discordance-bounded-kl-plus-"
+                "cluster-mean-service-cost-empirical-bernstein",
+                certificate.certificate_construction,
+            )
+            self.assertEqual(
+                "paired-cluster-mean-decomposed-bounded-kl-"
+                "empirical-bernstein",
+                model.gain_interval_source(*DESIGNS),
+            )
+
+            v2alpha2 = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v2alpha2",
+            ))
+            pooled = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    v2alpha2,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            ).paired_gain_certificate(*DESIGNS)
+            assert pooled is not None
+            self.assertAlmostEqual(
+                pooled.point_estimate_per_session,
+                certificate.point_estimate_per_session,
+            )
+
+            planning = model.paired_gain_power_analysis(*DESIGNS)
+            self.assertIsNotNone(planning)
+            assert planning is not None
+            self.assertEqual(2, planning.within_cluster_repetition_count)
+            self.assertEqual((0, 1), planning.within_cluster_repetition_ids)
+            self.assertAlmostEqual(
+                certificate.gain_per_session.width,
+                planning.current_interval_width_per_session or 0.0,
+            )
+            self.assertIn("repetition block fixed", planning.caveat)
+
+            output = root / "awm-v3alpha2-output"
+            evaluate_awm(
+                v3alpha2,
+                oracle,
+                oracle_output_dir=oracle_output,
+                output_dir=output,
+            )
+            evaluation = json.loads(
+                (output / "awm_evaluation.json").read_text()
+            )
+            self.assertEqual(
+                "pathfinder.awm-evaluation/v3alpha2",
+                evaluation["schema_version"],
+            )
+
+    def test_v3alpha2_snapshot_uses_later_repetitions_and_flags_flip(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            config = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v3alpha2",
+            ))
+            oracle_output = _synthetic_oracle_output(root)
+
+            def certificate():
+                model = AdaptiveWorkloadModel(
+                    load_oracle_dataset(
+                        config,
+                        oracle,
+                        oracle_output_dir=oracle_output,
+                    ),
+                    model_kind="coupled_awm",
+                )
+                result = model.paired_gain_certificate(*DESIGNS)
+                assert result is not None
+                return result
+
+            before = certificate()
+            path = (
+                oracle_output / "designs" / "D_local_digest" / "runs.jsonl"
+            )
+            records = [
+                json.loads(line) for line in path.read_text().splitlines()
+            ]
+            for record in records:
+                if record["repetition"] == 1:
+                    record["task_success"] = False
+            path.write_text(
+                "".join(
+                    json.dumps(record, sort_keys=True) + "\n"
+                    for record in records
+                ),
+                encoding="utf-8",
+            )
+            after = certificate()
+            self.assertNotEqual(
+                before.training_snapshot_sha256,
+                after.training_snapshot_sha256,
+            )
+            self.assertNotEqual(
+                before.point_estimate_per_session,
+                after.point_estimate_per_session,
+            )
+            self.assertTrue(after.repetition_sign_flip)
+            self.assertGreater(dict(after.repetition_utility_means)[0], 0)
+            self.assertLess(dict(after.repetition_utility_means)[1], 0)
+
+    def test_v3alpha2_rejects_incomplete_or_duplicate_blocks(self) -> None:
+        for mutation in ("incomplete", "duplicate"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                oracle = load_reduced_oracle_config(_oracle_config(root))
+                config = load_awm_config(_awm_config(
+                    root,
+                    observed_design_ids=DESIGNS,
+                    schema_version="pathfinder.awm/v3alpha2",
+                ))
+                oracle_output = _synthetic_oracle_output(root)
+                for design_id in DESIGNS:
+                    path = oracle_output / "designs" / design_id / "runs.jsonl"
+                    records = [
+                        json.loads(line)
+                        for line in path.read_text().splitlines()
+                    ]
+                    target = next(
+                        record for record in records
+                        if record["repetition"] == 1
+                        and record["workload_id"] == "workload-0000"
+                    )
+                    if mutation == "incomplete":
+                        records.remove(target)
+                    else:
+                        duplicate = dict(target)
+                        duplicate["seed"] = int(target["seed"]) + 1000
+                        duplicate["trial_key"] = str(target["trial_key"]) + "-dup"
+                        records.append(duplicate)
+                    path.write_text(
+                        "".join(
+                            json.dumps(record, sort_keys=True) + "\n"
+                            for record in records
+                        ),
+                        encoding="utf-8",
+                    )
+                with self.assertRaisesRegex(
+                    AWMConfigError,
+                    "complete common repetition block|exactly one observation",
+                ):
+                    load_oracle_dataset(
+                        config,
+                        oracle,
+                        oracle_output_dir=oracle_output,
+                    )
 
     def test_bernoulli_kl_interval_contains_empirical_rate(self) -> None:
         for successes in (0, 4, 8):

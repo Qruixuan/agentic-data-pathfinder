@@ -40,6 +40,11 @@ AWM v3 adds a separate cluster-first diagnostic: one paired observation per
 workload object, Bernoulli-KL bounds for paired success discordance, and an
 independent empirical-Bernstein cost component. It is post-hoc method
 development and must not be presented as a confirmatory rerun.
+AWM v3alpha2 adds a non-destructive correction for repetition sensitivity: it
+averages the complete fixed repetition block within each workload, continues
+to count workloads—not repeated Agent runs—as independent units, and records
+repetition sign flips in AWM and OED audit output. The v3alpha1 configuration
+and outputs remain reproducible and unchanged.
 
 ## Current Scope
 
