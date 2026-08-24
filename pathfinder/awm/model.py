@@ -132,6 +132,9 @@ class PairedGainCertificate:
     within_cluster_repetition_ids: tuple[int, ...] = ()
     repetition_utility_means: tuple[tuple[int, float], ...] = ()
     repetition_sign_flip: bool = False
+    normalized_utility_point_estimate: float | None = None
+    normalized_utility_mean: Interval | None = None
+    component_interval_role: str = "primary-certificate-components"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -224,6 +227,10 @@ class PairedGainCertificate:
                 sort_keys=True,
             ),
             "repetition_sign_flip": self.repetition_sign_flip,
+            "normalized_utility_point_estimate": (
+                self.normalized_utility_point_estimate
+            ),
+            "component_interval_role": self.component_interval_role,
         }
         for prefix, interval in (
             (
@@ -236,6 +243,7 @@ class PairedGainCertificate:
             ),
             ("success_difference", self.success_difference),
             ("service_cost_difference", self.service_cost_difference),
+            ("normalized_utility_mean", self.normalized_utility_mean),
         ):
             row[f"{prefix}_lower"] = (
                 interval.lower if interval is not None else None
@@ -614,6 +622,12 @@ class AdaptiveWorkloadModel:
             "paired_support_rule": (
                 "task-value-plus-declared-single-access-cost-support"
             ),
+            "component_interval_role": (
+                "diagnostic-only-not-part-of-primary-confidence-family"
+                if config.confidence.paired_gain_method
+                == "cluster-mean-direct-bounded-utility-kl"
+                else "primary-certificate-components"
+            ),
         }
 
     def gain_interval(self, current: str, candidate: str) -> Interval:
@@ -642,6 +656,8 @@ class AdaptiveWorkloadModel:
                 "paired-cluster-mean-decomposed-bounded-kl-"
                 "empirical-bernstein"
             )
+        if paired_method == "cluster-mean-direct-bounded-utility-kl":
+            return "paired-cluster-mean-direct-bounded-utility-kl"
         if paired_method == (
             "cluster-first-decomposed-kl-empirical-bernstein"
         ):
@@ -903,11 +919,15 @@ class AdaptiveWorkloadModel:
         negative_probability: Interval | None = None
         success_interval: Interval | None = None
         cost_interval: Interval | None = None
+        normalized_utility_point: float | None = None
+        normalized_utility_interval: Interval | None = None
+        component_interval_role = "primary-certificate-components"
         unclipped_per_session = diagnostic_estimate.unclipped_interval
         clipped_to_support = diagnostic_estimate.clipped_to_support
         if config.paired_gain_method in (
             "cluster-first-decomposed-kl-empirical-bernstein",
             "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
+            "cluster-mean-direct-bounded-utility-kl",
         ):
             success_alpha = (
                 self._paired_alpha() * config.success_alpha_fraction
@@ -928,7 +948,11 @@ class AdaptiveWorkloadModel:
             mean_interval = (
                 _bounded_kl_mean_interval
                 if config.paired_gain_method
-                == "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+                in (
+                    "cluster-mean-decomposed-bounded-kl-"
+                    "empirical-bernstein",
+                    "cluster-mean-direct-bounded-utility-kl",
+                )
                 else _bernoulli_kl_mean_interval
             )
             positive_probability = mean_interval(
@@ -971,10 +995,51 @@ class AdaptiveWorkloadModel:
             certificate_construction = (
                 "paired-cluster-mean-discordance-bounded-kl-plus-"
                 "cluster-mean-service-cost-empirical-bernstein"
-                if config.paired_gain_method
-                == "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
+                if config.paired_gain_method in (
+                    "cluster-mean-decomposed-bounded-kl-"
+                    "empirical-bernstein",
+                    "cluster-mean-direct-bounded-utility-kl",
+                )
                 else "paired-discordance-bernoulli-kl-plus-"
                 "service-cost-empirical-bernstein"
+            )
+        if config.paired_gain_method == (
+            "cluster-mean-direct-bounded-utility-kl"
+        ):
+            if support.width <= 0.0:
+                normalized_utility_point = 0.0
+                normalized_utility_interval = Interval(0.0, 0.0)
+                per_session = support
+            else:
+                normalized_values = tuple(
+                    min(
+                        1.0,
+                        max(
+                            0.0,
+                            (value - support.lower) / support.width,
+                        ),
+                    )
+                    for value in values
+                )
+                normalized_utility_point = mean(normalized_values)
+                normalized_utility_interval = _bounded_kl_mean_interval(
+                    normalized_utility_point,
+                    len(unit_key_groups),
+                    self._paired_alpha(),
+                )
+                per_session = Interval(
+                    support.lower
+                    + support.width * normalized_utility_interval.lower,
+                    support.lower
+                    + support.width * normalized_utility_interval.upper,
+                )
+            unclipped_per_session = per_session
+            clipped_to_support = False
+            certificate_construction = (
+                "paired-cluster-mean-direct-normalized-bounded-utility-kl"
+            )
+            component_interval_role = (
+                "diagnostic-only-not-part-of-primary-confidence-family"
             )
         storage_delta = (
             self.dataset.storage_costs[candidate]
@@ -1052,6 +1117,9 @@ class AdaptiveWorkloadModel:
             within_cluster_repetition_ids=within_cluster_repetition_ids,
             repetition_utility_means=repetition_utility_means,
             repetition_sign_flip=repetition_sign_flip,
+            normalized_utility_point_estimate=normalized_utility_point,
+            normalized_utility_mean=normalized_utility_interval,
+            component_interval_role=component_interval_role,
         )
         self._paired_gain_cache[cache_key] = certificate
         return certificate
@@ -1079,6 +1147,11 @@ class AdaptiveWorkloadModel:
             "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
         ):
             return self._cluster_decomposed_power_analysis(
+                certificate,
+                maximum_planning_pairs=maximum_planning_pairs,
+            )
+        if certificate.method == "cluster-mean-direct-bounded-utility-kl":
+            return self._cluster_direct_bounded_utility_power_analysis(
                 certificate,
                 maximum_planning_pairs=maximum_planning_pairs,
             )
@@ -1341,6 +1414,133 @@ class AdaptiveWorkloadModel:
             ),
             current_service_cost_difference_width=(
                 certificate.service_cost_difference.width
+            ),
+            current_interval_width_per_session=(
+                certificate.gain_per_session.width
+            ),
+            within_cluster_repetition_count=(
+                certificate.within_cluster_repetition_count
+            ),
+            within_cluster_repetition_ids=(
+                certificate.within_cluster_repetition_ids
+            ),
+            repetition_sign_flip=certificate.repetition_sign_flip,
+        )
+
+    def _cluster_direct_bounded_utility_power_analysis(
+        self,
+        certificate: PairedGainCertificate,
+        *,
+        maximum_planning_pairs: int,
+    ) -> PairedGainPowerAnalysis:
+        """Project direct bounded-utility KL width in workload units."""
+        if (
+            certificate.normalized_utility_point_estimate is None
+            or certificate.normalized_utility_mean is None
+        ):
+            raise RuntimeError(
+                "v3alpha3 certificate is missing normalized utility bounds"
+            )
+        support = certificate.support_per_session
+        normalized_point = certificate.normalized_utility_point_estimate
+        delta = certificate.alpha_per_pair_look
+
+        def projected_interval(cluster_count: int) -> Interval:
+            normalized = _bounded_kl_mean_interval(
+                normalized_point,
+                cluster_count,
+                delta,
+            )
+            return Interval(
+                support.lower + support.width * normalized.lower,
+                support.lower + support.width * normalized.upper,
+            )
+
+        start = certificate.pair_count
+        width_targets = {
+            fraction: _minimum_projected_pairs(
+                lambda cluster_count, fraction=fraction: (
+                    projected_interval(cluster_count).width
+                    <= fraction * support.width
+                ),
+                start=start,
+                maximum=maximum_planning_pairs,
+            )
+            for fraction in (0.5, 0.25, 0.1)
+        }
+        storage_delta = (
+            self.dataset.storage_costs[certificate.candidate_design_id]
+            - self.dataset.storage_costs[certificate.current_design_id]
+        )
+        transition_upper = self._bounds[
+            certificate.candidate_design_id
+        ].transition_cost.upper
+        horizon = self.dataset.horizon_sessions
+        commit_margin = self.dataset.model_config.commit_margin
+        positive_commit = _minimum_projected_pairs(
+            lambda cluster_count: (
+                horizon * projected_interval(cluster_count).lower
+                - storage_delta
+                - transition_upper
+                > commit_margin
+            ),
+            start=start,
+            maximum=maximum_planning_pairs,
+        )
+        current_radius = max(
+            certificate.point_estimate_per_session
+            - certificate.gain_per_session.lower,
+            certificate.gain_per_session.upper
+            - certificate.point_estimate_per_session,
+        )
+        return PairedGainPowerAnalysis(
+            current_design_id=certificate.current_design_id,
+            candidate_design_id=certificate.candidate_design_id,
+            method=(
+                "plug-in-cluster-mean-direct-bounded-utility-kl-planning"
+            ),
+            planning_status="posthoc-planning-not-a-confidence-guarantee",
+            current_pair_count=certificate.pair_count,
+            alpha_per_pair_look=delta,
+            assumed_point_estimate_per_session=(
+                certificate.point_estimate_per_session
+            ),
+            assumed_sample_variance_per_session=(
+                certificate.sample_variance_per_session
+            ),
+            support_width_per_session=support.width,
+            current_total_radius_per_session=current_radius,
+            current_clipped_to_support=False,
+            estimated_pairs_for_unclipped_interval=None,
+            estimated_pairs_for_50pct_support_width=width_targets[0.5],
+            estimated_pairs_for_25pct_support_width=width_targets[0.25],
+            estimated_pairs_for_10pct_support_width=width_targets[0.1],
+            estimated_pairs_for_positive_commit_lower=positive_commit,
+            commit_margin=commit_margin,
+            maximum_planning_pairs=maximum_planning_pairs,
+            caveat=(
+                "Plug-in projection holds the normalized workload-level "
+                "utility mean fixed, counts independent workload clusters, "
+                "holds the complete within-cluster repetition block fixed, "
+                "and is not achieved power or coverage."
+            ),
+            sampling_unit=certificate.sampling_unit,
+            raw_pair_count=certificate.raw_pair_count,
+            assumed_positive_discordance_probability=(
+                certificate.positive_discordance_point_estimate
+            ),
+            assumed_negative_discordance_probability=(
+                certificate.negative_discordance_point_estimate
+            ),
+            current_success_difference_width=(
+                certificate.success_difference.width
+                if certificate.success_difference is not None
+                else None
+            ),
+            current_service_cost_difference_width=(
+                certificate.service_cost_difference.width
+                if certificate.service_cost_difference is not None
+                else None
             ),
             current_interval_width_per_session=(
                 certificate.gain_per_session.width

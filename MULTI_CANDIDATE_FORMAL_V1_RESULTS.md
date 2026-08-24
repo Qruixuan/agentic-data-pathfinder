@@ -275,12 +275,24 @@ but changed from `+1.05` to `+0.0625`. The pooled two-repetition means were
 first repetition can materially change both the point estimate and post-hoc
 power projection.
 
-`pathfinder.awm/v3alpha2` is implemented as a separate, not-yet-run method
-diagnostic. It averages the complete fixed repetition block inside each
-workload cluster, still counts only eight workloads as independent, hashes all
-16 raw observations, and reports repetition sign flips. It does not overwrite
-the v3alpha1 output or convert this post-hoc analysis into confirmatory
-evidence.
+`pathfinder.awm/v3alpha2` was then run as a separate post-hoc diagnostic. It
+averaged the complete fixed repetition block inside each workload cluster,
+counted eight workloads rather than 16 runs as independent, and reproduced
+the pooled point estimates above. Local frames and local pair retained their
+repetition sign-flip warnings. All three primary intervals remained wide:
+approximately `14.86`, `14.09`, and `14.05` per session for local frames,
+local digest, and local pair. OED revealed all three candidates and stopped
+with `certificate_limited_stop`; it made no unsafe Commit. The service-cost
+empirical-Bernstein component reached its declared support on this small
+sample, while success uncertainty accounted for most of the combined width.
+
+`pathfinder.awm/v3alpha3` is now implemented as another isolated, not-yet-run
+post-hoc diagnostic. It keeps the same eight workload means and complete
+repetition snapshot but constructs the primary interval directly over the
+normalized bounded paired utility. The previous success/cost decomposition is
+retained only for explanation. This tests whether certifying the actual
+decision variable avoids avoidable component-wise width without changing the
+data or independence claim.
 
 ## Supported Claims
 
@@ -314,12 +326,11 @@ The current evidence does not support the following claims:
 The frozen v1 results should not be overwritten or retuned into confirmatory
 evidence. The next phase is:
 
-1. replay the implemented AWM v3alpha2 method on this frozen Oracle as
-   explicitly post-hoc method development;
-2. compare v3alpha1 and v3alpha2 point estimates, interval widths, held-out
-   containment, repetition sign flips, and OED actions without changing either
-   frozen configuration;
-3. freeze the selected method and independent-workload sample size, then run
+1. replay the implemented AWM v3alpha3 method on the same frozen Oracle as
+   explicitly post-hoc certificate development;
+2. compare v3alpha2 and v3alpha3 interval widths, held-out containment, power
+   projections, and OED actions without changing the frozen snapshot;
+3. choose and freeze the method and independent-workload sample size, then run
    it on independent NExT-QA objects rather than adding more within-object
    repetitions; and
 4. move to a multi-node storage and network testbed only after the safe

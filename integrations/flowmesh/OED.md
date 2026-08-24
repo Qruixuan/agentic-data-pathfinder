@@ -80,6 +80,13 @@ flag. Its `gain_interval_source` is
 duplicate repetition cells prevent the certificate from being constructed;
 OED cannot silently fall back to a first-repetition estimate.
 
+With `pathfinder.awm/v3alpha3`, the OED decision interval comes from the
+direct normalized bounded-utility KL certificate. The trace records the
+normalized point and interval and labels the success/cost decomposition as
+diagnostic-only. Its `gain_interval_source` is
+`paired-cluster-mean-direct-bounded-utility-kl`. The controller never combines
+the diagnostic component bounds into this primary decision interval.
+
 The committed
 [`oed_reduced_mvp.json`](../../configs/oed_reduced_mvp.json) declares the
 finite Reveal set, tier, budget, cap, and probe-window loss. Its cost status is
@@ -237,6 +244,18 @@ PYTHONPATH=. python -m pathfinder run-oed-replay \
   --oracle-config configs/multi_candidate_formal_v1_oracle.json \
   --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
   --output-dir "$PF_MULTI_OED_V3_ALPHA2_OUT"
+```
+
+The v3alpha3 replay is another isolated read-only diagnostic and requires a
+fresh output directory:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-oed-replay \
+  --oed-config configs/multi_candidate_formal_v1_oed_v3alpha3_diagnostic.json \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha3_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_OED_V3_ALPHA3_OUT"
 ```
 
 ## Current Boundary

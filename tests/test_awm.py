@@ -13,7 +13,10 @@ from pathfinder.awm import (
     load_awm_config,
     load_oracle_dataset,
 )
-from pathfinder.awm.model import _bernoulli_kl_interval
+from pathfinder.awm.model import (
+    _bernoulli_kl_interval,
+    _bounded_kl_mean_interval,
+)
 from pathfinder.reduced_oracle import load_reduced_oracle_config
 
 
@@ -43,6 +46,11 @@ COMMITTED_AWM_V3_ALPHA2_POWER_CONFIG = (
     ROOT
     / "configs"
     / "multi_candidate_formal_v1_awm_v3alpha2_power_diagnostic.json"
+)
+COMMITTED_AWM_V3_ALPHA3_POWER_CONFIG = (
+    ROOT
+    / "configs"
+    / "multi_candidate_formal_v1_awm_v3alpha3_power_diagnostic.json"
 )
 DESIGNS = ("D_remote_digest", "D_local_digest")
 
@@ -158,6 +166,7 @@ def _awm_config(
         "pathfinder.awm/v2alpha2",
         "pathfinder.awm/v3alpha1",
         "pathfinder.awm/v3alpha2",
+        "pathfinder.awm/v3alpha3",
     ):
         payload["confidence"] = {
             "family_mode": "fixed-full-domain",
@@ -201,6 +210,25 @@ def _awm_config(
                 "paired_gain_method": (
                     "cluster-mean-decomposed-bounded-kl-"
                     "empirical-bernstein"
+                ),
+                "paired_gain_minimum_pairs": 8,
+                "maximum_looks": 1,
+                "look_semantics": "fixed-training-snapshot-per-pair",
+                "sampling_unit": (
+                    "workload-cluster-mean-paired-observation"
+                ),
+                "cluster_key_fields": ["workload_id"],
+                "cluster_reduction": (
+                    "mean-over-complete-repetition-block"
+                ),
+                "success_alpha_fraction": 0.8,
+                "cost_alpha_fraction": 0.2,
+                "paired_comparisons": [list(DESIGNS)],
+            })
+        if schema_version == "pathfinder.awm/v3alpha3":
+            payload["confidence"].update({
+                "paired_gain_method": (
+                    "cluster-mean-direct-bounded-utility-kl"
                 ),
                 "paired_gain_minimum_pairs": 8,
                 "maximum_looks": 1,
@@ -474,21 +502,45 @@ class AWMConfigTest(unittest.TestCase):
         )
         self.assertEqual(1, config.confidence.maximum_looks)
 
-    def test_v3alpha2_requires_complete_pairs(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = _awm_config(
-                root,
-                schema_version="pathfinder.awm/v3alpha2",
-            )
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            payload["confidence"]["require_complete_pairs"] = False
-            _write_json(path, payload)
-            with self.assertRaisesRegex(
-                AWMConfigError,
-                "require_complete_pairs must be true",
-            ):
-                load_awm_config(path)
+    def test_cluster_mean_schemas_require_complete_pairs(self) -> None:
+        for schema_version in (
+            "pathfinder.awm/v3alpha2",
+            "pathfinder.awm/v3alpha3",
+        ):
+            with self.subTest(schema_version=schema_version):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    path = _awm_config(
+                        root,
+                        schema_version=schema_version,
+                    )
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["confidence"]["require_complete_pairs"] = False
+                    _write_json(path, payload)
+                    with self.assertRaisesRegex(
+                        AWMConfigError,
+                        "require_complete_pairs must be true",
+                    ):
+                        load_awm_config(path)
+
+    def test_v3alpha3_committed_config_declares_direct_utility_contract(
+        self,
+    ) -> None:
+        config = load_awm_config(COMMITTED_AWM_V3_ALPHA3_POWER_CONFIG)
+        self.assertEqual("pathfinder.awm/v3alpha3", config.schema_version)
+        self.assertEqual(
+            "cluster-mean-direct-bounded-utility-kl",
+            config.confidence.paired_gain_method,
+        )
+        self.assertEqual(
+            "workload-cluster-mean-paired-observation",
+            config.confidence.sampling_unit,
+        )
+        self.assertEqual(
+            "mean-over-complete-repetition-block",
+            config.confidence.cluster_reduction,
+        )
+        self.assertTrue(config.confidence.require_complete_pairs)
 
     def test_v2_alpha_fractions_must_sum_to_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -838,6 +890,122 @@ class AWMSyntheticOracleTest(unittest.TestCase):
             self.assertTrue(after.repetition_sign_flip)
             self.assertGreater(dict(after.repetition_utility_means)[0], 0)
             self.assertLess(dict(after.repetition_utility_means)[1], 0)
+
+    def test_v3alpha3_uses_direct_bounded_cluster_utility_certificate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            config = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v3alpha3",
+            ))
+            oracle_output = _synthetic_oracle_output(root)
+            model = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    config,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            )
+            certificate = model.paired_gain_certificate(*DESIGNS)
+            self.assertIsNotNone(certificate)
+            assert certificate is not None
+            self.assertEqual(16, certificate.raw_pair_count)
+            self.assertEqual(8, certificate.independent_unit_count)
+            self.assertEqual(2, certificate.within_cluster_repetition_count)
+            self.assertEqual((0, 1), certificate.within_cluster_repetition_ids)
+            self.assertEqual(
+                "paired-cluster-mean-direct-normalized-bounded-utility-kl",
+                certificate.certificate_construction,
+            )
+            self.assertEqual(
+                "diagnostic-only-not-part-of-primary-confidence-family",
+                certificate.component_interval_role,
+            )
+            self.assertIsNotNone(certificate.success_difference)
+            self.assertIsNotNone(certificate.service_cost_difference)
+            self.assertIsNotNone(
+                certificate.normalized_utility_point_estimate
+            )
+            self.assertIsNotNone(certificate.normalized_utility_mean)
+            assert certificate.normalized_utility_mean is not None
+            expected_point = (
+                certificate.point_estimate_per_session
+                - certificate.support_per_session.lower
+            ) / certificate.support_per_session.width
+            self.assertAlmostEqual(
+                expected_point,
+                certificate.normalized_utility_point_estimate or 0.0,
+            )
+            expected_normalized = _bounded_kl_mean_interval(
+                expected_point,
+                certificate.independent_unit_count or 0,
+                certificate.alpha_per_pair_look,
+            )
+            self.assertAlmostEqual(
+                expected_normalized.lower,
+                certificate.normalized_utility_mean.lower,
+            )
+            self.assertAlmostEqual(
+                expected_normalized.upper,
+                certificate.normalized_utility_mean.upper,
+            )
+            self.assertAlmostEqual(
+                certificate.support_per_session.lower
+                + certificate.support_per_session.width
+                * expected_normalized.lower,
+                certificate.gain_per_session.lower,
+            )
+            self.assertAlmostEqual(
+                certificate.support_per_session.lower
+                + certificate.support_per_session.width
+                * expected_normalized.upper,
+                certificate.gain_per_session.upper,
+            )
+            self.assertEqual(
+                "paired-cluster-mean-direct-bounded-utility-kl",
+                model.gain_interval_source(*DESIGNS),
+            )
+
+            planning = model.paired_gain_power_analysis(*DESIGNS)
+            self.assertIsNotNone(planning)
+            assert planning is not None
+            self.assertEqual(
+                "plug-in-cluster-mean-direct-bounded-utility-kl-planning",
+                planning.method,
+            )
+            self.assertEqual(8, planning.current_pair_count)
+            self.assertEqual(16, planning.raw_pair_count)
+            self.assertAlmostEqual(
+                certificate.gain_per_session.width,
+                planning.current_interval_width_per_session or 0.0,
+            )
+            self.assertIn("normalized workload-level utility", planning.caveat)
+
+            output = root / "awm-v3alpha3-output"
+            evaluate_awm(
+                config,
+                oracle,
+                oracle_output_dir=oracle_output,
+                output_dir=output,
+            )
+            evaluation = json.loads(
+                (output / "awm_evaluation.json").read_text()
+            )
+            self.assertEqual(
+                "pathfinder.awm-evaluation/v3alpha3",
+                evaluation["schema_version"],
+            )
+            self.assertEqual(
+                "diagnostic-only-not-part-of-primary-confidence-family",
+                evaluation["confidence_contract"][
+                    "component_interval_role"
+                ],
+            )
 
     def test_v3alpha2_rejects_incomplete_or_duplicate_blocks(self) -> None:
         for mutation in ("incomplete", "duplicate"):

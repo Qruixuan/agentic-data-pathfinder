@@ -11,6 +11,7 @@ from ..awm import (
     AWM_CONFIG_SCHEMA_VERSION_V2_1,
     AWM_CONFIG_SCHEMA_VERSION_V3,
     AWM_CONFIG_SCHEMA_VERSION_V3_1,
+    AWM_CONFIG_SCHEMA_VERSION_V3_2,
     AWMDataset,
     AWMConfig,
     AdaptiveWorkloadModel,
@@ -32,6 +33,7 @@ OED_REPLAY_SCHEMA_VERSION_V2 = "pathfinder.oed-replay/v2alpha1"
 OED_REPLAY_SCHEMA_VERSION_V2_1 = "pathfinder.oed-replay/v2alpha2"
 OED_REPLAY_SCHEMA_VERSION_V3 = "pathfinder.oed-replay/v3alpha1"
 OED_REPLAY_SCHEMA_VERSION_V3_1 = "pathfinder.oed-replay/v3alpha2"
+OED_REPLAY_SCHEMA_VERSION_V3_2 = "pathfinder.oed-replay/v3alpha3"
 _ACTIVE_POLICIES = (
     "full_oed",
     "passive_awm",
@@ -449,6 +451,7 @@ def run_oed_replay(
         AWM_CONFIG_SCHEMA_VERSION_V2_1: OED_REPLAY_SCHEMA_VERSION_V2_1,
         AWM_CONFIG_SCHEMA_VERSION_V3: OED_REPLAY_SCHEMA_VERSION_V3,
         AWM_CONFIG_SCHEMA_VERSION_V3_1: OED_REPLAY_SCHEMA_VERSION_V3_1,
+        AWM_CONFIG_SCHEMA_VERSION_V3_2: OED_REPLAY_SCHEMA_VERSION_V3_2,
     }.get(resolved_awm.schema_version, OED_REPLAY_SCHEMA_VERSION)
     evaluation = {
         "schema_version": replay_schema,

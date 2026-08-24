@@ -1,0 +1,29 @@
+{
+  "schema_version": "pathfinder.oed/v1alpha1",
+  "controller_id": "multi-candidate-formal-v1-oed-v3alpha3-diagnostic",
+  "commit_margin": 0.0,
+  "reveal_margin": 0.0,
+  "exploration_budget": 0.5,
+  "per_excursion_cap": 0.2,
+  "max_iterations": 4,
+  "random_seed": 14003,
+  "cost_model_status": "posthoc-v3alpha3-diagnostic-controlled-single-node-v1-not-distributed-cost",
+  "reveal_candidates": [
+    {
+      "design_id": "D_local_digest",
+      "reveal_tier": "simultaneous-canonical",
+      "probe_window_loss": 0.02
+    },
+    {
+      "design_id": "D_local_pair",
+      "reveal_tier": "simultaneous-canonical",
+      "probe_window_loss": 0.04
+    },
+    {
+      "design_id": "D_local_frames",
+      "reveal_tier": "pair-canonical",
+      "probe_window_loss": 0.02
+    }
+  ],
+  "other_design_ids": []
+}

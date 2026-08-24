@@ -15,6 +15,7 @@ from .contracts import (
     AWM_CONFIG_SCHEMA_VERSION_V2_1,
     AWM_CONFIG_SCHEMA_VERSION_V3,
     AWM_CONFIG_SCHEMA_VERSION_V3_1,
+    AWM_CONFIG_SCHEMA_VERSION_V3_2,
     AWMConfig,
     load_awm_config,
 )
@@ -27,6 +28,7 @@ AWM_EVALUATION_SCHEMA_VERSION_V2 = "pathfinder.awm-evaluation/v2alpha1"
 AWM_EVALUATION_SCHEMA_VERSION_V2_1 = "pathfinder.awm-evaluation/v2alpha2"
 AWM_EVALUATION_SCHEMA_VERSION_V3 = "pathfinder.awm-evaluation/v3alpha1"
 AWM_EVALUATION_SCHEMA_VERSION_V3_1 = "pathfinder.awm-evaluation/v3alpha2"
+AWM_EVALUATION_SCHEMA_VERSION_V3_2 = "pathfinder.awm-evaluation/v3alpha3"
 
 
 def holdout_truth(
@@ -299,6 +301,9 @@ def evaluate_awm(
         AWM_CONFIG_SCHEMA_VERSION_V3: AWM_EVALUATION_SCHEMA_VERSION_V3,
         AWM_CONFIG_SCHEMA_VERSION_V3_1: (
             AWM_EVALUATION_SCHEMA_VERSION_V3_1
+        ),
+        AWM_CONFIG_SCHEMA_VERSION_V3_2: (
+            AWM_EVALUATION_SCHEMA_VERSION_V3_2
         ),
     }.get(resolved_model.schema_version, AWM_EVALUATION_SCHEMA_VERSION)
     evaluation = {

@@ -254,6 +254,29 @@ Additional reference for the bounded-variable construction:
   Variables,” *Journal of the American Statistical Association*, 1963:
   <https://doi.org/10.1080/01621459.1963.10500830>
 
+### AWM v3alpha3 direct bounded-utility diagnostic
+
+`pathfinder.awm/v3alpha3` keeps the v3alpha2 evidence unit and snapshot
+unchanged: one independent value per workload, formed by averaging its
+complete preregistered repetition block. It changes only the primary paired
+gain certificate. Each workload-level utility difference is normalized from
+its declared finite support to `[0,1]`; one bounded-mean binary-KL inversion
+then produces the primary utility interval, which is mapped back to the
+original per-session scale.
+
+This avoids adding a success interval to a separate service-cost interval
+when the decision variable is their paired utility combination. The existing
+discordance and cost decompositions remain in CSV, JSON, and OED trace output
+for diagnosis, but `component_interval_role` marks them as
+`diagnostic-only-not-part-of-primary-confidence-family`. They must not be
+substituted for, intersected with, or added to the direct primary certificate.
+
+The method remains fixed-snapshot and post-hoc. It does not change the number
+of independent workloads, cure workload-selection bias, or turn the frozen
+Oracle into confirmatory evidence. Its power projection varies only the
+number of independent workload clusters while holding the within-workload
+repetition block and normalized point estimate fixed.
+
 The committed [`awm_reduced_mvp.json`](../../configs/awm_reduced_mvp.json)
 keeps every empirical assumption disabled. This is intentional: coupled AWM
 should initially match the independent model. After Phase B is reviewed, copy
@@ -411,6 +434,27 @@ PYTHONPATH=. python -m pathfinder evaluate-awm \
 Do not reuse either v3alpha1 output directory. Compare the snapshot hash,
 pooled point estimate, repetition sign-flip flag, component widths, and
 cluster-only power projections before choosing a method for independent data.
+
+Run v3alpha3 in fresh directories to compare only the certificate
+construction against v3alpha2 on the identical frozen snapshot:
+
+```bash
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha3_power_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_ALPHA3_POWER_OUT"
+
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha3_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_ALPHA3_OUT"
+```
+
+Compare the normalized utility interval, mapped gain width, held-out
+containment, and OED action with v3alpha2. Do not choose a confirmatory method
+from held-out performance without a subsequent independent workload split.
 
 ## Current Boundary
 

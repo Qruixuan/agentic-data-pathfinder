@@ -45,6 +45,12 @@ averages the complete fixed repetition block within each workload, continues
 to count workloads—not repeated Agent runs—as independent units, and records
 repetition sign flips in AWM and OED audit output. The v3alpha1 configuration
 and outputs remain reproducible and unchanged.
+AWM v3alpha3 is an isolated post-hoc certificate diagnostic over the same
+fixed snapshot. It normalizes each workload-level paired utility to its
+declared finite support and applies one direct bounded-mean KL interval as the
+primary certificate. Success-discordance and service-cost decompositions are
+retained only as explanatory diagnostics and are explicitly excluded from the
+primary confidence family. No workload split or deployed system is changed.
 
 ## Current Scope
 

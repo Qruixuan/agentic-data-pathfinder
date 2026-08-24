@@ -14,12 +14,14 @@ AWM_CONFIG_SCHEMA_VERSION_V2 = "pathfinder.awm/v2alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V2_1 = "pathfinder.awm/v2alpha2"
 AWM_CONFIG_SCHEMA_VERSION_V3 = "pathfinder.awm/v3alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V3_1 = "pathfinder.awm/v3alpha2"
+AWM_CONFIG_SCHEMA_VERSION_V3_2 = "pathfinder.awm/v3alpha3"
 AWM_CONFIG_SCHEMA_VERSIONS = (
     AWM_CONFIG_SCHEMA_VERSION,
     AWM_CONFIG_SCHEMA_VERSION_V2,
     AWM_CONFIG_SCHEMA_VERSION_V2_1,
     AWM_CONFIG_SCHEMA_VERSION_V3,
     AWM_CONFIG_SCHEMA_VERSION_V3_1,
+    AWM_CONFIG_SCHEMA_VERSION_V3_2,
 )
 CONFIDENCE_FAMILY_MODES = (
     "dynamic-observed-v1",
@@ -31,6 +33,7 @@ PAIRED_GAIN_METHODS = (
     "fixed-snapshot-empirical-bernstein",
     "cluster-first-decomposed-kl-empirical-bernstein",
     "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
+    "cluster-mean-direct-bounded-utility-kl",
 )
 PAIRED_LOOK_SEMANTICS = (
     "controller-iteration-upper-bound",
@@ -211,6 +214,9 @@ def _load_confidence_config(
         AWM_CONFIG_SCHEMA_VERSION_V3_1: (
             "cluster-mean-decomposed-bounded-kl-empirical-bernstein"
         ),
+        AWM_CONFIG_SCHEMA_VERSION_V3_2: (
+            "cluster-mean-direct-bounded-utility-kl"
+        ),
     }[schema_version]
     if method not in PAIRED_GAIN_METHODS or method != expected_method:
         raise AWMConfigError(
@@ -247,6 +253,7 @@ def _load_confidence_config(
         AWM_CONFIG_SCHEMA_VERSION_V2_1,
         AWM_CONFIG_SCHEMA_VERSION_V3,
         AWM_CONFIG_SCHEMA_VERSION_V3_1,
+        AWM_CONFIG_SCHEMA_VERSION_V3_2,
     ):
         raw_comparisons = _list(
             raw.get("paired_comparisons"),
@@ -312,6 +319,7 @@ def _load_confidence_config(
     if schema_version in (
         AWM_CONFIG_SCHEMA_VERSION_V3,
         AWM_CONFIG_SCHEMA_VERSION_V3_1,
+        AWM_CONFIG_SCHEMA_VERSION_V3_2,
     ):
         sampling_unit = _string(
             raw.get("sampling_unit"),
@@ -319,7 +327,10 @@ def _load_confidence_config(
         )
         expected_sampling_unit = (
             "workload-cluster-mean-paired-observation"
-            if schema_version == AWM_CONFIG_SCHEMA_VERSION_V3_1
+            if schema_version in (
+                AWM_CONFIG_SCHEMA_VERSION_V3_1,
+                AWM_CONFIG_SCHEMA_VERSION_V3_2,
+            )
             else "workload-cluster-first-paired-observation"
         )
         if sampling_unit != expected_sampling_unit:
@@ -345,7 +356,10 @@ def _load_confidence_config(
         )
         expected_cluster_reduction = (
             "mean-over-complete-repetition-block"
-            if schema_version == AWM_CONFIG_SCHEMA_VERSION_V3_1
+            if schema_version in (
+                AWM_CONFIG_SCHEMA_VERSION_V3_1,
+                AWM_CONFIG_SCHEMA_VERSION_V3_2,
+            )
             else "lowest-repetition-then-seed"
         )
         if cluster_reduction != expected_cluster_reduction:
@@ -380,11 +394,14 @@ def _load_confidence_config(
         "confidence.require_complete_pairs",
     )
     if (
-        schema_version == AWM_CONFIG_SCHEMA_VERSION_V3_1
+        schema_version in (
+            AWM_CONFIG_SCHEMA_VERSION_V3_1,
+            AWM_CONFIG_SCHEMA_VERSION_V3_2,
+        )
         and not require_complete_pairs
     ):
         raise AWMConfigError(
-            "v3alpha2 confidence.require_complete_pairs must be true"
+            "v3alpha2/v3alpha3 confidence.require_complete_pairs must be true"
         )
 
     return ConfidenceConfig(

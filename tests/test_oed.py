@@ -42,6 +42,11 @@ COMMITTED_OED_V3_ALPHA2_CONFIG = (
     / "configs"
     / "multi_candidate_formal_v1_oed_v3alpha2_diagnostic.json"
 )
+COMMITTED_OED_V3_ALPHA3_CONFIG = (
+    ROOT
+    / "configs"
+    / "multi_candidate_formal_v1_oed_v3alpha3_diagnostic.json"
+)
 
 
 def _oed_config(
@@ -142,6 +147,18 @@ class OEDConfigTest(unittest.TestCase):
             set(config.reveal_candidates),
         )
 
+    def test_committed_v3alpha3_keeps_bounded_reveal_domain(self) -> None:
+        config = load_oed_config(COMMITTED_OED_V3_ALPHA3_CONFIG)
+        self.assertEqual(
+            "multi-candidate-formal-v1-oed-v3alpha3-diagnostic",
+            config.controller_id,
+        )
+        self.assertEqual(4, config.max_iterations)
+        self.assertEqual(
+            {"D_local_digest", "D_local_frames", "D_local_pair"},
+            set(config.reveal_candidates),
+        )
+
 
 class OEDControllerTest(unittest.TestCase):
     def _fixture(self, root: Path, oed_path: Path):
@@ -234,6 +251,63 @@ class OEDControllerTest(unittest.TestCase):
 
 
 class OEDReplayTest(unittest.TestCase):
+    def test_v3alpha3_replay_exposes_direct_utility_certificate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle_path = _oracle_config(root)
+            awm_path = _awm_config(
+                root,
+                confidence_level=0.5,
+                quoted_price_sufficiency=False,
+                schema_version="pathfinder.awm/v3alpha3",
+            )
+            output = root / "oed-v3alpha3-output"
+            run_oed_replay(
+                _oed_config(root),
+                awm_path,
+                oracle_path,
+                oracle_output_dir=_synthetic_oracle_output(root),
+                output_dir=output,
+            )
+            traces = [
+                json.loads(line)
+                for line in (output / "oed_trace.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            full = [
+                row for row in traces
+                if row["policy_kind"] == "full_oed"
+            ]
+            candidate = next(
+                score
+                for score in full[1]["candidate_scores"]
+                if score["design_id"] == "D_local_digest"
+            )
+            self.assertEqual(
+                "paired-cluster-mean-direct-bounded-utility-kl",
+                candidate["gain_interval_source"],
+            )
+            self.assertIsNotNone(
+                candidate[
+                    "paired_gain_normalized_utility_point_estimate"
+                ]
+            )
+            self.assertIsNotNone(
+                candidate["paired_gain_normalized_utility_mean"]
+            )
+            self.assertEqual(
+                "diagnostic-only-not-part-of-primary-confidence-family",
+                candidate["paired_gain_component_interval_role"],
+            )
+            evaluation = json.loads(
+                (output / "oed_evaluation.json").read_text()
+            )
+            self.assertEqual(
+                "pathfinder.oed-replay/v3alpha3",
+                evaluation["schema_version"],
+            )
+
     def test_v3alpha2_replay_exposes_cluster_mean_audit_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
