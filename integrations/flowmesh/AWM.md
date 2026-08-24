@@ -277,6 +277,41 @@ Oracle into confirmatory evidence. Its power projection varies only the
 number of independent workload clusters while holding the within-workload
 repetition block and normalized point estimate fixed.
 
+### AWM v3alpha4 joint finite-state diagnostic
+
+`pathfinder.awm/v3alpha4` keeps the same frozen split, complete two-repetition
+block, and workload-level independence claim as v3alpha2/v3alpha3. Its primary
+certificate preserves the joint structure that the decomposed method loses.
+For each design pair it enumerates the finite workload states induced by:
+
+- paired success difference in `{-1, 0, 1}`;
+- the selected representation (including no access) under each design; and
+- the declared unit-cost interval of each selected action.
+
+The raw states are averaged over the fixed repetition block. Their nominal
+utilities assign them to five preregistered equal-width bins over the declared
+utility support. Adjacent bins are merged whenever their cost-uncertainty
+intervals overlap, so the remaining categories are ordered. For every boundary
+between effective bins, the implementation constructs a Bernoulli-KL interval
+for the cumulative category probability and divides the pair/look alpha across
+all such boundaries. Endpoint substitution maps the simultaneous CDF band to
+a lower and upper expected paired utility.
+
+This construction never estimates a separate success interval and cost
+interval and then adds their worst cases. It nevertheless remains fail-closed:
+an unknown action, a realized cost outside that action's declared interval, a
+state outside the predeclared support, or support growth beyond the configured
+maximum aborts certificate construction. The output records the support hash,
+support size, requested/effective bin counts, threshold count, threshold alpha,
+bin bounds, and observed counts. The old component intervals remain
+diagnostic-only.
+
+The five-bin choice and maximum support size are fixed in the committed
+diagnostic configuration, but they have not been validated on independent
+data. The accompanying power calculation holds the observed bin probabilities,
+support, bins, and repetition block fixed. It is planning output, not achieved
+coverage or power.
+
 The committed [`awm_reduced_mvp.json`](../../configs/awm_reduced_mvp.json)
 keeps every empirical assumption disabled. This is intentional: coupled AWM
 should initially match the independent model. After Phase B is reviewed, copy
@@ -455,6 +490,28 @@ PYTHONPATH=. python -m pathfinder evaluate-awm \
 Compare the normalized utility interval, mapped gain width, held-out
 containment, and OED action with v3alpha2. Do not choose a confirmatory method
 from held-out performance without a subsequent independent workload split.
+
+Run v3alpha4 in two new directories. These commands are also offline and read
+the same frozen Oracle:
+
+```bash
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha4_power_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_ALPHA4_POWER_OUT"
+
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha4_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_ALPHA4_OUT"
+```
+
+Compare v3alpha4 against v3alpha2 and v3alpha3 on interval width, holdout
+coverage, false-safe Commit count, projected independent-workload requirement,
+and OED action. A narrower post-hoc interval is useful method evidence only; it
+does not select the confirmatory method without a new independent split.
 
 ## Current Boundary
 

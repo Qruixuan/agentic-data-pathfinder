@@ -16,6 +16,7 @@ from pathfinder.awm import (
 from pathfinder.awm.model import (
     _bernoulli_kl_interval,
     _bounded_kl_mean_interval,
+    _joint_finite_state_binned_cdf_kl_estimate,
 )
 from pathfinder.reduced_oracle import load_reduced_oracle_config
 
@@ -51,6 +52,16 @@ COMMITTED_AWM_V3_ALPHA3_POWER_CONFIG = (
     ROOT
     / "configs"
     / "multi_candidate_formal_v1_awm_v3alpha3_power_diagnostic.json"
+)
+COMMITTED_AWM_V3_ALPHA4_POWER_CONFIG = (
+    ROOT
+    / "configs"
+    / "multi_candidate_formal_v1_awm_v3alpha4_power_diagnostic.json"
+)
+COMMITTED_AWM_V3_ALPHA4_OED_CONFIG = (
+    ROOT
+    / "configs"
+    / "multi_candidate_formal_v1_awm_v3alpha4_oed_diagnostic.json"
 )
 DESIGNS = ("D_remote_digest", "D_local_digest")
 
@@ -167,6 +178,7 @@ def _awm_config(
         "pathfinder.awm/v3alpha1",
         "pathfinder.awm/v3alpha2",
         "pathfinder.awm/v3alpha3",
+        "pathfinder.awm/v3alpha4",
     ):
         payload["confidence"] = {
             "family_mode": "fixed-full-domain",
@@ -242,6 +254,27 @@ def _awm_config(
                 ),
                 "success_alpha_fraction": 0.8,
                 "cost_alpha_fraction": 0.2,
+                "paired_comparisons": [list(DESIGNS)],
+            })
+        if schema_version == "pathfinder.awm/v3alpha4":
+            payload["confidence"].update({
+                "paired_gain_method": (
+                    "cluster-mean-joint-finite-state-binned-cdf-kl"
+                ),
+                "paired_gain_minimum_pairs": 8,
+                "maximum_looks": 1,
+                "look_semantics": "fixed-training-snapshot-per-pair",
+                "sampling_unit": (
+                    "workload-cluster-mean-paired-observation"
+                ),
+                "cluster_key_fields": ["workload_id"],
+                "cluster_reduction": (
+                    "mean-over-complete-repetition-block"
+                ),
+                "success_alpha_fraction": 0.8,
+                "cost_alpha_fraction": 0.2,
+                "joint_state_bin_count": 5,
+                "joint_state_maximum_support_size": 512,
                 "paired_comparisons": [list(DESIGNS)],
             })
     _write_json(path, payload)
@@ -506,6 +539,7 @@ class AWMConfigTest(unittest.TestCase):
         for schema_version in (
             "pathfinder.awm/v3alpha2",
             "pathfinder.awm/v3alpha3",
+            "pathfinder.awm/v3alpha4",
         ):
             with self.subTest(schema_version=schema_version):
                 with tempfile.TemporaryDirectory() as temporary:
@@ -542,6 +576,48 @@ class AWMConfigTest(unittest.TestCase):
         )
         self.assertTrue(config.confidence.require_complete_pairs)
 
+    def test_v3alpha4_committed_config_declares_joint_state_contract(
+        self,
+    ) -> None:
+        config = load_awm_config(COMMITTED_AWM_V3_ALPHA4_POWER_CONFIG)
+        self.assertEqual("pathfinder.awm/v3alpha4", config.schema_version)
+        self.assertEqual(
+            "cluster-mean-joint-finite-state-binned-cdf-kl",
+            config.confidence.paired_gain_method,
+        )
+        self.assertEqual(5, config.confidence.joint_state_bin_count)
+        self.assertEqual(
+            512,
+            config.confidence.joint_state_maximum_support_size,
+        )
+        self.assertTrue(config.confidence.require_complete_pairs)
+        oed = load_awm_config(COMMITTED_AWM_V3_ALPHA4_OED_CONFIG)
+        self.assertEqual(("D_origin_remote",), oed.observed_design_ids)
+        self.assertEqual(
+            config.confidence.paired_comparisons,
+            oed.confidence.paired_comparisons,
+        )
+
+    def test_v3alpha4_rejects_invalid_joint_state_limits(self) -> None:
+        for field, value, message in (
+            ("joint_state_bin_count", 1, "at least 2"),
+            (
+                "joint_state_maximum_support_size",
+                4,
+                "cannot be smaller",
+            ),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                path = _awm_config(
+                    root,
+                    schema_version="pathfinder.awm/v3alpha4",
+                )
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["confidence"][field] = value
+                _write_json(path, payload)
+                with self.assertRaisesRegex(AWMConfigError, message):
+                    load_awm_config(path)
     def test_v2_alpha_fractions_must_sum_to_one(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -584,6 +660,34 @@ class AWMConfigTest(unittest.TestCase):
                 "must have passed or validated status",
             ):
                 load_awm_config(path)
+
+
+class JointFiniteStateMathTest(unittest.TestCase):
+    def test_overlapping_uncertainty_bins_merge_fail_closed(self) -> None:
+        support = (
+            (-1.0, -1.0, 0.1),
+            (0.0, -0.1, 0.1),
+            (1.0, 0.05, 1.0),
+        )
+        estimate = _joint_finite_state_binned_cdf_kl_estimate(
+            ((0.0, -0.1, 0.1),),
+            support_states=support,
+            requested_bin_count=3,
+            delta=0.05,
+        )
+        self.assertEqual(1, estimate.effective_bin_count)
+        self.assertEqual(0, estimate.cdf_threshold_count)
+        self.assertEqual(estimate.support, estimate.interval)
+        self.assertEqual((1,), estimate.bin_counts)
+
+    def test_observed_state_must_belong_to_predeclared_support(self) -> None:
+        with self.assertRaisesRegex(AWMConfigError, "outside the predeclared"):
+            _joint_finite_state_binned_cdf_kl_estimate(
+                ((0.5, 0.5, 0.5),),
+                support_states=((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)),
+                requested_bin_count=2,
+                delta=0.05,
+            )
 
 
 class AWMSyntheticOracleTest(unittest.TestCase):
@@ -1006,6 +1110,170 @@ class AWMSyntheticOracleTest(unittest.TestCase):
                     "component_interval_role"
                 ],
             )
+
+    def test_v3alpha4_uses_joint_finite_state_cluster_certificate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle = load_reduced_oracle_config(_oracle_config(root))
+            config = load_awm_config(_awm_config(
+                root,
+                observed_design_ids=DESIGNS,
+                schema_version="pathfinder.awm/v3alpha4",
+            ))
+            oracle_output = _synthetic_oracle_output(root)
+            model = AdaptiveWorkloadModel(
+                load_oracle_dataset(
+                    config,
+                    oracle,
+                    oracle_output_dir=oracle_output,
+                ),
+                model_kind="coupled_awm",
+            )
+            certificate = model.paired_gain_certificate(*DESIGNS)
+            self.assertIsNotNone(certificate)
+            assert certificate is not None
+            self.assertEqual(16, certificate.raw_pair_count)
+            self.assertEqual(8, certificate.independent_unit_count)
+            self.assertEqual(2, certificate.within_cluster_repetition_count)
+            self.assertEqual(
+                "paired-cluster-mean-joint-finite-state-binned-cdf-kl",
+                certificate.certificate_construction,
+            )
+            self.assertEqual(
+                "diagnostic-only-not-part-of-primary-confidence-family",
+                certificate.component_interval_role,
+            )
+            self.assertGreater(certificate.joint_state_support_size or 0, 8)
+            self.assertLessEqual(
+                certificate.joint_state_support_size or 0,
+                config.confidence.joint_state_maximum_support_size,
+            )
+            self.assertEqual(
+                64,
+                len(certificate.joint_state_support_sha256 or ""),
+            )
+            self.assertEqual(5, certificate.joint_state_requested_bin_count)
+            self.assertGreaterEqual(
+                certificate.joint_state_effective_bin_count or 0,
+                2,
+            )
+            self.assertLessEqual(
+                certificate.joint_state_effective_bin_count or 0,
+                5,
+            )
+            self.assertEqual(
+                (certificate.joint_state_effective_bin_count or 0) - 1,
+                certificate.joint_state_cdf_threshold_count,
+            )
+            self.assertEqual(
+                certificate.pair_count,
+                sum(certificate.joint_state_bin_counts),
+            )
+            self.assertTrue(
+                certificate.gain_per_session.contains(
+                    certificate.point_estimate_per_session
+                )
+            )
+            self.assertEqual(
+                "paired-cluster-mean-joint-finite-state-binned-cdf-kl",
+                model.gain_interval_source(*DESIGNS),
+            )
+
+            planning = model.paired_gain_power_analysis(*DESIGNS)
+            self.assertIsNotNone(planning)
+            assert planning is not None
+            self.assertEqual(
+                "plug-in-cluster-mean-joint-finite-state-binned-cdf-kl-"
+                "planning",
+                planning.method,
+            )
+            self.assertEqual(
+                certificate.joint_state_support_size,
+                planning.joint_state_support_size,
+            )
+            self.assertEqual(
+                certificate.joint_state_effective_bin_count,
+                planning.joint_state_effective_bin_count,
+            )
+            self.assertIn("empirical joint-bin probabilities", planning.caveat)
+
+            output = root / "awm-v3alpha4-output"
+            evaluate_awm(
+                config,
+                oracle,
+                oracle_output_dir=oracle_output,
+                output_dir=output,
+            )
+            evaluation = json.loads(
+                (output / "awm_evaluation.json").read_text()
+            )
+            self.assertEqual(
+                "pathfinder.awm-evaluation/v3alpha4",
+                evaluation["schema_version"],
+            )
+            self.assertEqual(
+                5,
+                evaluation["confidence_contract"][
+                    "joint_state_bin_count"
+                ],
+            )
+
+    def test_v3alpha4_rejects_support_explosion_and_cost_mismatch(
+        self,
+    ) -> None:
+        for mutation in ("support_limit", "cost_mismatch"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                oracle = load_reduced_oracle_config(_oracle_config(root))
+                config_path = _awm_config(
+                    root,
+                    observed_design_ids=DESIGNS,
+                    schema_version="pathfinder.awm/v3alpha4",
+                )
+                oracle_output = _synthetic_oracle_output(root)
+                expected_message = "joint finite-state support exceeds"
+                if mutation == "support_limit":
+                    payload = json.loads(config_path.read_text())
+                    payload["confidence"][
+                        "joint_state_maximum_support_size"
+                    ] = 5
+                    _write_json(config_path, payload)
+                else:
+                    expected_message = "selected action's declared interval"
+                    path = (
+                        oracle_output
+                        / "designs"
+                        / "D_local_digest"
+                        / "runs.jsonl"
+                    )
+                    records = [
+                        json.loads(line)
+                        for line in path.read_text().splitlines()
+                    ]
+                    records[0]["access_events"][0]["realized_cost"] = 0.35
+                    path.write_text(
+                        "".join(
+                            json.dumps(record, sort_keys=True) + "\n"
+                            for record in records
+                        ),
+                        encoding="utf-8",
+                    )
+                config = load_awm_config(config_path)
+                model = AdaptiveWorkloadModel(
+                    load_oracle_dataset(
+                        config,
+                        oracle,
+                        oracle_output_dir=oracle_output,
+                    ),
+                    model_kind="coupled_awm",
+                )
+                with self.assertRaisesRegex(
+                    AWMConfigError,
+                    expected_message,
+                ):
+                    model.paired_gain_certificate(*DESIGNS)
 
     def test_v3alpha2_rejects_incomplete_or_duplicate_blocks(self) -> None:
         for mutation in ("incomplete", "duplicate"):

@@ -286,13 +286,25 @@ with `certificate_limited_stop`; it made no unsafe Commit. The service-cost
 empirical-Bernstein component reached its declared support on this small
 sample, while success uncertainty accounted for most of the combined width.
 
-`pathfinder.awm/v3alpha3` is now implemented as another isolated, not-yet-run
-post-hoc diagnostic. It keeps the same eight workload means and complete
-repetition snapshot but constructs the primary interval directly over the
-normalized bounded paired utility. The previous success/cost decomposition is
-retained only for explanation. This tests whether certifying the actual
-decision variable avoids avoidable component-wise width without changing the
-data or independence claim.
+`pathfinder.awm/v3alpha3` was then run as another isolated post-hoc diagnostic.
+It kept the same eight workload means and complete repetition snapshot but
+certified the normalized bounded paired utility directly. Its intervals were
+wider, not narrower: approximately `19.65`, `19.00`, and `18.33` per session
+for local frames, local digest, and local pair. The projected independent
+workload counts for 50% support width were 34 for all three candidates; the
+25% targets were 149, 149, and 148. OED again revealed all candidates and
+stopped with `certificate_limited_stop`, with no false-safe Commit. Thus,
+v3alpha3 is a useful negative ablation: removing the decomposition alone does
+not solve the small-independent-sample problem.
+
+`pathfinder.awm/v3alpha4` is now implemented but has not yet been run on the
+server Oracle. It retains the same workload means while predeclaring the joint
+finite states formed by success difference, selected representation, and
+bounded action cost. It orders and bins those states, applies simultaneous
+Bernoulli-KL bounds to cumulative bin probabilities, and exposes the complete
+support/bin audit trail to OED. This tests whether preserving action/outcome
+dependence can tighten the safe certificate without reusing repetitions as
+independent evidence. It remains post-hoc method development.
 
 ## Supported Claims
 
@@ -326,10 +338,11 @@ The current evidence does not support the following claims:
 The frozen v1 results should not be overwritten or retuned into confirmatory
 evidence. The next phase is:
 
-1. replay the implemented AWM v3alpha3 method on the same frozen Oracle as
-   explicitly post-hoc certificate development;
-2. compare v3alpha2 and v3alpha3 interval widths, held-out containment, power
-   projections, and OED actions without changing the frozen snapshot;
+1. replay v3alpha4 on the same frozen Oracle as explicitly post-hoc method
+   development;
+2. compare v3alpha2, v3alpha3, and v3alpha4 interval widths, held-out
+   containment, power projections, and OED actions without changing the
+   frozen snapshot;
 3. choose and freeze the method and independent-workload sample size, then run
    it on independent NExT-QA objects rather than adding more within-object
    repetitions; and

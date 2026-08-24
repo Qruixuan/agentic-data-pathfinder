@@ -51,6 +51,13 @@ declared finite support and applies one direct bounded-mean KL interval as the
 primary certificate. Success-discordance and service-cost decompositions are
 retained only as explanatory diagnostics and are explicitly excluded from the
 primary confidence family. No workload split or deployed system is changed.
+AWM v3alpha4 adds an isolated joint structured diagnostic. It predeclares the
+finite workload-level states induced jointly by success difference, selected
+representation, and bounded action cost; groups them into five ordered utility
+bins; and certifies their cumulative probabilities with simultaneous
+Bernoulli-KL intervals. The support hash, effective bins, counts, and allocated
+alpha are emitted into both AWM and OED outputs. This remains post-hoc method
+development on the frozen Oracle, not new confirmatory evidence.
 
 ## Current Scope
 

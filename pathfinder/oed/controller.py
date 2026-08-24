@@ -67,6 +67,17 @@ class CandidateScore:
     paired_gain_normalized_utility_point_estimate: float | None
     paired_gain_normalized_utility_mean: Interval | None
     paired_gain_component_interval_role: str | None
+    paired_gain_joint_state_support_size: int | None
+    paired_gain_joint_state_support_sha256: str | None
+    paired_gain_joint_state_observed_count: int | None
+    paired_gain_joint_state_requested_bin_count: int | None
+    paired_gain_joint_state_effective_bin_count: int | None
+    paired_gain_joint_state_cdf_threshold_count: int | None
+    paired_gain_joint_state_cdf_alpha_per_threshold: float | None
+    paired_gain_joint_state_bin_bounds: (
+        tuple[tuple[float, float], ...] | None
+    )
+    paired_gain_joint_state_bin_counts: tuple[int, ...] | None
     pessimistic_commit_gain: float
     optimistic_reveal_gain: float
     candidate_width: float
@@ -358,6 +369,51 @@ class OEDController:
             ),
             paired_gain_component_interval_role=(
                 paired_certificate.component_interval_role
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_support_size=(
+                paired_certificate.joint_state_support_size
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_support_sha256=(
+                paired_certificate.joint_state_support_sha256
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_observed_count=(
+                paired_certificate.joint_state_observed_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_requested_bin_count=(
+                paired_certificate.joint_state_requested_bin_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_effective_bin_count=(
+                paired_certificate.joint_state_effective_bin_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_cdf_threshold_count=(
+                paired_certificate.joint_state_cdf_threshold_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_cdf_alpha_per_threshold=(
+                paired_certificate.joint_state_cdf_alpha_per_threshold
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_bin_bounds=(
+                paired_certificate.joint_state_bin_bounds
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_joint_state_bin_counts=(
+                paired_certificate.joint_state_bin_counts
                 if paired_certificate is not None
                 else None
             ),

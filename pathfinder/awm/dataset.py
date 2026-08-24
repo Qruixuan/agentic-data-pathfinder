@@ -24,6 +24,7 @@ class TrialObservation:
     seed: int
     success: int
     service_cost: float
+    selected_representation_id: str | None
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,18 @@ def _sample(
         selected = {
             str(value) for value in record.get("selected_representations", [])
         }
+        if len(selected) > 1:
+            raise AWMConfigError(
+                "paired AWM requires at most one selected representation "
+                f"for {design_id}"
+            )
+        unknown_selected = selected - set(representation_ids)
+        if unknown_selected:
+            raise AWMConfigError(
+                "paired AWM record selected an unknown representation for "
+                f"{design_id}: " + ", ".join(sorted(unknown_selected))
+            )
+        selected_representation_id = next(iter(selected), None)
         for representation_id in representation_ids:
             access_counts[representation_id] += int(
                 representation_id in selected
@@ -209,6 +222,9 @@ def _sample(
                     seed=int(record["seed"]),
                     success=int(bool(record["task_success"])),
                     service_cost=service_cost,
+                    selected_representation_id=(
+                        selected_representation_id
+                    ),
                 )
             )
     return DesignSample(

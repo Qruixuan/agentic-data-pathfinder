@@ -87,6 +87,13 @@ diagnostic-only. Its `gain_interval_source` is
 `paired-cluster-mean-direct-bounded-utility-kl`. The controller never combines
 the diagnostic component bounds into this primary decision interval.
 
+With `pathfinder.awm/v3alpha4`, the decision interval comes from the joint
+finite-state binned CDF-KL certificate. Candidate scores carry the
+support hash, support and observed-state sizes, requested/effective bin counts,
+CDF threshold count and alpha, and bin bounds/counts. OED therefore uses and
+audits the same primary certificate; it never reconstructs a decision interval
+from the diagnostic success/cost components.
+
 The committed
 [`oed_reduced_mvp.json`](../../configs/oed_reduced_mvp.json) declares the
 finite Reveal set, tier, budget, cap, and probe-window loss. Its cost status is
@@ -256,6 +263,18 @@ PYTHONPATH=. python -m pathfinder run-oed-replay \
   --oracle-config configs/multi_candidate_formal_v1_oracle.json \
   --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
   --output-dir "$PF_MULTI_OED_V3_ALPHA3_OUT"
+```
+
+The v3alpha4 replay is likewise read-only and requires another fresh output
+directory:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-oed-replay \
+  --oed-config configs/multi_candidate_formal_v1_oed_v3alpha4_diagnostic.json \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3alpha4_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_OED_V3_ALPHA4_OUT"
 ```
 
 ## Current Boundary

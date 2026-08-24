@@ -1,0 +1,57 @@
+{
+  "schema_version": "pathfinder.awm/v3alpha4",
+  "model_id": "multi-candidate-formal-v1-awm-v3alpha4-oed-diagnostic",
+  "confidence_level": 0.9,
+  "holdout_repetitions": 2,
+  "observed_design_ids": ["D_origin_remote"],
+  "minimum_training_sessions": 16,
+  "maximum_excluded_training_fraction": 0.0,
+  "maximum_excluded_holdout_fraction": 0.0,
+  "substitution_groups": [
+    ["sampled_frames", "multimodal_digest"]
+  ],
+  "assumptions": {
+    "own_price_monotonicity": {
+      "enabled": false,
+      "status": "disabled-posthoc-v3alpha4-diagnostic"
+    },
+    "substitution_group_monotonicity": {
+      "enabled": false,
+      "status": "disabled-posthoc-v3alpha4-diagnostic"
+    },
+    "success_monotonicity": {
+      "enabled": false,
+      "status": "disabled-posthoc-v3alpha4-diagnostic"
+    },
+    "quoted_price_sufficiency": {
+      "enabled": false,
+      "status": "disabled-posthoc-v3alpha4-diagnostic"
+    }
+  },
+  "own_price_requires_other_quotes_equal": true,
+  "cost_relative_radius": 0.1,
+  "transition_relative_radius": 0.1,
+  "commit_margin": 0.0,
+  "confidence": {
+    "family_mode": "fixed-full-domain",
+    "marginal_alpha_fraction": 0.5,
+    "paired_gain_alpha_fraction": 0.5,
+    "paired_gain_method": "cluster-mean-joint-finite-state-binned-cdf-kl",
+    "paired_gain_minimum_pairs": 8,
+    "maximum_looks": 1,
+    "require_complete_pairs": true,
+    "look_semantics": "fixed-training-snapshot-per-pair",
+    "sampling_unit": "workload-cluster-mean-paired-observation",
+    "cluster_key_fields": ["workload_id"],
+    "cluster_reduction": "mean-over-complete-repetition-block",
+    "success_alpha_fraction": 0.8,
+    "cost_alpha_fraction": 0.2,
+    "joint_state_bin_count": 5,
+    "joint_state_maximum_support_size": 512,
+    "paired_comparisons": [
+      ["D_origin_remote", "D_local_digest"],
+      ["D_origin_remote", "D_local_frames"],
+      ["D_origin_remote", "D_local_pair"]
+    ]
+  }
+}

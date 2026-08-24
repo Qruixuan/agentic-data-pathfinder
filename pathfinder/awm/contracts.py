@@ -15,6 +15,7 @@ AWM_CONFIG_SCHEMA_VERSION_V2_1 = "pathfinder.awm/v2alpha2"
 AWM_CONFIG_SCHEMA_VERSION_V3 = "pathfinder.awm/v3alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V3_1 = "pathfinder.awm/v3alpha2"
 AWM_CONFIG_SCHEMA_VERSION_V3_2 = "pathfinder.awm/v3alpha3"
+AWM_CONFIG_SCHEMA_VERSION_V3_3 = "pathfinder.awm/v3alpha4"
 AWM_CONFIG_SCHEMA_VERSIONS = (
     AWM_CONFIG_SCHEMA_VERSION,
     AWM_CONFIG_SCHEMA_VERSION_V2,
@@ -22,6 +23,7 @@ AWM_CONFIG_SCHEMA_VERSIONS = (
     AWM_CONFIG_SCHEMA_VERSION_V3,
     AWM_CONFIG_SCHEMA_VERSION_V3_1,
     AWM_CONFIG_SCHEMA_VERSION_V3_2,
+    AWM_CONFIG_SCHEMA_VERSION_V3_3,
 )
 CONFIDENCE_FAMILY_MODES = (
     "dynamic-observed-v1",
@@ -34,6 +36,7 @@ PAIRED_GAIN_METHODS = (
     "cluster-first-decomposed-kl-empirical-bernstein",
     "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
     "cluster-mean-direct-bounded-utility-kl",
+    "cluster-mean-joint-finite-state-binned-cdf-kl",
 )
 PAIRED_LOOK_SEMANTICS = (
     "controller-iteration-upper-bound",
@@ -73,6 +76,8 @@ class ConfidenceConfig:
     cluster_reduction: str = "disabled"
     success_alpha_fraction: float = 0.0
     cost_alpha_fraction: float = 0.0
+    joint_state_bin_count: int = 0
+    joint_state_maximum_support_size: int = 0
 
     @property
     def paired_gain_enabled(self) -> bool:
@@ -217,6 +222,9 @@ def _load_confidence_config(
         AWM_CONFIG_SCHEMA_VERSION_V3_2: (
             "cluster-mean-direct-bounded-utility-kl"
         ),
+        AWM_CONFIG_SCHEMA_VERSION_V3_3: (
+            "cluster-mean-joint-finite-state-binned-cdf-kl"
+        ),
     }[schema_version]
     if method not in PAIRED_GAIN_METHODS or method != expected_method:
         raise AWMConfigError(
@@ -254,6 +262,7 @@ def _load_confidence_config(
         AWM_CONFIG_SCHEMA_VERSION_V3,
         AWM_CONFIG_SCHEMA_VERSION_V3_1,
         AWM_CONFIG_SCHEMA_VERSION_V3_2,
+        AWM_CONFIG_SCHEMA_VERSION_V3_3,
     ):
         raw_comparisons = _list(
             raw.get("paired_comparisons"),
@@ -320,6 +329,7 @@ def _load_confidence_config(
         AWM_CONFIG_SCHEMA_VERSION_V3,
         AWM_CONFIG_SCHEMA_VERSION_V3_1,
         AWM_CONFIG_SCHEMA_VERSION_V3_2,
+        AWM_CONFIG_SCHEMA_VERSION_V3_3,
     ):
         sampling_unit = _string(
             raw.get("sampling_unit"),
@@ -330,6 +340,7 @@ def _load_confidence_config(
             if schema_version in (
                 AWM_CONFIG_SCHEMA_VERSION_V3_1,
                 AWM_CONFIG_SCHEMA_VERSION_V3_2,
+                AWM_CONFIG_SCHEMA_VERSION_V3_3,
             )
             else "workload-cluster-first-paired-observation"
         )
@@ -359,6 +370,7 @@ def _load_confidence_config(
             if schema_version in (
                 AWM_CONFIG_SCHEMA_VERSION_V3_1,
                 AWM_CONFIG_SCHEMA_VERSION_V3_2,
+                AWM_CONFIG_SCHEMA_VERSION_V3_3,
             )
             else "lowest-repetition-then-seed"
         )
@@ -389,6 +401,28 @@ def _load_confidence_config(
                 "v3 success and cost alpha fractions must sum to 1"
             )
 
+    joint_state_bin_count = 0
+    joint_state_maximum_support_size = 0
+    if schema_version == AWM_CONFIG_SCHEMA_VERSION_V3_3:
+        joint_state_bin_count = _positive_integer(
+            raw.get("joint_state_bin_count"),
+            "confidence.joint_state_bin_count",
+        )
+        if joint_state_bin_count < 2:
+            raise AWMConfigError(
+                "v3alpha4 confidence.joint_state_bin_count must be at "
+                "least 2"
+            )
+        joint_state_maximum_support_size = _positive_integer(
+            raw.get("joint_state_maximum_support_size"),
+            "confidence.joint_state_maximum_support_size",
+        )
+        if joint_state_maximum_support_size < joint_state_bin_count:
+            raise AWMConfigError(
+                "confidence.joint_state_maximum_support_size cannot be "
+                "smaller than joint_state_bin_count"
+            )
+
     require_complete_pairs = _boolean(
         raw.get("require_complete_pairs", True),
         "confidence.require_complete_pairs",
@@ -397,11 +431,13 @@ def _load_confidence_config(
         schema_version in (
             AWM_CONFIG_SCHEMA_VERSION_V3_1,
             AWM_CONFIG_SCHEMA_VERSION_V3_2,
+            AWM_CONFIG_SCHEMA_VERSION_V3_3,
         )
         and not require_complete_pairs
     ):
         raise AWMConfigError(
-            "v3alpha2/v3alpha3 confidence.require_complete_pairs must be true"
+            "v3alpha2/v3alpha3/v3alpha4 "
+            "confidence.require_complete_pairs must be true"
         )
 
     return ConfidenceConfig(
@@ -422,6 +458,10 @@ def _load_confidence_config(
         cluster_reduction=cluster_reduction,
         success_alpha_fraction=success_alpha_fraction,
         cost_alpha_fraction=cost_alpha_fraction,
+        joint_state_bin_count=joint_state_bin_count,
+        joint_state_maximum_support_size=(
+            joint_state_maximum_support_size
+        ),
     )
 
 

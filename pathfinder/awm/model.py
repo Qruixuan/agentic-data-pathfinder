@@ -16,6 +16,7 @@ AWM_MODEL_KINDS = (
     "independent_box",
     "coupled_awm",
 )
+_JOINT_STATE_DECIMAL_PLACES = 12
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,15 @@ class PairedGainCertificate:
     normalized_utility_point_estimate: float | None = None
     normalized_utility_mean: Interval | None = None
     component_interval_role: str = "primary-certificate-components"
+    joint_state_support_size: int | None = None
+    joint_state_support_sha256: str | None = None
+    joint_state_observed_count: int | None = None
+    joint_state_requested_bin_count: int | None = None
+    joint_state_effective_bin_count: int | None = None
+    joint_state_cdf_threshold_count: int | None = None
+    joint_state_cdf_alpha_per_threshold: float | None = None
+    joint_state_bin_bounds: tuple[tuple[float, float], ...] = ()
+    joint_state_bin_counts: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -231,6 +241,31 @@ class PairedGainCertificate:
                 self.normalized_utility_point_estimate
             ),
             "component_interval_role": self.component_interval_role,
+            "joint_state_support_size": self.joint_state_support_size,
+            "joint_state_support_sha256": self.joint_state_support_sha256,
+            "joint_state_observed_count": self.joint_state_observed_count,
+            "joint_state_requested_bin_count": (
+                self.joint_state_requested_bin_count
+            ),
+            "joint_state_effective_bin_count": (
+                self.joint_state_effective_bin_count
+            ),
+            "joint_state_cdf_threshold_count": (
+                self.joint_state_cdf_threshold_count
+            ),
+            "joint_state_cdf_alpha_per_threshold": (
+                self.joint_state_cdf_alpha_per_threshold
+            ),
+            "joint_state_bin_bounds_json": json.dumps(
+                [
+                    {"lower": lower, "upper": upper}
+                    for lower, upper in self.joint_state_bin_bounds
+                ],
+                sort_keys=True,
+            ),
+            "joint_state_bin_counts_json": json.dumps(
+                list(self.joint_state_bin_counts)
+            ),
         }
         for prefix, interval in (
             (
@@ -267,6 +302,21 @@ class EmpiricalBernsteinEstimate:
 
 
 @dataclass(frozen=True)
+class JointFiniteStateEstimate:
+    interval: Interval
+    support: Interval
+    support_size: int
+    support_sha256: str
+    observed_state_count: int
+    requested_bin_count: int
+    effective_bin_count: int
+    cdf_threshold_count: int
+    cdf_alpha_per_threshold: float | None
+    bin_bounds: tuple[Interval, ...]
+    bin_counts: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class PairedGainPowerAnalysis:
     current_design_id: str
     candidate_design_id: str
@@ -297,6 +347,10 @@ class PairedGainPowerAnalysis:
     within_cluster_repetition_count: int | None = None
     within_cluster_repetition_ids: tuple[int, ...] = ()
     repetition_sign_flip: bool = False
+    joint_state_support_size: int | None = None
+    joint_state_requested_bin_count: int | None = None
+    joint_state_effective_bin_count: int | None = None
+    joint_state_cdf_threshold_count: int | None = None
 
     def to_row(self, *, model_kind: str) -> dict[str, Any]:
         payload = asdict(self)
@@ -412,6 +466,205 @@ def _bounded_kl_mean_interval(
         sample_mean,
         independent_units,
         delta,
+    )
+
+
+def _joint_state_number(value: float) -> float:
+    result = round(float(value), _JOINT_STATE_DECIMAL_PLACES)
+    return 0.0 if result == -0.0 else result
+
+
+def _joint_state_key(
+    nominal: float,
+    lower: float,
+    upper: float,
+) -> tuple[float, float, float]:
+    return (
+        _joint_state_number(nominal),
+        _joint_state_number(lower),
+        _joint_state_number(upper),
+    )
+
+
+def _joint_finite_state_binned_cdf_kl_estimate(
+    observed_states: tuple[tuple[float, float, float], ...],
+    *,
+    support_states: tuple[tuple[float, float, float], ...],
+    requested_bin_count: int,
+    delta: float,
+) -> JointFiniteStateEstimate:
+    """Bound a joint-state utility mean with ordered categorical CDFs.
+
+    Every support state contains a nominal utility used only for fixed bin
+    assignment and lower/upper utilities that include declared unit-cost
+    uncertainty. Simultaneous Bernoulli-KL bounds cover every cumulative bin
+    probability. Bin endpoint substitution then gives a conservative mean
+    interval without treating within-workload repetitions as independent.
+    """
+    if not support_states:
+        raise ValueError("joint finite-state support cannot be empty")
+    if not observed_states:
+        raise ValueError("joint finite-state observations cannot be empty")
+    if requested_bin_count < 2:
+        raise ValueError("joint finite-state bin count must be at least 2")
+    if not 0.0 < delta < 1.0:
+        raise ValueError("joint finite-state delta must be in (0, 1)")
+
+    canonical_support = tuple(sorted(set(
+        _joint_state_key(*state) for state in support_states
+    )))
+    support_set = set(canonical_support)
+    canonical_observed = tuple(
+        _joint_state_key(*state) for state in observed_states
+    )
+    missing = set(canonical_observed) - support_set
+    if missing:
+        raise AWMConfigError(
+            "observed paired workload state is outside the predeclared "
+            "joint finite-state support"
+        )
+    support = Interval(
+        min(state[1] for state in canonical_support),
+        max(state[2] for state in canonical_support),
+    )
+    if support.width <= 0.0:
+        support_payload = {
+            "support_states": canonical_support,
+            "requested_bin_count": requested_bin_count,
+            "effective_bins": [
+                {
+                    "raw_indices": [0],
+                    "lower": support.lower,
+                    "upper": support.upper,
+                }
+            ],
+        }
+        return JointFiniteStateEstimate(
+            interval=support,
+            support=support,
+            support_size=len(canonical_support),
+            support_sha256=sha256(
+                json.dumps(
+                    support_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            observed_state_count=len(set(canonical_observed)),
+            requested_bin_count=requested_bin_count,
+            effective_bin_count=1,
+            cdf_threshold_count=0,
+            cdf_alpha_per_threshold=None,
+            bin_bounds=(support,),
+            bin_counts=(len(canonical_observed),),
+        )
+
+    def raw_bin_index(nominal: float) -> int:
+        scaled = (nominal - support.lower) / support.width
+        return min(
+            requested_bin_count - 1,
+            max(0, int(math.floor(scaled * requested_bin_count))),
+        )
+
+    raw_bins: dict[int, list[tuple[float, float, float]]] = {}
+    for state in canonical_support:
+        raw_bins.setdefault(raw_bin_index(state[0]), []).append(state)
+
+    merged: list[dict[str, Any]] = []
+    for raw_index, states in sorted(raw_bins.items()):
+        candidate = {
+            "raw_indices": [raw_index],
+            "states": list(states),
+            "lower": min(state[1] for state in states),
+            "upper": max(state[2] for state in states),
+        }
+        if merged and float(merged[-1]["upper"]) > (
+            float(candidate["lower"]) + 1e-12
+        ):
+            merged[-1]["raw_indices"].extend(candidate["raw_indices"])
+            merged[-1]["states"].extend(candidate["states"])
+            merged[-1]["lower"] = min(
+                float(merged[-1]["lower"]),
+                float(candidate["lower"]),
+            )
+            merged[-1]["upper"] = max(
+                float(merged[-1]["upper"]),
+                float(candidate["upper"]),
+            )
+        else:
+            merged.append(candidate)
+
+    state_to_bin: dict[tuple[float, float, float], int] = {}
+    for index, item in enumerate(merged):
+        for state in item["states"]:
+            state_to_bin[state] = index
+    counts = [0 for _ in merged]
+    for state in canonical_observed:
+        counts[state_to_bin[state]] += 1
+    bounds = tuple(
+        Interval(float(item["lower"]), float(item["upper"]))
+        for item in merged
+    )
+    threshold_count = max(0, len(bounds) - 1)
+    threshold_alpha = (
+        delta / threshold_count if threshold_count else None
+    )
+    if threshold_count:
+        cumulative = 0
+        cdf_intervals: list[Interval] = []
+        for count in counts[:-1]:
+            cumulative += count
+            cdf_intervals.append(_bernoulli_kl_interval(
+                cumulative,
+                len(canonical_observed),
+                float(threshold_alpha),
+            ))
+        lower_mean = bounds[0].lower
+        upper_mean = bounds[0].upper
+        for index, cdf_interval in enumerate(cdf_intervals):
+            lower_mean += (
+                bounds[index + 1].lower - bounds[index].lower
+            ) * (1.0 - cdf_interval.upper)
+            upper_mean += (
+                bounds[index + 1].upper - bounds[index].upper
+            ) * (1.0 - cdf_interval.lower)
+        interval = Interval(
+            max(support.lower, lower_mean),
+            min(support.upper, upper_mean),
+        )
+    else:
+        interval = bounds[0]
+
+    support_payload = {
+        "support_states": canonical_support,
+        "requested_bin_count": requested_bin_count,
+        "effective_bins": [
+            {
+                "raw_indices": item["raw_indices"],
+                "lower": item["lower"],
+                "upper": item["upper"],
+            }
+            for item in merged
+        ],
+    }
+    return JointFiniteStateEstimate(
+        interval=interval,
+        support=support,
+        support_size=len(canonical_support),
+        support_sha256=sha256(
+            json.dumps(
+                support_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        observed_state_count=len(set(canonical_observed)),
+        requested_bin_count=requested_bin_count,
+        effective_bin_count=len(bounds),
+        cdf_threshold_count=threshold_count,
+        cdf_alpha_per_threshold=threshold_alpha,
+        bin_bounds=bounds,
+        bin_counts=tuple(counts),
     )
 
 
@@ -620,13 +873,25 @@ class AdaptiveWorkloadModel:
                 config.confidence.cost_alpha_fraction
             ),
             "paired_support_rule": (
-                "task-value-plus-declared-single-access-cost-support"
+                "joint-success-action-cost-finite-state-support"
+                if config.confidence.paired_gain_method
+                == "cluster-mean-joint-finite-state-binned-cdf-kl"
+                else "task-value-plus-declared-single-access-cost-support"
             ),
             "component_interval_role": (
                 "diagnostic-only-not-part-of-primary-confidence-family"
                 if config.confidence.paired_gain_method
-                == "cluster-mean-direct-bounded-utility-kl"
+                in (
+                    "cluster-mean-direct-bounded-utility-kl",
+                    "cluster-mean-joint-finite-state-binned-cdf-kl",
+                )
                 else "primary-certificate-components"
+            ),
+            "joint_state_bin_count": (
+                config.confidence.joint_state_bin_count or None
+            ),
+            "joint_state_maximum_support_size": (
+                config.confidence.joint_state_maximum_support_size or None
             ),
         }
 
@@ -659,6 +924,12 @@ class AdaptiveWorkloadModel:
         if paired_method == "cluster-mean-direct-bounded-utility-kl":
             return "paired-cluster-mean-direct-bounded-utility-kl"
         if paired_method == (
+            "cluster-mean-joint-finite-state-binned-cdf-kl"
+        ):
+            return (
+                "paired-cluster-mean-joint-finite-state-binned-cdf-kl"
+            )
+        if paired_method == (
             "cluster-first-decomposed-kl-empirical-bernstein"
         ):
             return "paired-cluster-decomposed-kl-empirical-bernstein"
@@ -668,6 +939,161 @@ class AdaptiveWorkloadModel:
         ):
             return "paired-fixed-snapshot-empirical-bernstein"
         return "paired-fixed-looks-empirical-bernstein"
+
+    def _joint_action_costs(
+        self,
+        design_id: str,
+    ) -> dict[str | None, tuple[float, Interval]]:
+        intervals = self._unit_cost_intervals(design_id)
+        actions: dict[str | None, tuple[float, Interval]] = {
+            None: (0.0, Interval(0.0, 0.0))
+        }
+        for representation_id in self.dataset.representation_ids:
+            if not self.dataset.affordable(design_id, representation_id):
+                continue
+            actions[representation_id] = (
+                self.dataset.system.designs[design_id]
+                .paths[representation_id]
+                .realized_cost,
+                intervals[representation_id],
+            )
+        return actions
+
+    def _joint_raw_state(
+        self,
+        *,
+        success_difference: int,
+        current_cost: tuple[float, Interval],
+        candidate_cost: tuple[float, Interval],
+    ) -> tuple[float, float, float]:
+        task_value = self.dataset.task_class.task_value
+        weight = self.dataset.system.resource_cost_weight
+        current_nominal, current_interval = current_cost
+        candidate_nominal, candidate_interval = candidate_cost
+        return _joint_state_key(
+            task_value * success_difference
+            - weight * (candidate_nominal - current_nominal),
+            task_value * success_difference
+            - weight * (
+                candidate_interval.upper - current_interval.lower
+            ),
+            task_value * success_difference
+            - weight * (
+                candidate_interval.lower - current_interval.upper
+            ),
+        )
+
+    def _joint_cluster_state_support(
+        self,
+        current: str,
+        candidate: str,
+        *,
+        repetition_count: int,
+        maximum_support_size: int,
+    ) -> tuple[tuple[float, float, float], ...]:
+        if repetition_count <= 0:
+            raise AWMConfigError(
+                "joint finite-state AWM requires a positive repetition block"
+            )
+        raw_states = {
+            self._joint_raw_state(
+                success_difference=success_difference,
+                current_cost=current_cost,
+                candidate_cost=candidate_cost,
+            )
+            for success_difference in (-1, 0, 1)
+            for current_cost in self._joint_action_costs(current).values()
+            for candidate_cost in self._joint_action_costs(
+                candidate
+            ).values()
+        }
+        sums: set[tuple[float, float, float]] = {(0.0, 0.0, 0.0)}
+        for _ in range(repetition_count):
+            sums = {
+                _joint_state_key(
+                    left[0] + right[0],
+                    left[1] + right[1],
+                    left[2] + right[2],
+                )
+                for left in sums
+                for right in raw_states
+            }
+            if len(sums) > maximum_support_size:
+                raise AWMConfigError(
+                    "joint finite-state support exceeds the configured "
+                    "maximum; support_size="
+                    f"{len(sums)}, maximum={maximum_support_size}"
+                )
+        return tuple(sorted(
+            _joint_state_key(
+                state[0] / repetition_count,
+                state[1] / repetition_count,
+                state[2] / repetition_count,
+            )
+            for state in sums
+        ))
+
+    def _joint_observed_cluster_state(
+        self,
+        current: str,
+        candidate: str,
+        group: tuple[str, ...],
+        current_observations: dict[str, Any],
+        candidate_observations: dict[str, Any],
+    ) -> tuple[float, float, float]:
+        current_actions = self._joint_action_costs(current)
+        candidate_actions = self._joint_action_costs(candidate)
+        raw_states: list[tuple[float, float, float]] = []
+        for key in group:
+            current_observation = current_observations[key]
+            candidate_observation = candidate_observations[key]
+            current_action = (
+                current_observation.selected_representation_id
+            )
+            candidate_action = (
+                candidate_observation.selected_representation_id
+            )
+            if current_action not in current_actions:
+                raise AWMConfigError(
+                    "observed current-design action is outside the "
+                    "predeclared affordable joint-state support"
+                )
+            if candidate_action not in candidate_actions:
+                raise AWMConfigError(
+                    "observed candidate-design action is outside the "
+                    "predeclared affordable joint-state support"
+                )
+            current_cost = current_actions[current_action]
+            candidate_cost = candidate_actions[candidate_action]
+            if not current_cost[1].contains(
+                current_observation.service_cost,
+                tolerance=1e-8,
+            ):
+                raise AWMConfigError(
+                    "observed current-design service cost is outside its "
+                    "selected action's declared interval"
+                )
+            if not candidate_cost[1].contains(
+                candidate_observation.service_cost,
+                tolerance=1e-8,
+            ):
+                raise AWMConfigError(
+                    "observed candidate-design service cost is outside its "
+                    "selected action's declared interval"
+                )
+            raw_states.append(self._joint_raw_state(
+                success_difference=(
+                    candidate_observation.success
+                    - current_observation.success
+                ),
+                current_cost=current_cost,
+                candidate_cost=candidate_cost,
+            ))
+        return _joint_state_key(
+            mean(state[0] for state in raw_states),
+            mean(state[1] for state in raw_states),
+            mean(state[2] for state in raw_states),
+        )
 
     def pessimistic_gain(self, current: str, candidate: str) -> float:
         return self.gain_interval(current, candidate).lower
@@ -856,6 +1282,23 @@ class AdaptiveWorkloadModel:
             }
             for key in snapshot_keys
         ]
+        if config.paired_gain_method == (
+            "cluster-mean-joint-finite-state-binned-cdf-kl"
+        ):
+            for item, key in zip(
+                snapshot_payload,
+                snapshot_keys,
+                strict=True,
+            ):
+                item.update({
+                    "current_selected_representation_id": (
+                        current_observations[key].selected_representation_id
+                    ),
+                    "candidate_selected_representation_id": (
+                        candidate_observations[key]
+                        .selected_representation_id
+                    ),
+                })
         repetition_utility_means: tuple[tuple[int, float], ...] = ()
         repetition_sign_flip = False
         if within_cluster_repetition_ids:
@@ -921,6 +1364,7 @@ class AdaptiveWorkloadModel:
         cost_interval: Interval | None = None
         normalized_utility_point: float | None = None
         normalized_utility_interval: Interval | None = None
+        joint_state_estimate: JointFiniteStateEstimate | None = None
         component_interval_role = "primary-certificate-components"
         unclipped_per_session = diagnostic_estimate.unclipped_interval
         clipped_to_support = diagnostic_estimate.clipped_to_support
@@ -928,6 +1372,7 @@ class AdaptiveWorkloadModel:
             "cluster-first-decomposed-kl-empirical-bernstein",
             "cluster-mean-decomposed-bounded-kl-empirical-bernstein",
             "cluster-mean-direct-bounded-utility-kl",
+            "cluster-mean-joint-finite-state-binned-cdf-kl",
         ):
             success_alpha = (
                 self._paired_alpha() * config.success_alpha_fraction
@@ -952,6 +1397,7 @@ class AdaptiveWorkloadModel:
                     "cluster-mean-decomposed-bounded-kl-"
                     "empirical-bernstein",
                     "cluster-mean-direct-bounded-utility-kl",
+                    "cluster-mean-joint-finite-state-binned-cdf-kl",
                 )
                 else _bernoulli_kl_mean_interval
             )
@@ -999,6 +1445,7 @@ class AdaptiveWorkloadModel:
                     "cluster-mean-decomposed-bounded-kl-"
                     "empirical-bernstein",
                     "cluster-mean-direct-bounded-utility-kl",
+                    "cluster-mean-joint-finite-state-binned-cdf-kl",
                 )
                 else "paired-discordance-bernoulli-kl-plus-"
                 "service-cost-empirical-bernstein"
@@ -1037,6 +1484,52 @@ class AdaptiveWorkloadModel:
             clipped_to_support = False
             certificate_construction = (
                 "paired-cluster-mean-direct-normalized-bounded-utility-kl"
+            )
+            component_interval_role = (
+                "diagnostic-only-not-part-of-primary-confidence-family"
+            )
+        if config.paired_gain_method == (
+            "cluster-mean-joint-finite-state-binned-cdf-kl"
+        ):
+            support_states = self._joint_cluster_state_support(
+                current,
+                candidate,
+                repetition_count=len(within_cluster_repetition_ids),
+                maximum_support_size=(
+                    config.joint_state_maximum_support_size
+                ),
+            )
+            observed_states = tuple(
+                self._joint_observed_cluster_state(
+                    current,
+                    candidate,
+                    group,
+                    current_observations,
+                    candidate_observations,
+                )
+                for group in unit_key_groups
+            )
+            joint_state_estimate = (
+                _joint_finite_state_binned_cdf_kl_estimate(
+                    observed_states,
+                    support_states=support_states,
+                    requested_bin_count=config.joint_state_bin_count,
+                    delta=self._paired_alpha(),
+                )
+            )
+            if not joint_state_estimate.interval.contains(
+                diagnostic_estimate.sample_mean,
+                tolerance=1e-8,
+            ):
+                raise RuntimeError(
+                    "joint finite-state interval omitted its empirical mean"
+                )
+            support = joint_state_estimate.support
+            per_session = joint_state_estimate.interval
+            unclipped_per_session = per_session
+            clipped_to_support = False
+            certificate_construction = (
+                "paired-cluster-mean-joint-finite-state-binned-cdf-kl"
             )
             component_interval_role = (
                 "diagnostic-only-not-part-of-primary-confidence-family"
@@ -1120,6 +1613,54 @@ class AdaptiveWorkloadModel:
             normalized_utility_point_estimate=normalized_utility_point,
             normalized_utility_mean=normalized_utility_interval,
             component_interval_role=component_interval_role,
+            joint_state_support_size=(
+                joint_state_estimate.support_size
+                if joint_state_estimate is not None
+                else None
+            ),
+            joint_state_support_sha256=(
+                joint_state_estimate.support_sha256
+                if joint_state_estimate is not None
+                else None
+            ),
+            joint_state_observed_count=(
+                joint_state_estimate.observed_state_count
+                if joint_state_estimate is not None
+                else None
+            ),
+            joint_state_requested_bin_count=(
+                joint_state_estimate.requested_bin_count
+                if joint_state_estimate is not None
+                else None
+            ),
+            joint_state_effective_bin_count=(
+                joint_state_estimate.effective_bin_count
+                if joint_state_estimate is not None
+                else None
+            ),
+            joint_state_cdf_threshold_count=(
+                joint_state_estimate.cdf_threshold_count
+                if joint_state_estimate is not None
+                else None
+            ),
+            joint_state_cdf_alpha_per_threshold=(
+                joint_state_estimate.cdf_alpha_per_threshold
+                if joint_state_estimate is not None
+                else None
+            ),
+            joint_state_bin_bounds=(
+                tuple(
+                    (interval.lower, interval.upper)
+                    for interval in joint_state_estimate.bin_bounds
+                )
+                if joint_state_estimate is not None
+                else ()
+            ),
+            joint_state_bin_counts=(
+                joint_state_estimate.bin_counts
+                if joint_state_estimate is not None
+                else ()
+            ),
         )
         self._paired_gain_cache[cache_key] = certificate
         return certificate
@@ -1152,6 +1693,13 @@ class AdaptiveWorkloadModel:
             )
         if certificate.method == "cluster-mean-direct-bounded-utility-kl":
             return self._cluster_direct_bounded_utility_power_analysis(
+                certificate,
+                maximum_planning_pairs=maximum_planning_pairs,
+            )
+        if certificate.method == (
+            "cluster-mean-joint-finite-state-binned-cdf-kl"
+        ):
+            return self._cluster_joint_finite_state_power_analysis(
                 certificate,
                 maximum_planning_pairs=maximum_planning_pairs,
             )
@@ -1552,6 +2100,210 @@ class AdaptiveWorkloadModel:
                 certificate.within_cluster_repetition_ids
             ),
             repetition_sign_flip=certificate.repetition_sign_flip,
+        )
+
+    def _cluster_joint_finite_state_power_analysis(
+        self,
+        certificate: PairedGainCertificate,
+        *,
+        maximum_planning_pairs: int,
+    ) -> PairedGainPowerAnalysis:
+        """Project joint finite-state CDF width in workload units."""
+        if (
+            certificate.joint_state_support_size is None
+            or certificate.joint_state_requested_bin_count is None
+            or certificate.joint_state_effective_bin_count is None
+            or certificate.joint_state_cdf_threshold_count is None
+            or not certificate.joint_state_bin_bounds
+            or not certificate.joint_state_bin_counts
+        ):
+            raise RuntimeError(
+                "v3alpha4 certificate is missing joint-state audit data"
+            )
+        if (
+            len(certificate.joint_state_bin_bounds)
+            != certificate.joint_state_effective_bin_count
+            or len(certificate.joint_state_bin_counts)
+            != certificate.joint_state_effective_bin_count
+            or sum(certificate.joint_state_bin_counts)
+            != certificate.pair_count
+        ):
+            raise RuntimeError(
+                "v3alpha4 certificate has inconsistent joint-state bins"
+            )
+
+        bounds = tuple(
+            Interval(lower, upper)
+            for lower, upper in certificate.joint_state_bin_bounds
+        )
+        probabilities = tuple(
+            count / certificate.pair_count
+            for count in certificate.joint_state_bin_counts
+        )
+        threshold_count = certificate.joint_state_cdf_threshold_count
+        if threshold_count != max(0, len(bounds) - 1):
+            raise RuntimeError(
+                "v3alpha4 certificate has inconsistent CDF threshold count"
+            )
+        threshold_alpha = (
+            certificate.alpha_per_pair_look / threshold_count
+            if threshold_count
+            else None
+        )
+        if (
+            threshold_count
+            and not math.isclose(
+                certificate.joint_state_cdf_alpha_per_threshold or 0.0,
+                float(threshold_alpha),
+                rel_tol=0.0,
+                abs_tol=1e-15,
+            )
+        ):
+            raise RuntimeError(
+                "v3alpha4 certificate has inconsistent CDF alpha allocation"
+            )
+        if any(
+            left.upper > right.lower + 1e-12
+            for left, right in zip(bounds, bounds[1:])
+        ):
+            raise RuntimeError(
+                "v3alpha4 certificate has unordered overlapping bins"
+            )
+
+        def projected_interval(cluster_count: int) -> Interval:
+            if not threshold_count:
+                return bounds[0]
+            cumulative_probability = 0.0
+            cdf_intervals: list[Interval] = []
+            for probability in probabilities[:-1]:
+                cumulative_probability += probability
+                cdf_intervals.append(_bernoulli_kl_mean_interval(
+                    cumulative_probability,
+                    cluster_count,
+                    float(threshold_alpha),
+                ))
+            lower_mean = bounds[0].lower
+            upper_mean = bounds[0].upper
+            for index, cdf_interval in enumerate(cdf_intervals):
+                lower_mean += (
+                    bounds[index + 1].lower - bounds[index].lower
+                ) * (1.0 - cdf_interval.upper)
+                upper_mean += (
+                    bounds[index + 1].upper - bounds[index].upper
+                ) * (1.0 - cdf_interval.lower)
+            return Interval(lower_mean, upper_mean)
+
+        support = certificate.support_per_session
+        start = certificate.pair_count
+        width_targets = {
+            fraction: _minimum_projected_pairs(
+                lambda cluster_count, fraction=fraction: (
+                    projected_interval(cluster_count).width
+                    <= fraction * support.width
+                ),
+                start=start,
+                maximum=maximum_planning_pairs,
+            )
+            for fraction in (0.5, 0.25, 0.1)
+        }
+        storage_delta = (
+            self.dataset.storage_costs[certificate.candidate_design_id]
+            - self.dataset.storage_costs[certificate.current_design_id]
+        )
+        transition_upper = self._bounds[
+            certificate.candidate_design_id
+        ].transition_cost.upper
+        horizon = self.dataset.horizon_sessions
+        commit_margin = self.dataset.model_config.commit_margin
+        positive_commit = _minimum_projected_pairs(
+            lambda cluster_count: (
+                horizon * projected_interval(cluster_count).lower
+                - storage_delta
+                - transition_upper
+                > commit_margin
+            ),
+            start=start,
+            maximum=maximum_planning_pairs,
+        )
+        current_radius = max(
+            certificate.point_estimate_per_session
+            - certificate.gain_per_session.lower,
+            certificate.gain_per_session.upper
+            - certificate.point_estimate_per_session,
+        )
+        return PairedGainPowerAnalysis(
+            current_design_id=certificate.current_design_id,
+            candidate_design_id=certificate.candidate_design_id,
+            method=(
+                "plug-in-cluster-mean-joint-finite-state-binned-cdf-kl-"
+                "planning"
+            ),
+            planning_status="posthoc-planning-not-a-confidence-guarantee",
+            current_pair_count=certificate.pair_count,
+            alpha_per_pair_look=certificate.alpha_per_pair_look,
+            assumed_point_estimate_per_session=(
+                certificate.point_estimate_per_session
+            ),
+            assumed_sample_variance_per_session=(
+                certificate.sample_variance_per_session
+            ),
+            support_width_per_session=support.width,
+            current_total_radius_per_session=current_radius,
+            current_clipped_to_support=False,
+            estimated_pairs_for_unclipped_interval=None,
+            estimated_pairs_for_50pct_support_width=width_targets[0.5],
+            estimated_pairs_for_25pct_support_width=width_targets[0.25],
+            estimated_pairs_for_10pct_support_width=width_targets[0.1],
+            estimated_pairs_for_positive_commit_lower=positive_commit,
+            commit_margin=commit_margin,
+            maximum_planning_pairs=maximum_planning_pairs,
+            caveat=(
+                "Plug-in projection holds the empirical joint-bin "
+                "probabilities, the predeclared support and bins, and the "
+                "complete within-workload repetition block fixed; it counts "
+                "independent workload clusters and is not achieved power or "
+                "coverage."
+            ),
+            sampling_unit=certificate.sampling_unit,
+            raw_pair_count=certificate.raw_pair_count,
+            assumed_positive_discordance_probability=(
+                certificate.positive_discordance_point_estimate
+            ),
+            assumed_negative_discordance_probability=(
+                certificate.negative_discordance_point_estimate
+            ),
+            current_success_difference_width=(
+                certificate.success_difference.width
+                if certificate.success_difference is not None
+                else None
+            ),
+            current_service_cost_difference_width=(
+                certificate.service_cost_difference.width
+                if certificate.service_cost_difference is not None
+                else None
+            ),
+            current_interval_width_per_session=(
+                certificate.gain_per_session.width
+            ),
+            within_cluster_repetition_count=(
+                certificate.within_cluster_repetition_count
+            ),
+            within_cluster_repetition_ids=(
+                certificate.within_cluster_repetition_ids
+            ),
+            repetition_sign_flip=certificate.repetition_sign_flip,
+            joint_state_support_size=(
+                certificate.joint_state_support_size
+            ),
+            joint_state_requested_bin_count=(
+                certificate.joint_state_requested_bin_count
+            ),
+            joint_state_effective_bin_count=(
+                certificate.joint_state_effective_bin_count
+            ),
+            joint_state_cdf_threshold_count=(
+                certificate.joint_state_cdf_threshold_count
+            ),
         )
 
     def _joint_z(self) -> float:
