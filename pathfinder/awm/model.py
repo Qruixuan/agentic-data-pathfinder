@@ -110,12 +110,26 @@ class PairedGainCertificate:
     clipped_to_support: bool
     phi_gain: Interval
     transition_adjusted_gain: Interval
+    certificate_construction: str = "direct-utility-empirical-bernstein"
+    sampling_unit: str = "paired-workload-repetition-seed"
+    raw_pair_count: int | None = None
+    independent_unit_count: int | None = None
+    cluster_key_fields: tuple[str, ...] = ()
+    cluster_reduction: str = "disabled"
+    success_alpha_per_pair: float | None = None
+    cost_alpha_per_pair: float | None = None
+    positive_discordance_count: int | None = None
+    negative_discordance_count: int | None = None
+    positive_discordance_probability: Interval | None = None
+    negative_discordance_probability: Interval | None = None
+    success_difference: Interval | None = None
+    service_cost_difference: Interval | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def to_row(self, *, model_kind: str) -> dict[str, Any]:
-        return {
+        row = {
             "model_kind": model_kind,
             "current_design_id": self.current_design_id,
             "candidate_design_id": self.candidate_design_id,
@@ -169,7 +183,40 @@ class PairedGainCertificate:
             "transition_adjusted_gain_upper": (
                 self.transition_adjusted_gain.upper
             ),
+            "certificate_construction": self.certificate_construction,
+            "sampling_unit": self.sampling_unit,
+            "raw_pair_count": self.raw_pair_count,
+            "independent_unit_count": self.independent_unit_count,
+            "cluster_key_fields": ";".join(self.cluster_key_fields),
+            "cluster_reduction": self.cluster_reduction,
+            "success_alpha_per_pair": self.success_alpha_per_pair,
+            "cost_alpha_per_pair": self.cost_alpha_per_pair,
+            "positive_discordance_count": (
+                self.positive_discordance_count
+            ),
+            "negative_discordance_count": (
+                self.negative_discordance_count
+            ),
         }
+        for prefix, interval in (
+            (
+                "positive_discordance_probability",
+                self.positive_discordance_probability,
+            ),
+            (
+                "negative_discordance_probability",
+                self.negative_discordance_probability,
+            ),
+            ("success_difference", self.success_difference),
+            ("service_cost_difference", self.service_cost_difference),
+        ):
+            row[f"{prefix}_lower"] = (
+                interval.lower if interval is not None else None
+            )
+            row[f"{prefix}_upper"] = (
+                interval.upper if interval is not None else None
+            )
+        return row
 
 
 @dataclass(frozen=True)
@@ -205,6 +252,12 @@ class PairedGainPowerAnalysis:
     commit_margin: float
     maximum_planning_pairs: int
     caveat: str
+    sampling_unit: str = "paired-workload-repetition-seed"
+    raw_pair_count: int | None = None
+    assumed_positive_discordance_probability: float | None = None
+    assumed_negative_discordance_probability: float | None = None
+    current_success_difference_width: float | None = None
+    current_service_cost_difference_width: float | None = None
 
     def to_row(self, *, model_kind: str) -> dict[str, Any]:
         payload = asdict(self)
@@ -237,6 +290,78 @@ def _wilson_interval(successes: int, trials: int, z: float) -> Interval:
         max(0.0, center - radius),
         min(1.0, center + radius),
     )
+
+
+def _bernoulli_kl(probability: float, candidate: float) -> float:
+    """Return binary relative entropy KL(probability || candidate)."""
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("Bernoulli probability must be in [0, 1]")
+    if not 0.0 <= candidate <= 1.0:
+        raise ValueError("Bernoulli candidate must be in [0, 1]")
+    if probability == candidate:
+        return 0.0
+    if candidate == 0.0 or candidate == 1.0:
+        return math.inf
+    result = 0.0
+    if probability > 0.0:
+        result += probability * math.log(probability / candidate)
+    if probability < 1.0:
+        result += (1.0 - probability) * math.log(
+            (1.0 - probability) / (1.0 - candidate)
+        )
+    return result
+
+
+def _bernoulli_kl_mean_interval(
+    probability: float,
+    trials: int,
+    delta: float,
+) -> Interval:
+    """Two-sided Chernoff/KL interval inverted by deterministic bisection."""
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("Bernoulli probability must be in [0, 1]")
+    if trials <= 0:
+        raise ValueError("Bernoulli trial count must be positive")
+    if not 0.0 < delta < 1.0:
+        raise ValueError("Bernoulli interval delta must be in (0, 1)")
+    threshold = math.log(2.0 / delta) / trials
+
+    if probability == 0.0:
+        lower = 0.0
+    else:
+        outside = 0.0
+        inside = probability
+        for _ in range(80):
+            middle = (outside + inside) / 2.0
+            if _bernoulli_kl(probability, middle) > threshold:
+                outside = middle
+            else:
+                inside = middle
+        lower = inside
+
+    if probability == 1.0:
+        upper = 1.0
+    else:
+        inside = probability
+        outside = 1.0
+        for _ in range(80):
+            middle = (inside + outside) / 2.0
+            if _bernoulli_kl(probability, middle) > threshold:
+                outside = middle
+            else:
+                inside = middle
+        upper = inside
+    return Interval(lower, upper)
+
+
+def _bernoulli_kl_interval(
+    successes: int,
+    trials: int,
+    delta: float,
+) -> Interval:
+    if successes < 0 or successes > trials:
+        raise ValueError("Bernoulli successes must be between 0 and trials")
+    return _bernoulli_kl_mean_interval(successes / trials, trials, delta)
 
 
 def _empirical_bernstein_estimate(
@@ -395,7 +520,11 @@ class AdaptiveWorkloadModel:
         config = self.dataset.model_config
         return {
             "family_mode": config.confidence.family_mode,
-            "sampling_unit": "paired-workload-repetition-seed",
+            "sampling_unit": config.confidence.sampling_unit,
+            "cluster_key_fields": list(
+                config.confidence.cluster_key_fields
+            ),
+            "cluster_reduction": config.confidence.cluster_reduction,
             "confidence_level": config.confidence_level,
             "total_alpha": 1.0 - config.confidence_level,
             "marginal_alpha_fraction": (
@@ -423,6 +552,12 @@ class AdaptiveWorkloadModel:
             ),
             "paired_family_size": self._paired_family_size(),
             "paired_alpha_per_pair_look": self._paired_alpha(),
+            "success_alpha_fraction": (
+                config.confidence.success_alpha_fraction
+            ),
+            "cost_alpha_fraction": (
+                config.confidence.cost_alpha_fraction
+            ),
             "paired_support_rule": (
                 "task-value-plus-declared-single-access-cost-support"
             ),
@@ -444,6 +579,11 @@ class AdaptiveWorkloadModel:
     def gain_interval_source(self, current: str, candidate: str) -> str:
         if self.paired_gain_certificate(current, candidate) is None:
             return "marginal-phi-difference"
+        if (
+            self.dataset.model_config.confidence.paired_gain_method
+            == "cluster-first-decomposed-kl-empirical-bernstein"
+        ):
+            return "paired-cluster-decomposed-kl-empirical-bernstein"
         if (
             self.dataset.model_config.confidence.look_semantics
             == "fixed-training-snapshot-per-pair"
@@ -489,9 +629,32 @@ class AdaptiveWorkloadModel:
             value.pairing_key: value
             for value in self.dataset.training[candidate].observations
         }
-        keys = tuple(sorted(
+        raw_keys = tuple(sorted(
             set(current_observations).intersection(candidate_observations)
         ))
+        if config.cluster_key_fields:
+            keys_by_cluster: dict[str, list[str]] = {}
+            for key in raw_keys:
+                current_cluster = current_observations[key].cluster_key
+                candidate_cluster = candidate_observations[key].cluster_key
+                if current_cluster != candidate_cluster:
+                    raise AWMConfigError(
+                        "paired observations disagree on workload cluster"
+                    )
+                keys_by_cluster.setdefault(current_cluster, []).append(key)
+            keys = tuple(
+                min(
+                    cluster_keys,
+                    key=lambda value: (
+                        current_observations[value].repetition,
+                        current_observations[value].seed,
+                        value,
+                    ),
+                )
+                for _, cluster_keys in sorted(keys_by_cluster.items())
+            )
+        else:
+            keys = raw_keys
         if len(keys) < config.paired_gain_minimum_pairs:
             self._paired_gain_cache[cache_key] = None
             return None
@@ -520,6 +683,9 @@ class AdaptiveWorkloadModel:
         snapshot_payload = [
             {
                 "pairing_key": key,
+                "cluster_key": current_observations[key].cluster_key,
+                "repetition": current_observations[key].repetition,
+                "seed": current_observations[key].seed,
                 "current_success": current_observations[key].success,
                 "candidate_success": candidate_observations[key].success,
                 "current_service_cost": (
@@ -536,6 +702,9 @@ class AdaptiveWorkloadModel:
                 {
                     "current_design_id": current,
                     "candidate_design_id": candidate,
+                    "sampling_unit": config.sampling_unit,
+                    "cluster_key_fields": list(config.cluster_key_fields),
+                    "cluster_reduction": config.cluster_reduction,
                     "observations": snapshot_payload,
                 },
                 sort_keys=True,
@@ -548,12 +717,74 @@ class AdaptiveWorkloadModel:
             -task_value - resource_weight * candidate_cost_upper,
             task_value + resource_weight * current_cost_upper,
         )
-        estimate = _empirical_bernstein_estimate(
+        diagnostic_estimate = _empirical_bernstein_estimate(
             values,
             support=support,
             delta=self._paired_alpha(),
         )
-        per_session = estimate.interval
+        per_session = diagnostic_estimate.interval
+        certificate_construction = "direct-utility-empirical-bernstein"
+        success_alpha: float | None = None
+        cost_alpha: float | None = None
+        positive_count: int | None = None
+        negative_count: int | None = None
+        positive_probability: Interval | None = None
+        negative_probability: Interval | None = None
+        success_interval: Interval | None = None
+        cost_interval: Interval | None = None
+        unclipped_per_session = diagnostic_estimate.unclipped_interval
+        clipped_to_support = diagnostic_estimate.clipped_to_support
+        if (
+            config.paired_gain_method
+            == "cluster-first-decomposed-kl-empirical-bernstein"
+        ):
+            success_alpha = (
+                self._paired_alpha() * config.success_alpha_fraction
+            )
+            cost_alpha = self._paired_alpha() * config.cost_alpha_fraction
+            positive_count = sum(value == 1 for value in success_differences)
+            negative_count = sum(value == -1 for value in success_differences)
+            positive_probability = _bernoulli_kl_interval(
+                positive_count,
+                len(keys),
+                success_alpha / 2.0,
+            )
+            negative_probability = _bernoulli_kl_interval(
+                negative_count,
+                len(keys),
+                success_alpha / 2.0,
+            )
+            success_interval = Interval(
+                positive_probability.lower
+                - negative_probability.upper,
+                positive_probability.upper
+                - negative_probability.lower,
+            )
+            cost_support = Interval(
+                -current_cost_upper,
+                candidate_cost_upper,
+            )
+            cost_estimate = _empirical_bernstein_estimate(
+                service_cost_differences,
+                support=cost_support,
+                delta=cost_alpha,
+            )
+            cost_interval = cost_estimate.interval
+            unclipped_per_session = Interval(
+                task_value * success_interval.lower
+                - resource_weight * cost_interval.upper,
+                task_value * success_interval.upper
+                - resource_weight * cost_interval.lower,
+            )
+            per_session = Interval(
+                max(support.lower, unclipped_per_session.lower),
+                min(support.upper, unclipped_per_session.upper),
+            )
+            clipped_to_support = per_session != unclipped_per_session
+            certificate_construction = (
+                "paired-discordance-bernoulli-kl-plus-"
+                "service-cost-empirical-bernstein"
+            )
         storage_delta = (
             self.dataset.storage_costs[candidate]
             - self.dataset.storage_costs[current]
@@ -577,12 +808,12 @@ class AdaptiveWorkloadModel:
             family_size=self._paired_family_size(),
             maximum_looks=config.maximum_looks,
             alpha_per_pair_look=self._paired_alpha(),
-            point_estimate_per_session=estimate.sample_mean,
+            point_estimate_per_session=diagnostic_estimate.sample_mean,
             success_difference_point_estimate=mean(success_differences),
             service_cost_difference_point_estimate=mean(
                 service_cost_differences
             ),
-            sample_variance_per_session=estimate.sample_variance,
+            sample_variance_per_session=diagnostic_estimate.sample_variance,
             success_difference_sample_variance=_sample_variance(
                 success_differences
             ),
@@ -593,15 +824,31 @@ class AdaptiveWorkloadModel:
                 success_differences,
                 service_cost_differences,
             ),
-            variance_radius_per_session=estimate.variance_radius,
-            range_radius_per_session=estimate.range_radius,
-            total_radius_per_session=estimate.total_radius,
+            variance_radius_per_session=(
+                diagnostic_estimate.variance_radius
+            ),
+            range_radius_per_session=diagnostic_estimate.range_radius,
+            total_radius_per_session=diagnostic_estimate.total_radius,
             support_per_session=support,
-            unclipped_gain_per_session=estimate.unclipped_interval,
+            unclipped_gain_per_session=unclipped_per_session,
             gain_per_session=per_session,
-            clipped_to_support=estimate.clipped_to_support,
+            clipped_to_support=clipped_to_support,
             phi_gain=phi_gain,
             transition_adjusted_gain=adjusted,
+            certificate_construction=certificate_construction,
+            sampling_unit=config.sampling_unit,
+            raw_pair_count=len(raw_keys),
+            independent_unit_count=len(keys),
+            cluster_key_fields=config.cluster_key_fields,
+            cluster_reduction=config.cluster_reduction,
+            success_alpha_per_pair=success_alpha,
+            cost_alpha_per_pair=cost_alpha,
+            positive_discordance_count=positive_count,
+            negative_discordance_count=negative_count,
+            positive_discordance_probability=positive_probability,
+            negative_discordance_probability=negative_probability,
+            success_difference=success_interval,
+            service_cost_difference=cost_interval,
         )
         self._paired_gain_cache[cache_key] = certificate
         return certificate
@@ -623,6 +870,14 @@ class AdaptiveWorkloadModel:
             raise ValueError(
                 "maximum_planning_pairs cannot be smaller than the current "
                 "pair count"
+            )
+        if (
+            certificate.method
+            == "cluster-first-decomposed-kl-empirical-bernstein"
+        ):
+            return self._cluster_decomposed_power_analysis(
+                certificate,
+                maximum_planning_pairs=maximum_planning_pairs,
             )
 
         support = certificate.support_per_session
@@ -708,6 +963,165 @@ class AdaptiveWorkloadModel:
                 "Plug-in projection holds the observed mean and variance "
                 "fixed, assumes bounded independent paired sampling units, "
                 "and must not be interpreted as achieved power or coverage."
+            ),
+        )
+
+    def _cluster_decomposed_power_analysis(
+        self,
+        certificate: PairedGainCertificate,
+        *,
+        maximum_planning_pairs: int,
+    ) -> PairedGainPowerAnalysis:
+        """Plug-in planning in independent workload-cluster units."""
+        if (
+            certificate.positive_discordance_count is None
+            or certificate.negative_discordance_count is None
+            or certificate.success_alpha_per_pair is None
+            or certificate.cost_alpha_per_pair is None
+            or certificate.success_difference is None
+            or certificate.service_cost_difference is None
+        ):
+            raise RuntimeError("v3 certificate is missing component bounds")
+        count = certificate.pair_count
+        positive_probability = (
+            certificate.positive_discordance_count / count
+        )
+        negative_probability = (
+            certificate.negative_discordance_count / count
+        )
+        success_alpha = certificate.success_alpha_per_pair
+        cost_alpha = certificate.cost_alpha_per_pair
+        task_value = self.dataset.task_class.task_value
+        resource_weight = self.dataset.system.resource_cost_weight
+        current_cost_upper = self._service_cost_support_upper(
+            certificate.current_design_id
+        )
+        candidate_cost_upper = self._service_cost_support_upper(
+            certificate.candidate_design_id
+        )
+        cost_support = Interval(-current_cost_upper, candidate_cost_upper)
+        utility_support = certificate.support_per_session
+        cost_mean = certificate.service_cost_difference_point_estimate
+        cost_variance = (
+            certificate.service_cost_difference_sample_variance
+        )
+
+        def projected_interval(cluster_count: int) -> Interval:
+            positive = _bernoulli_kl_mean_interval(
+                positive_probability,
+                cluster_count,
+                success_alpha / 2.0,
+            )
+            negative = _bernoulli_kl_mean_interval(
+                negative_probability,
+                cluster_count,
+                success_alpha / 2.0,
+            )
+            success = Interval(
+                positive.lower - negative.upper,
+                positive.upper - negative.lower,
+            )
+            cost_radius = _projected_empirical_bernstein_radius(
+                sample_variance=cost_variance,
+                support_width=cost_support.width,
+                delta=cost_alpha,
+                pair_count=cluster_count,
+            )
+            cost = Interval(
+                max(cost_support.lower, cost_mean - cost_radius),
+                min(cost_support.upper, cost_mean + cost_radius),
+            )
+            return Interval(
+                max(
+                    utility_support.lower,
+                    task_value * success.lower
+                    - resource_weight * cost.upper,
+                ),
+                min(
+                    utility_support.upper,
+                    task_value * success.upper
+                    - resource_weight * cost.lower,
+                ),
+            )
+
+        start = certificate.pair_count
+        width_targets = {
+            fraction: _minimum_projected_pairs(
+                lambda cluster_count, fraction=fraction: (
+                    projected_interval(cluster_count).width
+                    <= fraction * utility_support.width
+                ),
+                start=start,
+                maximum=maximum_planning_pairs,
+            )
+            for fraction in (0.5, 0.25, 0.1)
+        }
+        storage_delta = (
+            self.dataset.storage_costs[certificate.candidate_design_id]
+            - self.dataset.storage_costs[certificate.current_design_id]
+        )
+        transition_upper = self._bounds[
+            certificate.candidate_design_id
+        ].transition_cost.upper
+        horizon = self.dataset.horizon_sessions
+        commit_margin = self.dataset.model_config.commit_margin
+        positive_commit = _minimum_projected_pairs(
+            lambda cluster_count: (
+                horizon * projected_interval(cluster_count).lower
+                - storage_delta
+                - transition_upper
+                > commit_margin
+            ),
+            start=start,
+            maximum=maximum_planning_pairs,
+        )
+        return PairedGainPowerAnalysis(
+            current_design_id=certificate.current_design_id,
+            candidate_design_id=certificate.candidate_design_id,
+            method=(
+                "plug-in-cluster-decomposed-kl-empirical-"
+                "bernstein-planning"
+            ),
+            planning_status="posthoc-planning-not-a-confidence-guarantee",
+            current_pair_count=certificate.pair_count,
+            alpha_per_pair_look=certificate.alpha_per_pair_look,
+            assumed_point_estimate_per_session=(
+                certificate.point_estimate_per_session
+            ),
+            assumed_sample_variance_per_session=(
+                certificate.sample_variance_per_session
+            ),
+            support_width_per_session=utility_support.width,
+            current_total_radius_per_session=(
+                certificate.gain_per_session.width / 2.0
+            ),
+            current_clipped_to_support=certificate.clipped_to_support,
+            estimated_pairs_for_unclipped_interval=None,
+            estimated_pairs_for_50pct_support_width=width_targets[0.5],
+            estimated_pairs_for_25pct_support_width=width_targets[0.25],
+            estimated_pairs_for_10pct_support_width=width_targets[0.1],
+            estimated_pairs_for_positive_commit_lower=positive_commit,
+            commit_margin=commit_margin,
+            maximum_planning_pairs=maximum_planning_pairs,
+            caveat=(
+                "Plug-in projection holds discordance probabilities and "
+                "cost moments fixed, counts independent workload clusters, "
+                "assumes a common target distribution, and is not achieved "
+                "power or coverage."
+            ),
+            sampling_unit=certificate.sampling_unit,
+            raw_pair_count=certificate.raw_pair_count,
+            assumed_positive_discordance_probability=(
+                positive_probability
+            ),
+            assumed_negative_discordance_probability=(
+                negative_probability
+            ),
+            current_success_difference_width=(
+                certificate.success_difference.width
+            ),
+            current_service_cost_difference_width=(
+                certificate.service_cost_difference.width
             ),
         )
 

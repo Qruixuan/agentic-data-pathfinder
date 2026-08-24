@@ -13,6 +13,7 @@ from ..reduced_oracle.contracts import (
 from .contracts import (
     AWM_CONFIG_SCHEMA_VERSION_V2,
     AWM_CONFIG_SCHEMA_VERSION_V2_1,
+    AWM_CONFIG_SCHEMA_VERSION_V3,
     AWMConfig,
     load_awm_config,
 )
@@ -23,6 +24,7 @@ from .model import AWM_MODEL_KINDS, AdaptiveWorkloadModel
 AWM_EVALUATION_SCHEMA_VERSION = "pathfinder.awm-evaluation/v1alpha1"
 AWM_EVALUATION_SCHEMA_VERSION_V2 = "pathfinder.awm-evaluation/v2alpha1"
 AWM_EVALUATION_SCHEMA_VERSION_V2_1 = "pathfinder.awm-evaluation/v2alpha2"
+AWM_EVALUATION_SCHEMA_VERSION_V3 = "pathfinder.awm-evaluation/v3alpha1"
 
 
 def holdout_truth(
@@ -292,6 +294,7 @@ def evaluate_awm(
         AWM_CONFIG_SCHEMA_VERSION_V2_1: (
             AWM_EVALUATION_SCHEMA_VERSION_V2_1
         ),
+        AWM_CONFIG_SCHEMA_VERSION_V3: AWM_EVALUATION_SCHEMA_VERSION_V3,
     }.get(resolved_model.schema_version, AWM_EVALUATION_SCHEMA_VERSION)
     evaluation = {
         "schema_version": evaluation_schema,

@@ -44,12 +44,18 @@ class CandidateScore:
     gain_interval_source: str
     commit_gain_width: float
     paired_gain_pair_count: int | None
+    paired_gain_raw_pair_count: int | None
+    paired_gain_independent_unit_count: int | None
+    paired_gain_sampling_unit: str | None
+    paired_gain_certificate_construction: str | None
     paired_gain_training_snapshot_sha256: str | None
     paired_gain_alpha_per_pair_look: float | None
     paired_gain_point_estimate_per_session: float | None
     paired_gain_variance_radius_per_session: float | None
     paired_gain_range_radius_per_session: float | None
     paired_gain_clipped_to_support: bool | None
+    paired_gain_success_difference: Interval | None
+    paired_gain_service_cost_difference: Interval | None
     pessimistic_commit_gain: float
     optimistic_reveal_gain: float
     candidate_width: float
@@ -239,6 +245,26 @@ class OEDController:
                 if paired_certificate is not None
                 else None
             ),
+            paired_gain_raw_pair_count=(
+                paired_certificate.raw_pair_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_independent_unit_count=(
+                paired_certificate.independent_unit_count
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_sampling_unit=(
+                paired_certificate.sampling_unit
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_certificate_construction=(
+                paired_certificate.certificate_construction
+                if paired_certificate is not None
+                else None
+            ),
             paired_gain_training_snapshot_sha256=(
                 paired_certificate.training_snapshot_sha256
                 if paired_certificate is not None
@@ -266,6 +292,16 @@ class OEDController:
             ),
             paired_gain_clipped_to_support=(
                 paired_certificate.clipped_to_support
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_success_difference=(
+                paired_certificate.success_difference
+                if paired_certificate is not None
+                else None
+            ),
+            paired_gain_service_cost_difference=(
+                paired_certificate.service_cost_difference
                 if paired_certificate is not None
                 else None
             ),

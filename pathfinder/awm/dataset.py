@@ -19,7 +19,9 @@ from .contracts import AWMConfig, AWMConfigError
 @dataclass(frozen=True)
 class TrialObservation:
     pairing_key: str
+    cluster_key: str
     repetition: int
+    seed: int
     success: int
     service_cost: float
 
@@ -135,6 +137,21 @@ def _pairing_key(record: dict[str, Any]) -> str:
     )
 
 
+def _cluster_key(
+    record: dict[str, Any],
+    fields: tuple[str, ...],
+) -> str:
+    values: list[str] = []
+    for field in fields:
+        value = record.get(field)
+        if not isinstance(value, str) or not value:
+            raise AWMConfigError(
+                f"clustered AWM record is missing a non-empty {field}"
+            )
+        values.append(value)
+    return "|".join(values)
+
+
 def _sample(
     design_id: str,
     records: Iterable[dict[str, Any]],
@@ -142,6 +159,7 @@ def _sample(
     representation_ids: tuple[str, ...],
     groups: tuple[tuple[str, ...], ...],
     require_pairing: bool,
+    cluster_key_fields: tuple[str, ...],
 ) -> DesignSample:
     rows = list(records)
     eligible = [record for record in rows if _eligible_record(record)]
@@ -182,7 +200,13 @@ def _sample(
             observations.append(
                 TrialObservation(
                     pairing_key=key,
+                    cluster_key=(
+                        _cluster_key(record, cluster_key_fields)
+                        if cluster_key_fields
+                        else key
+                    ),
                     repetition=int(record["repetition"]),
+                    seed=int(record["seed"]),
                     success=int(bool(record["task_success"])),
                     service_cost=service_cost,
                 )
@@ -245,10 +269,37 @@ def _validate_pairs(
                 f"left_only={len(left_keys - right_keys)}, "
                 f"right_only={len(right_keys - left_keys)}"
             )
-        if len(common) < minimum_pairs:
+        if model_config.confidence.cluster_key_fields:
+            left_by_key = {
+                observation.pairing_key: observation
+                for observation in samples[left_id].observations
+            }
+            right_by_key = {
+                observation.pairing_key: observation
+                for observation in samples[right_id].observations
+            }
+            mismatched_clusters = [
+                key
+                for key in common
+                if left_by_key[key].cluster_key
+                != right_by_key[key].cluster_key
+            ]
+            if mismatched_clusters:
+                raise AWMConfigError(
+                    "paired AWM records disagree on cluster identity for "
+                    f"{left_id} and {right_id}"
+                )
+            effective_count = len({
+                left_by_key[key].cluster_key for key in common
+            })
+            unit_name = "independent workload clusters"
+        else:
+            effective_count = len(common)
+            unit_name = f"paired {partition_name} sessions"
+        if effective_count < minimum_pairs:
             raise AWMConfigError(
-                f"{left_id} and {right_id} have only {len(common)} "
-                f"eligible paired {partition_name} sessions"
+                f"{left_id} and {right_id} have only {effective_count} "
+                f"eligible {unit_name}"
             )
 
 
@@ -385,6 +436,7 @@ def load_oracle_dataset(
             representation_ids=representation_ids,
             groups=model_config.substitution_groups,
             require_pairing=model_config.confidence.paired_gain_enabled,
+            cluster_key_fields=model_config.confidence.cluster_key_fields,
         )
         holdout[design_id] = _sample(
             design_id,
@@ -392,6 +444,7 @@ def load_oracle_dataset(
             representation_ids=representation_ids,
             groups=model_config.substitution_groups,
             require_pairing=model_config.confidence.paired_gain_enabled,
+            cluster_key_fields=model_config.confidence.cluster_key_fields,
         )
         for repetition in holdout_by_repetition:
             holdout_by_repetition[repetition][design_id] = _sample(
@@ -404,6 +457,9 @@ def load_oracle_dataset(
                 representation_ids=representation_ids,
                 groups=model_config.substitution_groups,
                 require_pairing=model_config.confidence.paired_gain_enabled,
+                cluster_key_fields=(
+                    model_config.confidence.cluster_key_fields
+                ),
             )
         if (
             design_id in model_config.observed_design_ids

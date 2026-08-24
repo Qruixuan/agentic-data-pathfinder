@@ -12,10 +12,12 @@ from typing import Any, Mapping
 AWM_CONFIG_SCHEMA_VERSION = "pathfinder.awm/v1alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V2 = "pathfinder.awm/v2alpha1"
 AWM_CONFIG_SCHEMA_VERSION_V2_1 = "pathfinder.awm/v2alpha2"
+AWM_CONFIG_SCHEMA_VERSION_V3 = "pathfinder.awm/v3alpha1"
 AWM_CONFIG_SCHEMA_VERSIONS = (
     AWM_CONFIG_SCHEMA_VERSION,
     AWM_CONFIG_SCHEMA_VERSION_V2,
     AWM_CONFIG_SCHEMA_VERSION_V2_1,
+    AWM_CONFIG_SCHEMA_VERSION_V3,
 )
 CONFIDENCE_FAMILY_MODES = (
     "dynamic-observed-v1",
@@ -25,6 +27,7 @@ PAIRED_GAIN_METHODS = (
     "disabled",
     "fixed-looks-empirical-bernstein",
     "fixed-snapshot-empirical-bernstein",
+    "cluster-first-decomposed-kl-empirical-bernstein",
 )
 PAIRED_LOOK_SEMANTICS = (
     "controller-iteration-upper-bound",
@@ -59,6 +62,11 @@ class ConfidenceConfig:
     require_complete_pairs: bool
     paired_comparisons: tuple[tuple[str, str], ...]
     look_semantics: str
+    sampling_unit: str = "paired-workload-repetition-seed"
+    cluster_key_fields: tuple[str, ...] = ()
+    cluster_reduction: str = "disabled"
+    success_alpha_fraction: float = 0.0
+    cost_alpha_fraction: float = 0.0
 
     @property
     def paired_gain_enabled(self) -> bool:
@@ -160,7 +168,7 @@ def _load_confidence_config(
     if schema_version == AWM_CONFIG_SCHEMA_VERSION:
         if "confidence" in root:
             raise AWMConfigError(
-                "confidence is available only in AWM v2 schemas"
+                "confidence is available only in AWM v2/v3 schemas"
             )
         return ConfidenceConfig(
             family_mode="dynamic-observed-v1",
@@ -181,17 +189,23 @@ def _load_confidence_config(
     )
     if family_mode != "fixed-full-domain":
         raise AWMConfigError(
-            "v2 confidence.family_mode must be fixed-full-domain"
+            "v2/v3 confidence.family_mode must be fixed-full-domain"
         )
     method = _string(
         raw.get("paired_gain_method"),
         "confidence.paired_gain_method",
     )
-    expected_method = (
-        "fixed-snapshot-empirical-bernstein"
-        if schema_version == AWM_CONFIG_SCHEMA_VERSION_V2_1
-        else "fixed-looks-empirical-bernstein"
-    )
+    expected_method = {
+        AWM_CONFIG_SCHEMA_VERSION_V2: (
+            "fixed-looks-empirical-bernstein"
+        ),
+        AWM_CONFIG_SCHEMA_VERSION_V2_1: (
+            "fixed-snapshot-empirical-bernstein"
+        ),
+        AWM_CONFIG_SCHEMA_VERSION_V3: (
+            "cluster-first-decomposed-kl-empirical-bernstein"
+        ),
+    }[schema_version]
     if method not in PAIRED_GAIN_METHODS or method != expected_method:
         raise AWMConfigError(
             "confidence.paired_gain_method must be " + expected_method
@@ -206,7 +220,7 @@ def _load_confidence_config(
     )
     if marginal_fraction <= 0.0 or paired_fraction <= 0.0:
         raise AWMConfigError(
-            "v2 confidence alpha fractions must both be positive"
+            "v2/v3 confidence alpha fractions must both be positive"
         )
     if not math.isclose(
         marginal_fraction + paired_fraction,
@@ -223,7 +237,10 @@ def _load_confidence_config(
     )
     paired_comparisons: tuple[tuple[str, str], ...] = ()
     look_semantics = "controller-iteration-upper-bound"
-    if schema_version == AWM_CONFIG_SCHEMA_VERSION_V2_1:
+    if schema_version in (
+        AWM_CONFIG_SCHEMA_VERSION_V2_1,
+        AWM_CONFIG_SCHEMA_VERSION_V3,
+    ):
         raw_comparisons = _list(
             raw.get("paired_comparisons"),
             "confidence.paired_comparisons",
@@ -263,7 +280,7 @@ def _load_confidence_config(
             comparisons.append(comparison)
         if not comparisons:
             raise AWMConfigError(
-                "v2alpha2 confidence.paired_comparisons cannot be empty"
+                "fixed-snapshot confidence.paired_comparisons cannot be empty"
             )
         paired_comparisons = tuple(comparisons)
         look_semantics = _string(
@@ -272,12 +289,70 @@ def _load_confidence_config(
         )
         if look_semantics != "fixed-training-snapshot-per-pair":
             raise AWMConfigError(
-                "v2alpha2 confidence.look_semantics must be "
+                "fixed-snapshot confidence.look_semantics must be "
                 "fixed-training-snapshot-per-pair"
             )
         if maximum_looks != 1:
             raise AWMConfigError(
                 "fixed-training-snapshot-per-pair requires maximum_looks=1"
+            )
+
+    sampling_unit = "paired-workload-repetition-seed"
+    cluster_key_fields: tuple[str, ...] = ()
+    cluster_reduction = "disabled"
+    success_alpha_fraction = 0.0
+    cost_alpha_fraction = 0.0
+    if schema_version == AWM_CONFIG_SCHEMA_VERSION_V3:
+        sampling_unit = _string(
+            raw.get("sampling_unit"),
+            "confidence.sampling_unit",
+        )
+        if sampling_unit != "workload-cluster-first-paired-observation":
+            raise AWMConfigError(
+                "v3 confidence.sampling_unit must be "
+                "workload-cluster-first-paired-observation"
+            )
+        cluster_key_fields = tuple(
+            _string(value, "confidence.cluster_key_fields")
+            for value in _list(
+                raw.get("cluster_key_fields"),
+                "confidence.cluster_key_fields",
+            )
+        )
+        if cluster_key_fields != ("workload_id",):
+            raise AWMConfigError(
+                "v3 confidence.cluster_key_fields must be exactly "
+                "['workload_id']"
+            )
+        cluster_reduction = _string(
+            raw.get("cluster_reduction"),
+            "confidence.cluster_reduction",
+        )
+        if cluster_reduction != "lowest-repetition-then-seed":
+            raise AWMConfigError(
+                "v3 confidence.cluster_reduction must be "
+                "lowest-repetition-then-seed"
+            )
+        success_alpha_fraction = _fraction(
+            raw.get("success_alpha_fraction"),
+            "confidence.success_alpha_fraction",
+        )
+        cost_alpha_fraction = _fraction(
+            raw.get("cost_alpha_fraction"),
+            "confidence.cost_alpha_fraction",
+        )
+        if success_alpha_fraction <= 0.0 or cost_alpha_fraction <= 0.0:
+            raise AWMConfigError(
+                "v3 component alpha fractions must both be positive"
+            )
+        if not math.isclose(
+            success_alpha_fraction + cost_alpha_fraction,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise AWMConfigError(
+                "v3 success and cost alpha fractions must sum to 1"
             )
 
     return ConfidenceConfig(
@@ -296,6 +371,11 @@ def _load_confidence_config(
         ),
         paired_comparisons=paired_comparisons,
         look_semantics=look_semantics,
+        sampling_unit=sampling_unit,
+        cluster_key_fields=cluster_key_fields,
+        cluster_reduction=cluster_reduction,
+        success_alpha_fraction=success_alpha_fraction,
+        cost_alpha_fraction=cost_alpha_fraction,
     )
 
 

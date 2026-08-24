@@ -161,6 +161,54 @@ References:
   confidence sequences,” *Annals of Statistics*, 2021:
   <https://doi.org/10.1214/20-AOS1991>
 
+### AWM v3alpha1 cluster-first decomposed diagnostic
+
+`pathfinder.awm/v3alpha1` is a separate post-hoc diagnostic motivated by the
+v2alpha2 finding that its finite-support range term dominated the certificate.
+It does not rewrite any v1 or v2 result. Its primary sampling unit is one
+independent workload cluster, not every repeated Agent run. The current
+contract requires `cluster_key_fields=["workload_id"]` and deterministically
+uses the lowest-repetition, then lowest-seed paired observation in each
+cluster. A certificate records both the raw pair count and the smaller
+independent-unit count. Repetitions discarded by this rule remain useful for
+robustness analysis but do not inflate the primary certificate's sample size.
+
+The v3 per-session gain certificate is component-decomposed:
+
+1. paired binary success is represented by the two discordance rates
+   `P(candidate succeeds, incumbent fails)` and
+   `P(candidate fails, incumbent succeeds)`;
+2. each discordance rate receives a conservative two-sided Bernoulli-KL
+   interval, and their difference bounds the success-rate difference;
+3. paired service-cost differences receive a bounded empirical Bernstein
+   interval; and
+4. the success and cost intervals are combined through the declared utility
+   function before horizon, storage, and transition adjustments.
+
+The paired alpha assigned to each directed comparison is split explicitly
+between success and cost. The committed diagnostic uses 80% for success and
+20% for cost. This split was selected during post-hoc method development and
+is not confirmatory. The certificate assumes independent workload clusters
+drawn from a common target distribution. It is fail-closed about missing or
+misaligned pairs, but it is not a cluster bootstrap, an anytime-valid
+sequence, or evidence that the workload clusters are representative.
+
+Power planning is also expressed in independent workload clusters. It holds
+the observed discordance probabilities and cost moments fixed while projecting
+component interval widths and the Commit lower bound. Those projections are
+planning diagnostics only.
+
+Additional references for this construction:
+
+- Aurélien Garivier and Olivier Cappé, “The KL-UCB Algorithm for Bounded
+  Stochastic Bandits and Beyond,” COLT 2011:
+  <https://proceedings.mlr.press/v19/garivier11a.html>
+- Robert G. Newcombe, “Improved confidence intervals for the difference
+  between binomial proportions based on paired data,” *Statistics in
+  Medicine*, 1998 (paired-binary score intervals provide context, but are not
+  the fail-closed v3 certificate):
+  <https://pubmed.ncbi.nlm.nih.gov/9839354/>
+
 The committed [`awm_reduced_mvp.json`](../../configs/awm_reduced_mvp.json)
 keeps every empirical assumption disabled. This is intentional: coupled AWM
 should initially match the independent model. After Phase B is reviewed, copy
@@ -277,6 +325,26 @@ PYTHONPATH=. python -m pathfinder evaluate-awm \
 Both passes are post-hoc method development on an already inspected Oracle.
 Only a newly frozen configuration run on independent objects or seeds can be
 used as confirmatory evidence.
+
+Run v3 in the same two isolated offline passes:
+
+```bash
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3_power_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_POWER_OUT"
+
+PYTHONPATH=. python -m pathfinder evaluate-awm \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_AWM_V3_OUT"
+```
+
+For the frozen four-design run, 16 raw training pairs reduce to eight
+independent workload units under this contract. A new output directory is
+mandatory; do not point these commands at a v1 or v2 result directory.
 
 ## Current Boundary
 

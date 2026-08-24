@@ -217,6 +217,64 @@ class OEDControllerTest(unittest.TestCase):
 
 
 class OEDReplayTest(unittest.TestCase):
+    def test_v3_replay_exposes_cluster_component_certificate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            oracle_path = _oracle_config(root)
+            awm_path = _awm_config(
+                root,
+                confidence_level=0.5,
+                quoted_price_sufficiency=False,
+                schema_version="pathfinder.awm/v3alpha1",
+            )
+            output = root / "oed-v3-output"
+            run_oed_replay(
+                _oed_config(root),
+                awm_path,
+                oracle_path,
+                oracle_output_dir=_synthetic_oracle_output(root),
+                output_dir=output,
+            )
+            traces = [
+                json.loads(line)
+                for line in (output / "oed_trace.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            full = [
+                row for row in traces
+                if row["policy_kind"] == "full_oed"
+            ]
+            self.assertGreaterEqual(len(full), 2)
+            candidate = next(
+                score
+                for score in full[1]["candidate_scores"]
+                if score["design_id"] == "D_local_digest"
+            )
+            self.assertEqual(
+                "paired-cluster-decomposed-kl-empirical-bernstein",
+                candidate["gain_interval_source"],
+            )
+            self.assertEqual(16, candidate["paired_gain_raw_pair_count"])
+            self.assertEqual(
+                8,
+                candidate["paired_gain_independent_unit_count"],
+            )
+            self.assertIsNotNone(
+                candidate["paired_gain_success_difference"]
+            )
+            evaluation = json.loads(
+                (output / "oed_evaluation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "pathfinder.oed-replay/v3alpha1",
+                evaluation["schema_version"],
+            )
+            self.assertEqual(
+                "workload-cluster-first-paired-observation",
+                evaluation["awm_confidence_contract"]["sampling_unit"],
+            )
+
     def test_v2alpha2_reuses_one_frozen_snapshot_look(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

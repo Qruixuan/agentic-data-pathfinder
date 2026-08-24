@@ -61,6 +61,15 @@ analysis. The trace records the paired point estimate, variance-radius term,
 range-radius term, and support-clipping flag so a
 `certificate_limited_stop` can be attributed to its uncertainty source.
 
+With `pathfinder.awm/v3alpha1`, OED uses the fixed-snapshot rule but changes
+the evidence unit and certificate. One deterministic paired observation per
+workload cluster enters the decision; repeated runs of the same workload do
+not increase the primary sample count. The trace reports raw pair count,
+independent workload count, sampling rule, success-difference interval, and
+cost-difference interval. Its `gain_interval_source` is
+`paired-cluster-decomposed-kl-empirical-bernstein`. OED never substitutes the
+more aggressive direct-utility diagnostic radius for this primary interval.
+
 The committed
 [`oed_reduced_mvp.json`](../../configs/oed_reduced_mvp.json) declares the
 finite Reveal set, tier, budget, cap, and probe-window loss. Its cost status is
@@ -192,6 +201,21 @@ PYTHONPATH=. python -m pathfinder run-oed-replay \
   --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
   --output-dir "$PF_MULTI_OED_V2_ALPHA2_OUT"
 ```
+
+The v3 replay is another isolated post-hoc analysis of the same frozen Oracle:
+
+```bash
+PYTHONPATH=. python -m pathfinder run-oed-replay \
+  --oed-config configs/multi_candidate_formal_v1_oed_v3_diagnostic.json \
+  --awm-config configs/multi_candidate_formal_v1_awm_v3_oed_diagnostic.json \
+  --oracle-config configs/multi_candidate_formal_v1_oracle.json \
+  --oracle-output-dir "$PF_MULTI_ORACLE_OUT" \
+  --output-dir "$PF_MULTI_OED_V3_OUT"
+```
+
+This command is read-only with respect to FlowMesh and physical data. Its
+actions are controller replays, not live transitions, and its output remains
+post-hoc until the v3 contract is frozen on independent workload objects.
 
 ## Current Boundary
 

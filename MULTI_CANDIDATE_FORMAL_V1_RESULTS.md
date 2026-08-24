@@ -243,6 +243,24 @@ power config and origin-only OED config are deliberately separate. Their
 outputs must not replace the frozen v1 result, and any selected sample size or
 decision rule must be preregistered and tested on independent data.
 
+The v2alpha2 diagnostic has now been run. It preserved the same
+Reveal-all-then-Stop behavior. At 16 raw training pairs the three direct
+paired-utility radii remained approximately 21.4--22.3 units per session, and
+the bounded-range term contributed roughly 87--90% of each radius. The
+plug-in calculation estimated about 31 pairs merely to avoid support clipping;
+much larger counts were projected for narrow intervals or a positive Commit
+lower bound. This identifies the broad direct-utility support and the treatment
+of repeated runs as independent units as the next statistical bottlenecks.
+
+The repository therefore also contains `pathfinder.awm/v3alpha1` as a new,
+isolated post-hoc diagnostic. It reduces the frozen 16 training pairs to eight
+independent workload clusters, takes one deterministic paired observation per
+cluster, constructs success uncertainty from paired discordance Bernoulli-KL
+intervals, and constructs service-cost uncertainty separately with empirical
+Bernstein. OED is required to use the combined component certificate. v3 has
+not yet been run on the frozen Oracle in this results record, so no statement
+about width, Commit, or policy outcome is made here.
+
 ## Supported Claims
 
 The current evidence supports the following controlled-testbed claims:
@@ -275,12 +293,12 @@ The current evidence does not support the following claims:
 The frozen v1 results should not be overwritten or retuned into confirmatory
 evidence. The next phase is:
 
-1. replay the implemented AWM v2 method on this frozen Oracle as explicitly
-   method development;
-2. inspect paired interval width, held-out containment, and OED actions without
-   changing the frozen configuration;
-3. preregister an independent v2 experiment with new seeds and preferably new
-   NExT-QA objects; and
+1. replay the implemented AWM v3 method on this frozen Oracle as explicitly
+   post-hoc method development;
+2. inspect component interval width, held-out containment, cluster counts, and
+   OED actions without changing the frozen configuration;
+3. freeze the selected method and sample size, then run it on independent
+   NExT-QA objects rather than adding more within-object repetitions; and
 4. move to a multi-node storage and network testbed only after the safe
    AWM/OED loop becomes informative enough to Commit.
 

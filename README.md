@@ -36,6 +36,10 @@ The initial frozen results and their claim boundaries are summarized in
 AWM v2 is now available as an opt-in post-hoc diagnostic with a fixed
 full-domain confidence family and fixed-look paired gain certificates; it does
 not alter the frozen v1 evidence.
+AWM v3 adds a separate cluster-first diagnostic: one paired observation per
+workload object, Bernoulli-KL bounds for paired success discordance, and an
+independent empirical-Bernstein cost component. It is post-hoc method
+development and must not be presented as a confirmatory rerun.
 
 ## Current Scope
 
