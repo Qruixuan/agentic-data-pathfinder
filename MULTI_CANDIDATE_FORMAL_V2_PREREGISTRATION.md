@@ -80,6 +80,11 @@ rewrite a representation after observing an Agent answer.
 for this expansion. The selection-aware path changes only the ordered video
 IDs. Tests pin the original frame and digest prompt hashes, and the default v1
 eight-video behavior remains available when no selection config is supplied.
+Each successful inference response that violates the requested JSON protocol
+receives at most three deterministic format-repair attempts. The first prompt,
+seed, sampling parameters, and semantic validation remain unchanged; attempt
+counts are recorded in the generation manifest and malformed responses are not
+persisted.
 
 Do not run the Oracle until all thirty-two representation files exist, are
 non-empty, and have been hashed. Never commit raw videos, credentials,

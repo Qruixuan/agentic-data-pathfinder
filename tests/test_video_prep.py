@@ -16,6 +16,7 @@ from pathfinder.video_prep import (
     _normalize_base_url,
     _normalize_video_ids,
     _sha256_bytes,
+    _validated_json_chat,
     _validate_digest,
     _validate_frame_descriptions,
     load_selection_video_ids,
@@ -25,7 +26,87 @@ from pathfinder.video_prep import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class _ScriptedVisionClient:
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def chat(
+        self,
+        *,
+        messages: list[dict[str, object]],
+        seed: int,
+    ) -> str:
+        self.calls.append({"messages": messages, "seed": seed})
+        return self.responses.pop(0)
+
+
 class VideoPreparationParsingTest(unittest.TestCase):
+    def test_protocol_retry_repairs_invalid_json_without_changing_seed(self) -> None:
+        client = _ScriptedVisionClient(
+            [
+                '{"frames": [}',
+                '{"frames": []}',
+            ]
+        )
+        original_messages = [{"role": "user", "content": "original"}]
+
+        result, attempts = _validated_json_chat(
+            client=client,  # type: ignore[arg-type]
+            messages=original_messages,
+            seed=7301,
+            response_name="test",
+            validator=lambda payload: list(payload["frames"]),
+            maximum_attempts=3,
+        )
+
+        self.assertEqual([], result)
+        self.assertEqual(2, attempts)
+        self.assertEqual([7301, 7301], [call["seed"] for call in client.calls])
+        self.assertEqual(original_messages, client.calls[0]["messages"])
+        repair_messages = client.calls[1]["messages"]
+        self.assertEqual("assistant", repair_messages[-2]["role"])
+        self.assertEqual("user", repair_messages[-1]["role"])
+        self.assertIn("valid JSON", repair_messages[-1]["content"])
+
+    def test_protocol_retry_fails_closed_after_bound(self) -> None:
+        client = _ScriptedVisionClient(["bad", "still bad", "also bad"])
+
+        with self.assertRaisesRegex(
+            PreparationProtocolError,
+            "remained invalid after 3 protocol attempt",
+        ):
+            _validated_json_chat(
+                client=client,  # type: ignore[arg-type]
+                messages=[{"role": "user", "content": "original"}],
+                seed=42,
+                response_name="digest",
+                validator=lambda payload: payload,
+                maximum_attempts=3,
+            )
+
+        self.assertEqual(3, len(client.calls))
+
+    def test_protocol_retry_rejects_an_invalid_bound_before_calling(self) -> None:
+        client = _ScriptedVisionClient([])
+
+        for value in (0, -1, True):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    VideoPreparationError,
+                    "positive integer",
+                ):
+                    _validated_json_chat(
+                        client=client,  # type: ignore[arg-type]
+                        messages=[],
+                        seed=1,
+                        response_name="test",
+                        validator=lambda payload: payload,
+                        maximum_attempts=value,
+                    )
+
+        self.assertEqual([], client.calls)
+
     def test_original_prompts_and_default_video_domain_remain_frozen(self) -> None:
         self.assertEqual(
             "f74783538a63279e3643e0960b916f7949e9090f8540e02c5103155c5b4982de",

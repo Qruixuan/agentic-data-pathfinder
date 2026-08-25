@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from importlib import metadata
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -34,6 +34,14 @@ FORMAL_VIDEO_IDS = (
 )
 DEFAULT_FRAME_COUNT = 16
 DEFAULT_JPEG_MAX_DIMENSION = 768
+DEFAULT_PROTOCOL_MAX_ATTEMPTS = 3
+
+_PROTOCOL_REPAIR_PROMPT = """Your previous response did not satisfy the required
+JSON schema. Return the complete response again as exactly one valid JSON
+object. Preserve the requested facts, entry count, ordering, and field names.
+Do not use Markdown fences and do not add explanatory text."""
+
+ValidatedJson = TypeVar("ValidatedJson")
 
 FRAME_PROMPT = """You are preparing a question-independent video data representation.
 You receive chronologically ordered frames sampled from one video. Describe only
@@ -271,6 +279,56 @@ class OpenAICompatibleVisionClient:
             "LLM request failed after "
             f"{self.max_attempts} attempt(s): {detail}"
         ) from last_error
+
+
+def _validated_json_chat(
+    *,
+    client: OpenAICompatibleVisionClient,
+    messages: list[dict[str, Any]],
+    seed: int,
+    response_name: str,
+    validator: Callable[[Mapping[str, Any]], ValidatedJson],
+    maximum_attempts: int = DEFAULT_PROTOCOL_MAX_ATTEMPTS,
+) -> tuple[ValidatedJson, int]:
+    """Run a bounded JSON exchange without changing the initial request.
+
+    Transport retries remain the client's responsibility. Later attempts here
+    occur only after a successful response violates the requested JSON
+    protocol. The invalid response is returned to the model for repair but is
+    neither logged nor persisted by this module.
+    """
+
+    if (
+        isinstance(maximum_attempts, bool)
+        or not isinstance(maximum_attempts, int)
+        or maximum_attempts <= 0
+    ):
+        raise VideoPreparationError(
+            "protocol maximum attempts must be a positive integer"
+        )
+
+    original_messages = list(messages)
+    current_messages = original_messages
+    last_error: PreparationProtocolError | None = None
+    for attempt in range(1, maximum_attempts + 1):
+        response = client.chat(messages=current_messages, seed=seed)
+        try:
+            payload = _extract_json_document(response, response_name)
+            return validator(payload), attempt
+        except PreparationProtocolError as exc:
+            last_error = exc
+            if attempt < maximum_attempts:
+                current_messages = [
+                    *original_messages,
+                    {"role": "assistant", "content": response},
+                    {"role": "user", "content": _PROTOCOL_REPAIR_PROMPT},
+                ]
+
+    assert last_error is not None
+    raise PreparationProtocolError(
+        f"{response_name} response remained invalid after "
+        f"{maximum_attempts} protocol attempt(s): {last_error}"
+    ) from last_error
 
 
 def _load_video_dependencies() -> Any:
@@ -577,6 +635,7 @@ def prepare_representations(
     jpeg_max_dimension: int = DEFAULT_JPEG_MAX_DIMENSION,
     base_seed: int = 7301,
     video_ids: Sequence[str] = FORMAL_VIDEO_IDS,
+    protocol_max_attempts: int = DEFAULT_PROTOCOL_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
     ordered_video_ids = _normalize_video_ids(video_ids)
     paths = {path.stem: path for path in video_directory.glob("*.mp4")}
@@ -610,13 +669,16 @@ def prepare_representations(
                 frame_count=frame_count,
                 jpeg_max_dimension=jpeg_max_dimension,
             )
-            frame_response = client.chat(
+            descriptions, frame_protocol_attempts = _validated_json_chat(
+                client=client,
                 messages=_frame_messages(images),
                 seed=base_seed + position * 2,
-            )
-            descriptions = _validate_frame_descriptions(
-                _extract_json_document(frame_response, "frame-description"),
-                images,
+                response_name="frame-description",
+                validator=lambda payload: _validate_frame_descriptions(
+                    payload,
+                    images,
+                ),
+                maximum_attempts=protocol_max_attempts,
             )
             frame_payload = {
                 "schema_version": FRAME_SCHEMA_VERSION,
@@ -647,7 +709,8 @@ def prepare_representations(
                 separators=(",", ":"),
                 ensure_ascii=False,
             )
-            digest_response = client.chat(
+            digest, digest_protocol_attempts = _validated_json_chat(
+                client=client,
                 messages=[
                     {
                         "role": "user",
@@ -655,10 +718,12 @@ def prepare_representations(
                     }
                 ],
                 seed=base_seed + position * 2 + 1,
-            )
-            digest = _validate_digest(
-                _extract_json_document(digest_response, "digest"),
-                duration_seconds=duration,
+                response_name="digest",
+                validator=lambda payload: _validate_digest(
+                    payload,
+                    duration_seconds=duration,
+                ),
+                maximum_attempts=protocol_max_attempts,
             )
 
             object_directory = staging / object_id
@@ -676,6 +741,10 @@ def prepare_representations(
                         "filename": source.name,
                         "size_bytes": source.stat().st_size,
                         "sha256": _sha256_file(source),
+                    },
+                    "protocol_attempts": {
+                        "frame_descriptions": frame_protocol_attempts,
+                        "multimodal_digest": digest_protocol_attempts,
                     },
                     "representations": {
                         "sampled_frames": {
@@ -702,6 +771,7 @@ def prepare_representations(
             "llm_base_url": client.base_url,
             "temperature": 0,
             "base_seed": base_seed,
+            "protocol_max_attempts": protocol_max_attempts,
             "video_ids": list(ordered_video_ids),
             "frame_count": frame_count,
             "jpeg_max_dimension": jpeg_max_dimension,
@@ -736,6 +806,7 @@ def probe_vision_endpoint(
     jpeg_max_dimension: int = DEFAULT_JPEG_MAX_DIMENSION,
     seed: int = 7301,
     video_ids: Sequence[str] = FORMAL_VIDEO_IDS,
+    protocol_max_attempts: int = DEFAULT_PROTOCOL_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
     video_id = _normalize_video_ids(video_ids)[0]
     path = video_directory / f"{video_id}.mp4"
@@ -746,16 +817,23 @@ def probe_vision_endpoint(
         frame_count=1,
         jpeg_max_dimension=jpeg_max_dimension,
     )
-    response = client.chat(messages=_frame_messages(frames), seed=seed)
-    descriptions = _validate_frame_descriptions(
-        _extract_json_document(response, "vision probe"),
-        frames,
+    descriptions, protocol_attempts = _validated_json_chat(
+        client=client,
+        messages=_frame_messages(frames),
+        seed=seed,
+        response_name="vision probe",
+        validator=lambda payload: _validate_frame_descriptions(
+            payload,
+            frames,
+        ),
+        maximum_attempts=protocol_max_attempts,
     )
     return {
         "status": "vision_probe_ok",
         "model": client.model,
         "video_id": video_id,
         "described_frames": len(descriptions),
+        "protocol_attempts": protocol_attempts,
     }
 
 
@@ -800,6 +878,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-seed", type=int, default=7301)
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument(
+        "--protocol-max-attempts",
+        type=int,
+        default=DEFAULT_PROTOCOL_MAX_ATTEMPTS,
+        help=(
+            "maximum JSON-protocol attempts per frame or digest response; "
+            "transport retries are configured separately"
+        ),
+    )
+    parser.add_argument(
         "--probe-only",
         action="store_true",
         help="validate one image request without writing representations",
@@ -834,6 +921,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                         jpeg_max_dimension=args.jpeg_max_dimension,
                         seed=args.base_seed,
                         video_ids=video_ids,
+                        protocol_max_attempts=args.protocol_max_attempts,
                     ),
                     indent=2,
                 )
@@ -847,6 +935,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             jpeg_max_dimension=args.jpeg_max_dimension,
             base_seed=args.base_seed,
             video_ids=video_ids,
+            protocol_max_attempts=args.protocol_max_attempts,
         )
     except VideoPreparationError as exc:
         print(json.dumps({"status": "error", "message": str(exc)}))
