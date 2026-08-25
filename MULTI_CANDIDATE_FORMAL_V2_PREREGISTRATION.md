@@ -75,6 +75,12 @@ and representation hashes plus the generation environment outside Git.
 Manual review may reject corruption or a mismatched video, but it must not
 rewrite a representation after observing an Agent answer.
 
+`pathfinder.video_prep` accepts
+`--selection-config configs/multi_candidate_formal_v2_workload_selection.json`
+for this expansion. The selection-aware path changes only the ordered video
+IDs. Tests pin the original frame and digest prompt hashes, and the default v1
+eight-video behavior remains available when no selection config is supplied.
+
 Do not run the Oracle until all thirty-two representation files exist, are
 non-empty, and have been hashed. Never commit raw videos, credentials,
 worker configuration, runtime databases, or generated experiment outputs.

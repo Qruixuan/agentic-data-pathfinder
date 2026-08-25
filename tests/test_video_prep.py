@@ -2,20 +2,67 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 
 from pathfinder.video_prep import (
+    DIGEST_PROMPT,
+    FORMAL_VIDEO_IDS,
+    FRAME_PROMPT,
     PreparationProtocolError,
     SampledImage,
     VideoPreparationError,
     _decode_json_layers,
     _extract_json_document,
     _normalize_base_url,
+    _normalize_video_ids,
+    _sha256_bytes,
     _validate_digest,
     _validate_frame_descriptions,
+    load_selection_video_ids,
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class VideoPreparationParsingTest(unittest.TestCase):
+    def test_original_prompts_and_default_video_domain_remain_frozen(self) -> None:
+        self.assertEqual(
+            "f74783538a63279e3643e0960b916f7949e9090f8540e02c5103155c5b4982de",
+            _sha256_bytes(FRAME_PROMPT.encode("utf-8")),
+        )
+        self.assertEqual(
+            "475deee78505240ddc2eb28c8ed0d09f0f64167339e83cc12090e5089708748f",
+            _sha256_bytes(DIGEST_PROMPT.encode("utf-8")),
+        )
+        self.assertEqual(8, len(FORMAL_VIDEO_IDS))
+
+    def test_v2_selection_loads_eight_new_unique_videos_in_order(self) -> None:
+        video_ids = load_selection_video_ids(
+            ROOT
+            / "configs"
+            / "multi_candidate_formal_v2_workload_selection.json"
+        )
+        self.assertEqual(
+            (
+                "6356067859",
+                "5296635780",
+                "5735711594",
+                "8132842161",
+                "3462517143",
+                "5026660202",
+                "4942054721",
+                "5840177726",
+            ),
+            video_ids,
+        )
+
+    def test_video_id_validation_rejects_duplicates_and_non_digits(self) -> None:
+        with self.assertRaisesRegex(VideoPreparationError, "duplicate"):
+            _normalize_video_ids(("123", "123"))
+        with self.assertRaisesRegex(VideoPreparationError, "decimal"):
+            _normalize_video_ids(("../123",))
+
     def test_double_encoded_gateway_response_is_decoded(self) -> None:
         payload = {"choices": [{"message": {"content": "ok"}}]}
         encoded = json.dumps(json.dumps(payload)).encode("utf-8")

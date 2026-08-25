@@ -508,6 +508,66 @@ def _write_atomic(path: Path, payload: bytes) -> None:
     temporary.replace(path)
 
 
+def _normalize_video_ids(values: Sequence[str]) -> tuple[str, ...]:
+    video_ids: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, str) or not raw.strip():
+            raise VideoPreparationError("video IDs must be non-empty strings")
+        video_id = raw.strip()
+        if not video_id.isdecimal():
+            raise VideoPreparationError(
+                f"video ID must contain decimal digits only: {video_id!r}"
+            )
+        if video_id in seen:
+            raise VideoPreparationError(f"duplicate video ID: {video_id}")
+        seen.add(video_id)
+        video_ids.append(video_id)
+    if not video_ids:
+        raise VideoPreparationError("at least one video ID is required")
+    return tuple(video_ids)
+
+
+def load_selection_video_ids(path: Path) -> tuple[str, ...]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise VideoPreparationError(
+            f"cannot read workload selection config: {path}"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise VideoPreparationError("workload selection must be an object")
+    if payload.get("schema_version") != (
+        "pathfinder.workload-expansion-selection/v1alpha1"
+    ):
+        raise VideoPreparationError(
+            "unsupported workload selection schema_version"
+        )
+    rows = payload.get("added_workloads")
+    if not isinstance(rows, list) or not rows:
+        raise VideoPreparationError(
+            "workload selection has no added_workloads"
+        )
+    video_ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise VideoPreparationError(
+                "workload selection entries must be objects"
+            )
+        video_id = row.get("video_id")
+        object_id = row.get("object_id")
+        if not isinstance(video_id, str):
+            raise VideoPreparationError(
+                "workload selection entry has no video_id"
+            )
+        if object_id != f"nextqa-val-{video_id}":
+            raise VideoPreparationError(
+                "workload selection object_id does not match video_id"
+            )
+        video_ids.append(video_id)
+    return _normalize_video_ids(video_ids)
+
+
 def prepare_representations(
     *,
     video_directory: Path,
@@ -516,12 +576,17 @@ def prepare_representations(
     frame_count: int = DEFAULT_FRAME_COUNT,
     jpeg_max_dimension: int = DEFAULT_JPEG_MAX_DIMENSION,
     base_seed: int = 7301,
+    video_ids: Sequence[str] = FORMAL_VIDEO_IDS,
 ) -> dict[str, Any]:
+    ordered_video_ids = _normalize_video_ids(video_ids)
     paths = {path.stem: path for path in video_directory.glob("*.mp4")}
-    expected = set(FORMAL_VIDEO_IDS)
+    expected = set(ordered_video_ids)
     if set(paths) != expected:
+        missing = sorted(expected - set(paths))
+        unexpected = sorted(set(paths) - expected)
         raise VideoPreparationError(
-            "video directory must contain exactly the frozen eight video IDs"
+            "video directory does not match the frozen video IDs; "
+            f"missing={missing}, unexpected={unexpected}"
         )
     if output_directory.exists():
         raise VideoPreparationError(
@@ -530,13 +595,13 @@ def prepare_representations(
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
         tempfile.mkdtemp(
-            prefix=".phase-b-confirmatory-small-",
+            prefix=".pathfinder-video-prep-",
             dir=output_directory.parent,
         )
     )
     generated: list[dict[str, Any]] = []
     try:
-        for position, video_id in enumerate(FORMAL_VIDEO_IDS):
+        for position, video_id in enumerate(ordered_video_ids):
             source = paths[video_id]
             object_id = f"nextqa-val-{video_id}"
             print(f"sampling {object_id}", flush=True)
@@ -637,6 +702,7 @@ def prepare_representations(
             "llm_base_url": client.base_url,
             "temperature": 0,
             "base_seed": base_seed,
+            "video_ids": list(ordered_video_ids),
             "frame_count": frame_count,
             "jpeg_max_dimension": jpeg_max_dimension,
             "frame_prompt_sha256": _sha256_bytes(
@@ -669,8 +735,9 @@ def probe_vision_endpoint(
     client: OpenAICompatibleVisionClient,
     jpeg_max_dimension: int = DEFAULT_JPEG_MAX_DIMENSION,
     seed: int = 7301,
+    video_ids: Sequence[str] = FORMAL_VIDEO_IDS,
 ) -> dict[str, Any]:
-    video_id = FORMAL_VIDEO_IDS[0]
+    video_id = _normalize_video_ids(video_ids)[0]
     path = video_directory / f"{video_id}.mp4"
     if not path.is_file():
         raise VideoPreparationError(f"probe video is missing: {path}")
@@ -696,11 +763,26 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Generate question-blind frame observations and temporal digests "
-            "for the frozen Phase B small confirmatory corpus."
+            "for a frozen video corpus."
         )
     )
     parser.add_argument("--video-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--selection-config",
+        type=Path,
+        help=(
+            "load added video IDs in frozen order from a Pathfinder workload "
+            "selection config"
+        ),
+    )
+    scope.add_argument(
+        "--video-id",
+        action="append",
+        dest="video_ids",
+        help="explicit frozen video ID; repeat to provide more than one",
+    )
     parser.add_argument(
         "--base-url",
         default=os.environ.get("PATHFINDER_PREP_LLM_BASE_URL"),
@@ -729,6 +811,14 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = _parser().parse_args(list(argv) if argv is not None else None)
     api_key = os.environ.get("PATHFINDER_PREP_LLM_API_KEY")
     try:
+        if args.selection_config is not None:
+            video_ids = load_selection_video_ids(
+                args.selection_config.resolve()
+            )
+        elif args.video_ids is not None:
+            video_ids = _normalize_video_ids(args.video_ids)
+        else:
+            video_ids = FORMAL_VIDEO_IDS
         client = OpenAICompatibleVisionClient(
             base_url=args.base_url,
             api_key=api_key,
@@ -743,6 +833,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                         client=client,
                         jpeg_max_dimension=args.jpeg_max_dimension,
                         seed=args.base_seed,
+                        video_ids=video_ids,
                     ),
                     indent=2,
                 )
@@ -755,6 +846,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             frame_count=args.frame_count,
             jpeg_max_dimension=args.jpeg_max_dimension,
             base_seed=args.base_seed,
+            video_ids=video_ids,
         )
     except VideoPreparationError as exc:
         print(json.dumps({"status": "error", "message": str(exc)}))
