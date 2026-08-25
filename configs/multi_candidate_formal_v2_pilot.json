@@ -1,0 +1,167 @@
+{
+  "schema_version": "pathfinder.flowmesh-pilot/v1alpha1",
+  "experiment_id": "multi-candidate-formal-v2",
+  "system_config": "multi_candidate_formal_v2_system.json",
+  "design_ids": [
+    "D_origin_remote",
+    "D_local_frames",
+    "D_local_digest",
+    "D_local_pair"
+  ],
+  "task_class_id": "video_qa",
+  "quote_profile_ids": [
+    "as_designed"
+  ],
+  "latency_multipliers": [
+    1
+  ],
+  "repetitions": 4,
+  "base_seed": 22001,
+  "randomization_seed": 23001,
+  "workloads": [
+    {
+      "id": "temporal-nextqa-val-2834146886-q8",
+      "object_id": "nextqa-val-2834146886",
+      "question": "What does the white dog do after going to the cushion? Answer with the best option text: drink again; shake its body; smells the black dog; wagging tail; touch lady in blue stripes.",
+      "accepted_answer_substrings": [
+        "smells the black dog",
+        "smells black dog"
+      ]
+    },
+    {
+      "id": "temporal-nextqa-val-3441428429-q10",
+      "object_id": "nextqa-val-3441428429",
+      "question": "What does the female skater do after the male skater puts her back down on the ice? Answer with the best option text: put hand in mouth; continue skating; jump; move her arms up and down; laugh and run forward.",
+      "accepted_answer_substrings": [
+        "continue skating",
+        "continues skating"
+      ]
+    },
+    {
+      "id": "temporal-nextqa-val-2976913210-q6",
+      "object_id": "nextqa-val-2976913210",
+      "question": "How did the man respond when he was stuck in the dirt? Answer with the best option text: touched his head; pointed towards the jumping line; kept trying; prepared to swing again; looked at the floor.",
+      "accepted_answer_substrings": [
+        "kept trying",
+        "continued trying"
+      ]
+    },
+    {
+      "id": "causal-nextqa-val-4882821564-q1",
+      "object_id": "nextqa-val-4882821564",
+      "question": "Why did the boy pick up one present from the group and move to the sofa? Answer with the best option text: share with the girl; approach the seated lady; unwrap it; play with a toy train; gesture something.",
+      "accepted_answer_substrings": [
+        "unwrap it",
+        "unwrap the present"
+      ]
+    },
+    {
+      "id": "causal-nextqa-val-4260763967-q4",
+      "object_id": "nextqa-val-4260763967",
+      "question": "Why is the boy in yellow reaching out to things on the green mat? Answer with the best option text: team uniform; watch something in the pool; assemble parts to build a toy; keep his belongings; grab a remote control.",
+      "accepted_answer_substrings": [
+        "assemble parts",
+        "assembling parts",
+        "build a toy"
+      ]
+    },
+    {
+      "id": "causal-nextqa-val-9088819598-q1",
+      "object_id": "nextqa-val-9088819598",
+      "question": "Why does the baby keep the ball near his mouth at the beginning? Answer with the best option text: take a photo; lick it; smell the ball; blow it away; kiss it.",
+      "accepted_answer_substrings": [
+        "lick it",
+        "lick the ball"
+      ]
+    },
+    {
+      "id": "descriptive-nextqa-val-8547321641-q7",
+      "object_id": "nextqa-val-8547321641",
+      "question": "How many babies are in the video? Answer with the best option text: kitchen; four; two; three; one.",
+      "accepted_answer_substrings": [
+        "one"
+      ]
+    },
+    {
+      "id": "descriptive-nextqa-val-4130504920-q4",
+      "object_id": "nextqa-val-4130504920",
+      "question": "What is the color of the balloon? Answer with the best option text: purple; black; brown; white and red; green.",
+      "accepted_answer_substrings": [
+        "purple"
+      ]
+    },
+    {
+      "id": "temporal-nextqa-val-6356067859-q6",
+      "object_id": "nextqa-val-6356067859",
+      "question": "What does the girl in white do after bending down in the middle? Answer with the best option text: grab her; feed horse with grass; run towards the camera; umbrella; put her arms up.",
+      "accepted_answer_substrings": [
+        "feed horse with grass",
+        "feed the horse with grass"
+      ]
+    },
+    {
+      "id": "temporal-nextqa-val-5296635780-q7",
+      "object_id": "nextqa-val-5296635780",
+      "question": "What does the man do after the lady appears to punch him and smiles? Answer with the best option text: look at him; touch their chests; kick him; lean forward; sit back properly.",
+      "accepted_answer_substrings": [
+        "lean forward",
+        "leans forward"
+      ]
+    },
+    {
+      "id": "temporal-nextqa-val-5735711594-q5",
+      "object_id": "nextqa-val-5735711594",
+      "question": "How did the white dog respond when the brown dog attacked from its tail? Answer with the best option text: follow it; hopped away; wagging; ready to run away; move his head.",
+      "accepted_answer_substrings": [
+        "hopped away",
+        "hops away"
+      ]
+    },
+    {
+      "id": "causal-nextqa-val-8132842161-q2",
+      "object_id": "nextqa-val-8132842161",
+      "question": "Why did the man in white hold tightly to the boy in white? Answer with the best option text: forcing boy to look straight; dancing with boy; posing for camera; prevent falling off; boy keeps moving around.",
+      "accepted_answer_substrings": [
+        "prevent falling off",
+        "prevent him from falling"
+      ]
+    },
+    {
+      "id": "causal-nextqa-val-3462517143-q2",
+      "object_id": "nextqa-val-3462517143",
+      "question": "Why is the white dog walking around the green container? Answer with the best option text: chasing; get drink; fashion for dogs; leading the way; excited.",
+      "accepted_answer_substrings": [
+        "get drink",
+        "get a drink",
+        "drink water"
+      ]
+    },
+    {
+      "id": "causal-nextqa-val-5026660202-q8",
+      "object_id": "nextqa-val-5026660202",
+      "question": "Why are there high chairs on the stage? Answer with the best option text: to place the microphones; for guitarists to sit comfortably; for audience to sit; to act as displays; to take up stage spaces.",
+      "accepted_answer_substrings": [
+        "for guitarists to sit comfortably",
+        "guitarists to sit comfortably"
+      ]
+    },
+    {
+      "id": "descriptive-nextqa-val-4942054721-q7",
+      "object_id": "nextqa-val-4942054721",
+      "question": "How many goats can be spotted? Answer with the best option text: eight; two; one; three; four.",
+      "accepted_answer_substrings": [
+        "eight"
+      ]
+    },
+    {
+      "id": "descriptive-nextqa-val-5840177726-q3",
+      "object_id": "nextqa-val-5840177726",
+      "question": "How are the men positioned in the video? Answer with the best option text: riding the cycle; half squat; sit on the sofa; skateboard; stand closely.",
+      "accepted_answer_substrings": [
+        "riding the cycle",
+        "riding a cycle",
+        "riding bicycles"
+      ]
+    }
+  ]
+}

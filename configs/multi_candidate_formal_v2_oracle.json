@@ -1,0 +1,90 @@
+{
+  "schema_version": "pathfinder.reduced-oracle/v1alpha1",
+  "oracle_id": "multi-candidate-formal-v2",
+  "workload_pilot_config": "multi_candidate_formal_v2_pilot.json",
+  "safe_design_id": "D_origin_remote",
+  "design_order": [
+    "D_origin_remote",
+    "D_local_frames",
+    "D_local_digest",
+    "D_local_pair"
+  ],
+  "quote_profile_id": "as_designed",
+  "latency_multiplier": 1,
+  "repetitions": 4,
+  "base_seed": 22001,
+  "randomization_seed": 23001,
+  "horizon_sessions": 1000,
+  "horizon_hours": 24,
+  "minimum_completion_rate": 1,
+  "materialization_root": "../data/multi_candidate_formal_v2/materialized",
+  "cost_model_status": "preregistered-controlled-single-node-v2-not-distributed-cost",
+  "transition_cost": {
+    "copy_cost_per_gib": 0.05,
+    "elapsed_time_cost_per_second": 0.001,
+    "foreground_loss_per_transition": 0,
+    "storage_cost_per_gib_hour": 0.01
+  },
+  "naive_baseline": {
+    "candidate_design_id": "D_local_digest",
+    "representation_id": "multimodal_digest",
+    "decision_margin": 0
+  },
+  "designs": [
+    {
+      "design_id": "D_origin_remote",
+      "materialization_decision": "reuse-origin-representations",
+      "placement_decision": "controlled-origin-service-paths",
+      "execution_decision": "flowmesh-agent-on-pinned-worker",
+      "fixed_storage_cost": 0,
+      "materializations": []
+    },
+    {
+      "design_id": "D_local_frames",
+      "materialization_decision": "materialize-local-frame-copies",
+      "placement_decision": "pathfinder-owned-local-materialization-directory",
+      "execution_decision": "flowmesh-agent-on-pinned-worker",
+      "fixed_storage_cost": 0,
+      "materializations": [
+        {
+          "representation_id": "sampled_frames",
+          "source_template": "../data/multi_candidate_formal_v2/source/{object_id}/sampled_frames.json",
+          "target_template": "../data/multi_candidate_formal_v2/materialized/local/{object_id}/sampled_frames.json"
+        }
+      ]
+    },
+    {
+      "design_id": "D_local_digest",
+      "materialization_decision": "materialize-local-digest-copies",
+      "placement_decision": "pathfinder-owned-local-materialization-directory",
+      "execution_decision": "flowmesh-agent-on-pinned-worker",
+      "fixed_storage_cost": 0,
+      "materializations": [
+        {
+          "representation_id": "multimodal_digest",
+          "source_template": "../data/multi_candidate_formal_v2/source/{object_id}/multimodal_digest.txt",
+          "target_template": "../data/multi_candidate_formal_v2/materialized/local/{object_id}/multimodal_digest.txt"
+        }
+      ]
+    },
+    {
+      "design_id": "D_local_pair",
+      "materialization_decision": "materialize-local-frame-and-digest-copies",
+      "placement_decision": "pathfinder-owned-local-materialization-directory",
+      "execution_decision": "flowmesh-agent-on-pinned-worker",
+      "fixed_storage_cost": 0,
+      "materializations": [
+        {
+          "representation_id": "sampled_frames",
+          "source_template": "../data/multi_candidate_formal_v2/source/{object_id}/sampled_frames.json",
+          "target_template": "../data/multi_candidate_formal_v2/materialized/local/{object_id}/sampled_frames.json"
+        },
+        {
+          "representation_id": "multimodal_digest",
+          "source_template": "../data/multi_candidate_formal_v2/source/{object_id}/multimodal_digest.txt",
+          "target_template": "../data/multi_candidate_formal_v2/materialized/local/{object_id}/multimodal_digest.txt"
+        }
+      ]
+    }
+  ]
+}

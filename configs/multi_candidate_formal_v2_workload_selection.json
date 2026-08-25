@@ -1,0 +1,208 @@
+{
+  "schema_version": "pathfinder.workload-expansion-selection/v1alpha1",
+  "selection_id": "multi-candidate-formal-v2-workload-expansion",
+  "source": {
+    "dataset": "NExT-QA",
+    "split": "val",
+    "repository": "https://github.com/doc-doc/NExT-QA",
+    "repository_commit": "2432e9724f88ed9f40010e2989f104570a91de4e",
+    "annotation_path": "dataset/nextqa/val.csv",
+    "annotation_sha256": "43198bdef8436b8d64a9b75d846b0987c10cbf94ebf4be325c4a4e54634d66b8"
+  },
+  "selection_rule": {
+    "ordering": "official-val-csv-row-order",
+    "excluded_video_ids": [
+      "2834146886",
+      "3441428429",
+      "2976913210",
+      "4882821564",
+      "4260763967",
+      "9088819598",
+      "8547321641",
+      "4130504920"
+    ],
+    "uniqueness_unit": "video",
+    "quotas_in_order": [
+      {
+        "type": "TN",
+        "count": 2
+      },
+      {
+        "type": "TC",
+        "count": 1
+      },
+      {
+        "type": "CW",
+        "count": 3
+      },
+      {
+        "type": "DC",
+        "count": 1
+      },
+      {
+        "type": "DO",
+        "count": 1
+      }
+    ],
+    "rule": "After excluding every v1 video, scan the pinned official validation CSV in row order independently for each quota and choose the first rows whose video has not already been selected."
+  },
+  "video_archive": {
+    "repository": "rhymes-ai/NeXTVideo",
+    "revision": "7e8ea8e056742292b95688d92a0773e05df00393",
+    "filename": "NExTVideo.zip"
+  },
+  "added_workloads": [
+    {
+      "group": "temporal",
+      "type": "TN",
+      "video_id": "6356067859",
+      "frame_count": 1070,
+      "qid": 6,
+      "question": "what does the girl in white do after bending down in the middle",
+      "options": [
+        "grab her",
+        "feed horse with grass",
+        "run towards the camera",
+        "umbrella",
+        "put her arms up"
+      ],
+      "answer_index": 1,
+      "answer_text": "feed horse with grass",
+      "workload_id": "temporal-nextqa-val-6356067859-q6",
+      "object_id": "nextqa-val-6356067859"
+    },
+    {
+      "group": "temporal",
+      "type": "TN",
+      "video_id": "5296635780",
+      "frame_count": 652,
+      "qid": 7,
+      "question": "what does the man do after the lady appear to punch him and smiles",
+      "options": [
+        "look at him",
+        "touch their chests",
+        "kick him",
+        "lean forward",
+        "sit back properly"
+      ],
+      "answer_index": 3,
+      "answer_text": "lean forward",
+      "workload_id": "temporal-nextqa-val-5296635780-q7",
+      "object_id": "nextqa-val-5296635780"
+    },
+    {
+      "group": "temporal",
+      "type": "TC",
+      "video_id": "5735711594",
+      "frame_count": 589,
+      "qid": 5,
+      "question": "how did the white dog respond to the brown dog when it attacks from its tail",
+      "options": [
+        "follow it",
+        "hopped away",
+        "wagging",
+        "ready to run away",
+        "move his head"
+      ],
+      "answer_index": 1,
+      "answer_text": "hopped away",
+      "workload_id": "temporal-nextqa-val-5735711594-q5",
+      "object_id": "nextqa-val-5735711594"
+    },
+    {
+      "group": "causal",
+      "type": "CW",
+      "video_id": "8132842161",
+      "frame_count": 1105,
+      "qid": 2,
+      "question": "why did the man in white hold tightly to the boy in white",
+      "options": [
+        "forcing boy to look straight",
+        "dancing with boy",
+        "posing for camera",
+        "prevent falling off",
+        "boy keeps moving around"
+      ],
+      "answer_index": 3,
+      "answer_text": "prevent falling off",
+      "workload_id": "causal-nextqa-val-8132842161-q2",
+      "object_id": "nextqa-val-8132842161"
+    },
+    {
+      "group": "causal",
+      "type": "CW",
+      "video_id": "3462517143",
+      "frame_count": 722,
+      "qid": 2,
+      "question": "why is the white dog walking around the green container",
+      "options": [
+        "chasing",
+        "get drink",
+        "fashion for dogs",
+        "leading the way",
+        "excited"
+      ],
+      "answer_index": 1,
+      "answer_text": "get drink",
+      "workload_id": "causal-nextqa-val-3462517143-q2",
+      "object_id": "nextqa-val-3462517143"
+    },
+    {
+      "group": "causal",
+      "type": "CW",
+      "video_id": "5026660202",
+      "frame_count": 2697,
+      "qid": 8,
+      "question": "why are there high chairs on the stage",
+      "options": [
+        "to place the microphones",
+        "for guitarists to sit comfortably",
+        "for audience to sit",
+        "to act as displays",
+        "to take up stage spaces"
+      ],
+      "answer_index": 1,
+      "answer_text": "for guitarists to sit comfortably",
+      "workload_id": "causal-nextqa-val-5026660202-q8",
+      "object_id": "nextqa-val-5026660202"
+    },
+    {
+      "group": "descriptive",
+      "type": "DC",
+      "video_id": "4942054721",
+      "frame_count": 645,
+      "qid": 7,
+      "question": "how many goats can be spotted",
+      "options": [
+        "eight",
+        "two",
+        "one",
+        "three",
+        "four"
+      ],
+      "answer_index": 0,
+      "answer_text": "eight",
+      "workload_id": "descriptive-nextqa-val-4942054721-q7",
+      "object_id": "nextqa-val-4942054721"
+    },
+    {
+      "group": "descriptive",
+      "type": "DO",
+      "video_id": "5840177726",
+      "frame_count": 377,
+      "qid": 3,
+      "question": "how are the men positioned in the video",
+      "options": [
+        "riding the cycle",
+        "half squat",
+        "sit on the sofa",
+        "skateboard",
+        "stand closely"
+      ],
+      "answer_index": 0,
+      "answer_text": "riding the cycle",
+      "workload_id": "descriptive-nextqa-val-5840177726-q3",
+      "object_id": "nextqa-val-5840177726"
+    }
+  ]
+}

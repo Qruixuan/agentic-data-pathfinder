@@ -1,0 +1,294 @@
+{
+  "schema_version": "pathfinder.data-object-catalog/v1alpha1",
+  "catalog_version": "nextqa-val-multi-candidate-formal-v2",
+  "objects": {
+    "nextqa-val-2834146886": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-2834146886/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2834146886/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2834146886/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-2834146886/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2834146886/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2834146886/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-3441428429": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-3441428429/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3441428429/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3441428429/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-3441428429/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3441428429/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3441428429/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-2976913210": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-2976913210/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2976913210/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2976913210/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-2976913210/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2976913210/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-2976913210/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-4882821564": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4882821564/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4882821564/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4882821564/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4882821564/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4882821564/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4882821564/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-4260763967": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4260763967/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4260763967/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4260763967/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4260763967/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4260763967/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4260763967/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-9088819598": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-9088819598/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-9088819598/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-9088819598/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-9088819598/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-9088819598/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-9088819598/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-8547321641": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-8547321641/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8547321641/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8547321641/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-8547321641/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8547321641/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8547321641/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-4130504920": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4130504920/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4130504920/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4130504920/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4130504920/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4130504920/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4130504920/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-6356067859": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-6356067859/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-6356067859/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-6356067859/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-6356067859/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-6356067859/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-6356067859/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-5296635780": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5296635780/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5296635780/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5296635780/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5296635780/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5296635780/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5296635780/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-5735711594": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5735711594/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5735711594/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5735711594/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5735711594/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5735711594/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5735711594/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-8132842161": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-8132842161/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8132842161/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8132842161/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-8132842161/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8132842161/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-8132842161/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-3462517143": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-3462517143/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3462517143/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3462517143/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-3462517143/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3462517143/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-3462517143/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-5026660202": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5026660202/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5026660202/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5026660202/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5026660202/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5026660202/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5026660202/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-4942054721": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4942054721/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4942054721/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4942054721/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-4942054721/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4942054721/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-4942054721/multimodal_digest.txt"
+          }
+        }
+      }
+    },
+    "nextqa-val-5840177726": {
+      "representations": {
+        "sampled_frames": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5840177726/sampled_frames.json",
+          "plan_paths": {
+            "D_local_frames": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5840177726/sampled_frames.json",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5840177726/sampled_frames.json"
+          }
+        },
+        "multimodal_digest": {
+          "path": "../data/multi_candidate_formal_v2/source/nextqa-val-5840177726/multimodal_digest.txt",
+          "plan_paths": {
+            "D_local_digest": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5840177726/multimodal_digest.txt",
+            "D_local_pair": "../data/multi_candidate_formal_v2/materialized/local/nextqa-val-5840177726/multimodal_digest.txt"
+          }
+        }
+      }
+    }
+  }
+}

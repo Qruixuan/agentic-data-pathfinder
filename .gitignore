@@ -9,6 +9,7 @@ build/
 outputs/
 data/phase_b_confirmatory_small/
 data/reduced_oracle_mvp/
+data/multi_candidate_formal_v2/
 
 # Local Claude Code configuration. Machine-specific paths and permission
 # grants; narrow patterns so a deliberately shared .claude file still can be.

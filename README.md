@@ -33,6 +33,13 @@ gate.
 
 The initial frozen results and their claim boundaries are summarized in
 [MULTI_CANDIDATE_FORMAL_V1_RESULTS.md](MULTI_CANDIDATE_FORMAL_V1_RESULTS.md).
+The prospective workload-scaling check is frozen separately in
+[MULTI_CANDIDATE_FORMAL_V2_PREREGISTRATION.md](MULTI_CANDIDATE_FORMAL_V2_PREREGISTRATION.md).
+It deterministically adds eight new NExT-QA videos, doubles the independent
+workload count to sixteen, and runs 256 sessions without modifying the v1
+inputs. Because v1 informed the choice of AWM v3alpha4, the combined v2 run is
+an engineering power check rather than an independent model-selection
+confirmation.
 AWM v2 is now available as an opt-in post-hoc diagnostic with a fixed
 full-domain confidence family and fixed-look paired gain certificates; it does
 not alter the frozen v1 evidence.

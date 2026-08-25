@@ -1,0 +1,78 @@
+{
+  "schema_version": "pathfinder.data-agent-manifest/v1alpha1",
+  "node_id": "pathfinder-multi-candidate-formal-v2-node",
+  "require_plan_binding": true,
+  "object_catalog_path": "multi_candidate_formal_v2_object_catalog.json",
+  "representations": {
+    "sampled_frames": {
+      "kind": "artifact_uri",
+      "media_type": "application/json",
+      "default_binding": {
+        "minimum_latency_ms": 0,
+        "realized_cost": 0,
+        "cache_hit": null
+      },
+      "plan_bindings": {
+        "D_origin_remote": {
+          "location": "origin_frame_service",
+          "minimum_latency_ms": 160,
+          "realized_cost": 0.9,
+          "cache_hit": false
+        },
+        "D_local_frames": {
+          "location": "local_nvme",
+          "minimum_latency_ms": 20,
+          "realized_cost": 0.15,
+          "cache_hit": true
+        },
+        "D_local_digest": {
+          "location": "origin_frame_service",
+          "minimum_latency_ms": 160,
+          "realized_cost": 0.9,
+          "cache_hit": false
+        },
+        "D_local_pair": {
+          "location": "local_nvme",
+          "minimum_latency_ms": 20,
+          "realized_cost": 0.15,
+          "cache_hit": true
+        }
+      }
+    },
+    "multimodal_digest": {
+      "kind": "inline_text",
+      "media_type": "text/plain",
+      "default_binding": {
+        "minimum_latency_ms": 0,
+        "realized_cost": 0,
+        "cache_hit": null
+      },
+      "plan_bindings": {
+        "D_origin_remote": {
+          "location": "origin_digest_service",
+          "minimum_latency_ms": 210,
+          "realized_cost": 1.6,
+          "cache_hit": false
+        },
+        "D_local_frames": {
+          "location": "origin_digest_service",
+          "minimum_latency_ms": 210,
+          "realized_cost": 1.6,
+          "cache_hit": false
+        },
+        "D_local_digest": {
+          "location": "local_nvme",
+          "minimum_latency_ms": 25,
+          "realized_cost": 0.2,
+          "cache_hit": true
+        },
+        "D_local_pair": {
+          "location": "local_nvme",
+          "minimum_latency_ms": 25,
+          "realized_cost": 0.2,
+          "cache_hit": true
+        }
+      }
+    }
+  }
+}
