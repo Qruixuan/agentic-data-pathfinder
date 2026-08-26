@@ -552,7 +552,12 @@ def _load_attempts(
     if not path.exists():
         return []
     attempts: list[dict[str, Any]] = []
-    seen_attempt_keys: set[str] = set()
+    # A canonical trial key is intentionally reused across physical designs.
+    # Early v1alpha1 writers omitted the design from recovery_attempt_key, so
+    # otherwise-valid ledgers can contain the same textual attempt key once
+    # per design.  Keep those sealed records immutable and enforce uniqueness
+    # on the actual recovery identity instead.
+    seen_attempt_identities: set[tuple[str, str, int]] = set()
     previous_chain_sha256 = chain_seed_sha256
     for line_number, line in enumerate(
         path.read_text(encoding="utf-8").splitlines(),
@@ -576,11 +581,41 @@ def _load_attempts(
             raise ReducedOracleRecoveryError(
                 f"recovery attempt at {path}:{line_number} has no attempt key"
             )
-        if attempt_key in seen_attempt_keys:
+        design_id = record.get("design_id")
+        canonical_trial_key = record.get("canonical_trial_key")
+        attempt_number = record.get("attempt_number")
+        if not isinstance(design_id, str) or not design_id:
             raise ReducedOracleRecoveryError(
-                f"duplicate recovery attempt key: {attempt_key}"
+                f"recovery attempt at {path}:{line_number} has no design_id"
             )
-        seen_attempt_keys.add(attempt_key)
+        if (
+            not isinstance(canonical_trial_key, str)
+            or not canonical_trial_key
+        ):
+            raise ReducedOracleRecoveryError(
+                f"recovery attempt at {path}:{line_number} has no canonical "
+                "trial key"
+            )
+        if (
+            isinstance(attempt_number, bool)
+            or not isinstance(attempt_number, int)
+            or attempt_number < 1
+        ):
+            raise ReducedOracleRecoveryError(
+                f"recovery attempt at {path}:{line_number} has an invalid "
+                "attempt_number"
+            )
+        attempt_identity = (
+            design_id,
+            canonical_trial_key,
+            attempt_number,
+        )
+        if attempt_identity in seen_attempt_identities:
+            raise ReducedOracleRecoveryError(
+                "duplicate recovery attempt identity: "
+                f"{design_id}:{canonical_trial_key}#a{attempt_number:04d}"
+            )
+        seen_attempt_identities.add(attempt_identity)
         if record.get("previous_attempt_chain_sha256") != previous_chain_sha256:
             raise ReducedOracleRecoveryError(
                 f"recovery attempt chain is broken at {path}:{line_number}"
@@ -645,7 +680,10 @@ def _retry_trial(
         f"attempt-{attempt_number}"
     )
     identity_hash = sha256(identity.encode("utf-8")).hexdigest()
-    attempt_key = f"{original.trial_key}#recovery-a{attempt_number:04d}"
+    attempt_key = (
+        f"{original.design_id}::{original.trial_key}"
+        f"#recovery-a{attempt_number:04d}"
+    )
     return (
         replace(
             original,

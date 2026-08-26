@@ -4,8 +4,10 @@ import csv
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
+from pathfinder.reduced_oracle import recovery as recovery_module
 from pathfinder.config import load_config
 from pathfinder.data_agent_manifest import load_data_agent_manifest
 from pathfinder.integrations.flowmesh.contracts import (
@@ -459,6 +461,118 @@ class ReducedOracleRunnerTest(unittest.TestCase):
 
 
 class ReducedOracleRecoveryTest(unittest.TestCase):
+    def test_attempt_ledger_accepts_legacy_cross_design_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "attempts.jsonl"
+            chain = "a" * 64
+            records = []
+            for design_id in ("D_origin_remote", "D_local_digest"):
+                record = recovery_module._seal_attempt(
+                    {
+                        "recovery_attempt_key": (
+                            "shared-trial#recovery-a0001"
+                        ),
+                        "design_id": design_id,
+                        "canonical_trial_key": "shared-trial",
+                        "attempt_number": 1,
+                    },
+                    previous_chain_sha256=chain,
+                )
+                records.append(record)
+                chain = record["attempt_chain_sha256"]
+            path.write_text(
+                "".join(
+                    json.dumps(record, sort_keys=True) + "\n"
+                    for record in records
+                ),
+                encoding="utf-8",
+            )
+
+            loaded = recovery_module._load_attempts(
+                path,
+                chain_seed_sha256="a" * 64,
+            )
+
+            self.assertEqual(records, loaded)
+
+    def test_attempt_ledger_rejects_duplicate_identity_within_design(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "attempts.jsonl"
+            chain_seed = "b" * 64
+            chain = chain_seed
+            records = []
+            for attempt_key in ("legacy-key", "different-textual-key"):
+                record = recovery_module._seal_attempt(
+                    {
+                        "recovery_attempt_key": attempt_key,
+                        "design_id": "D_local_digest",
+                        "canonical_trial_key": "shared-trial",
+                        "attempt_number": 1,
+                    },
+                    previous_chain_sha256=chain,
+                )
+                records.append(record)
+                chain = record["attempt_chain_sha256"]
+            path.write_text(
+                "".join(
+                    json.dumps(record, sort_keys=True) + "\n"
+                    for record in records
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ReducedOracleRecoveryError,
+                "duplicate recovery attempt identity",
+            ):
+                recovery_module._load_attempts(
+                    path,
+                    chain_seed_sha256=chain_seed,
+                )
+
+    def test_new_attempt_keys_are_namespaced_by_design(self) -> None:
+        first = recovery_module.PilotTrial(
+            trial_key="shared-trial",
+            trial_id="trial-1",
+            session_id="session-1",
+            order_index=0,
+            workload_id="workload",
+            object_id="object",
+            question="question",
+            accepted_answer_substrings=("answer",),
+            design_id="D_origin_remote",
+            task_class_id="video_qa",
+            quote_profile_id="as_designed",
+            latency_multiplier=1.0,
+            repetition=0,
+            seed=1,
+        )
+        second = replace(
+            first,
+            design_id="D_local_digest",
+        )
+
+        first_trial, first_key = recovery_module._retry_trial(
+            original=first,
+            recovery_id="recovery-test",
+            attempt_number=1,
+            recovery_order_index=0,
+        )
+        second_trial, second_key = recovery_module._retry_trial(
+            original=second,
+            recovery_id="recovery-test",
+            attempt_number=1,
+            recovery_order_index=1,
+        )
+
+        self.assertNotEqual(first_key, second_key)
+        self.assertEqual(first_key, first_trial.trial_key)
+        self.assertEqual(second_key, second_trial.trial_key)
+        self.assertTrue(first_key.startswith("D_origin_remote::"))
+        self.assertTrue(second_key.startswith("D_local_digest::"))
+
     def _incident(
         self,
         root: Path,
