@@ -1,0 +1,87 @@
+{
+  "schema_version": "pathfinder.distributed-pilot-preregistration/v1alpha1",
+  "pilot_id": "distributed-pilot-example",
+  "source_git_revision": "0000000000000000000000000000000000000000",
+  "posthoc": false,
+  "confirmatory": false,
+  "eligible_for_scientific_claims": false,
+  "thresholds": {
+    "delta_success_margin": 0.05,
+    "minimum_cost_saving": 0.25,
+    "alpha": 0.05,
+    "provenance": "pilot-engineering-threshold-fixed-before-new-pilot-outcomes",
+    "note": "Pilot engineering thresholds, fixed before any new pilot outcome is read. They are NOT scientifically justified operating points and do not make this pilot confirmatory."
+  },
+  "safe_design_id": "D_origin_remote",
+  "design_ids": [
+    "D_origin_remote",
+    "D_local_frames",
+    "D_local_digest",
+    "D_local_pair"
+  ],
+  "excluded_design_ids": [
+    "D_local_pair"
+  ],
+  "strata": {
+    "causal": {
+      "candidate_design_id": "D_local_frames",
+      "workload_ids": [
+        "causal-pilot-w01",
+        "causal-pilot-w02",
+        "causal-pilot-w03",
+        "causal-pilot-w04"
+      ]
+    },
+    "descriptive": {
+      "candidate_design_id": "D_local_frames",
+      "workload_ids": [
+        "descriptive-pilot-w01",
+        "descriptive-pilot-w02",
+        "descriptive-pilot-w03"
+      ]
+    },
+    "temporal": {
+      "candidate_design_id": "D_local_digest",
+      "workload_ids": [
+        "temporal-pilot-w01",
+        "temporal-pilot-w02",
+        "temporal-pilot-w03"
+      ]
+    }
+  },
+  "excluded_workload_ids": [
+    "causal-nextqa-val-4882821564-q1",
+    "descriptive-nextqa-val-8547321641-q7",
+    "temporal-nextqa-val-2834146886-q8"
+  ],
+  "repetitions": 4,
+  "success_scoring_rule": "accepted-answer-substring-match",
+  "total_cost_contract": {
+    "cost_basis": "total_cost",
+    "equation": "total_cost = service + network + storage + amortized_materialization + transition",
+    "cost_model": {
+      "schema_version": "pathfinder.total-cost-model/v1alpha1",
+      "cost_model_id": "distributed-pilot-placeholder-rates-v1",
+      "accounting_unit": "pilot-cost-unit",
+      "rate_provenance": "PLACEHOLDER. These are not measured or scientifically justified rates. They exist so the cost equation is exercised end to end. Replace every value with rates measured on the actual deployment before interpreting any cost comparison.",
+      "materialization_amortization_horizon_sessions": 64,
+      "artifact_transfer_accounted_in": "network_cost",
+      "conversion_rates": {
+        "network_cost_per_gib": 0.0,
+        "storage_cost_per_gib_hour": 0.0,
+        "materialization_cost_per_gib": 0.0,
+        "transition_cost_per_gib": 0.0,
+        "elapsed_time_cost_per_second": 0.0
+      }
+    }
+  },
+  "fallback_rule": {
+    "design_id": "D_origin_remote",
+    "applies_to_every_non_safe_result": true,
+    "note": "Every non-SAFE_TO_COMMIT certificate result retains D_origin_remote."
+  },
+  "run_declaration": {
+    "immutable_after_first_observation": true,
+    "note": "Once the first canonical observation is written, this document is frozen. A resumed run recomputes the configuration and workload manifest hashes and refuses to continue if either changed."
+  }
+}

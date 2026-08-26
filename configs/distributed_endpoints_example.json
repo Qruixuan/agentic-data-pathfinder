@@ -1,0 +1,55 @@
+{
+  "schema_version": "pathfinder.data-agent-endpoint-registry/v1alpha1",
+  "registry_id": "distributed-pilot-example-endpoints",
+  "execution_node_id": "EXECUTION_NODE_PLACEHOLDER",
+  "note": "Endpoint URLs and tokens are NEVER stored here. Each endpoint names the environment variables that carry them, so this document is safe to commit and safe to print.",
+  "endpoints": [
+    {
+      "endpoint_id": "origin_remote",
+      "node_id": "NODE_ORIGIN_PLACEHOLDER",
+      "location": "origin-remote",
+      "description": "Data Agent holding origin representations.",
+      "base_url_env": "PATHFINDER_DATA_AGENT_ORIGIN_URL",
+      "token_env": "PATHFINDER_DATA_AGENT_ORIGIN_TOKEN",
+      "timeout_seconds": 30.0,
+      "max_retries": 1,
+      "telemetry_capabilities": [
+        "access_telemetry",
+        "transfer_bytes",
+        "quiescence_wait"
+      ]
+    },
+    {
+      "endpoint_id": "local_materialized",
+      "node_id": "NODE_LOCAL_PLACEHOLDER",
+      "location": "local-materialized",
+      "description": "Data Agent holding locally materialized representations.",
+      "base_url_env": "PATHFINDER_DATA_AGENT_LOCAL_URL",
+      "token_env": "PATHFINDER_DATA_AGENT_LOCAL_TOKEN",
+      "timeout_seconds": 30.0,
+      "max_retries": 1,
+      "telemetry_capabilities": [
+        "access_telemetry",
+        "transfer_bytes",
+        "quiescence_wait"
+      ]
+    }
+  ],
+  "placement": [
+    {
+      "design_id": "D_origin_remote",
+      "representation_id": "*",
+      "endpoint_id": "origin_remote"
+    },
+    {
+      "design_id": "D_local_frames",
+      "representation_id": "*",
+      "endpoint_id": "local_materialized"
+    },
+    {
+      "design_id": "D_local_digest",
+      "representation_id": "*",
+      "endpoint_id": "local_materialized"
+    }
+  ]
+}

@@ -30,6 +30,11 @@ from ..reduced_oracle.contracts import (
     ReducedOracleConfig,
     load_reduced_oracle_config,
 )
+from ..distributed.cost import (
+    CostModelError,
+    CostTelemetryIncompleteError,
+    record_total_cost,
+)
 from ..reduced_oracle.snapshot import reduced_oracle_snapshot
 from .contracts import AWMConfigError
 from .model import Interval, one_sided_bounded_mean_bounds
@@ -73,6 +78,9 @@ CONFIRMATORY_STATIC_REQUIREMENTS = (
 CONFIRMATORY_RUNTIME_REQUIREMENTS = (
     "oracle_snapshot_previously_unseen",
 )
+#: Which cost scalar the cost gate compares. Selecting ``total_cost`` changes
+#: the measured quantity, never the statistical decision rule applied to it.
+COST_BASES = ("service_cost", "total_cost")
 GATE_IDS = ("success_non_inferiority", "cost_improvement")
 GATE_SIDES = ("lower", "upper")
 GATE_RESULTS = ("PASS", "VIOLATED", "INDETERMINATE")
@@ -112,6 +120,7 @@ class WorkloadSafetyCertificateConfig:
     family_adjustment: str
     bound_method: str
     minimum_independent_workloads: int
+    cost_basis: str
     delta_success_margin: float
     minimum_cost_saving: float
     threshold_provenance: str
@@ -164,7 +173,7 @@ class WorkloadSafetyCertificateConfig:
 @dataclass(frozen=True)
 class _Response:
     success: float
-    service_cost: float
+    cost: float
 
 
 @dataclass(frozen=True)
@@ -402,6 +411,11 @@ def load_workload_safety_certificate_config(
         "confidence.family_adjustment",
         FAMILY_ADJUSTMENTS,
     )
+    cost_basis = _required_choice(
+        root.get("cost_basis", "service_cost"),
+        "cost_basis",
+        COST_BASES,
+    )
     bound_method = _required_choice(
         confidence.get("bound_method"),
         "confidence.bound_method",
@@ -606,6 +620,7 @@ def load_workload_safety_certificate_config(
         family_adjustment=family_adjustment,
         bound_method=bound_method,
         minimum_independent_workloads=minimum_independent_workloads,
+        cost_basis=cost_basis,
         delta_success_margin=delta_success_margin,
         minimum_cost_saving=minimum_cost_saving,
         threshold_provenance=threshold_provenance,
@@ -630,6 +645,28 @@ def _service_cost(record: Mapping[str, Any]) -> float:
         for event in record.get("access_events", [])
         if event.get("accepted")
     )
+
+
+def _record_cost(record: Mapping[str, Any], cost_basis: str) -> float:
+    """Select the configured cost scalar for one observation.
+
+    ``service_cost`` is the legacy basis and reads service-cost-only Oracle
+    data unchanged. ``total_cost`` requires a complete distributed-pilot cost
+    ledger and fails closed rather than silently degrading to service cost,
+    which would make a design look cheaper simply because its network,
+    storage, or materialization terms were never measured.
+    """
+    if cost_basis == "service_cost":
+        return _service_cost(record)
+    if cost_basis != "total_cost":
+        raise AWMConfigError(f"unknown cost_basis: {cost_basis}")
+    try:
+        return record_total_cost(record)
+    except (CostTelemetryIncompleteError, CostModelError) as exc:
+        raise AWMConfigError(
+            "certificate fails closed on an incomplete total-cost ledger "
+            f"for trial {record.get('trial_key')}: {exc}"
+        ) from exc
 
 
 def _validate_record(record: Mapping[str, Any], design_id: str) -> None:
@@ -727,7 +764,7 @@ def _load_response_matrix(
                 )
             matrix[key] = _Response(
                 success=float(int(bool(record["task_success"]))),
-                service_cost=_service_cost(record),
+                cost=_record_cost(record, config.cost_basis),
             )
 
     for design_id in loaded_design_ids:
@@ -764,7 +801,7 @@ def _block_mean(
     ]
     return _Response(
         success=mean(row.success for row in rows),
-        service_cost=mean(row.service_cost for row in rows),
+        cost=mean(row.cost for row in rows),
     )
 
 
@@ -788,7 +825,7 @@ def _cluster_observations(
             repetitions,
         )
         success_difference = candidate.success - safe.success
-        cost_saving = safe.service_cost - candidate.service_cost
+        cost_saving = safe.cost - candidate.cost
         observations.append(_ClusterObservation(
             workload_id=workload_id,
             success_difference=success_difference,
@@ -1315,6 +1352,13 @@ def certify_awm_restricted_policy(
                 "workload before any bound is computed"
             ),
             "bound_method": config.bound_method,
+            "cost_basis": config.cost_basis,
+            "cost_basis_note": (
+                "The cost basis selects which measured scalar the cost gate "
+                "compares. It does not change the statistical decision rule: "
+                "the same workload-cluster bounded-mean bound, family "
+                "adjustment, and gate logic apply to either basis."
+            ),
             "bound_family": (
                 "one-sided binary-relative-entropy inversion for the mean "
                 "of independent bounded units; no normal approximation"
@@ -1515,6 +1559,7 @@ def certify_awm_restricted_policy(
         "summary_path": str(summary_path),
         "evaluation_path": str(evaluation_path),
         "family_adjustment": config.family_adjustment,
+        "cost_basis": config.cost_basis,
         "family_size": config.family_size,
         "alpha": config.alpha,
         "adjusted_alpha": adjusted_alpha,

@@ -129,6 +129,10 @@ class GatewayAccessEvent:
     artifact_full_download_count: int = 0
     object_catalog_version: str | None = None
     artifact_handle_sha256: str | None = None
+    endpoint_id: str | None = None
+    source_node_id: str | None = None
+    source_location: str | None = None
+    destination_execution_node_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -147,6 +151,10 @@ class BackendAccessResult:
     content_sha256: str | None = None
     data_agent_access_id: str | None = None
     object_catalog_version: str | None = None
+    endpoint_id: str | None = None
+    source_node_id: str | None = None
+    source_location: str | None = None
+    destination_execution_node_id: str | None = None
 
 
 class RepresentationBackend(Protocol):
@@ -315,6 +323,10 @@ class SQLiteSessionStore:
                 "object_catalog_version": "TEXT",
                 "artifact_handle": "TEXT",
                 "artifact_handle_sha256": "TEXT",
+                "endpoint_id": "TEXT",
+                "source_node_id": "TEXT",
+                "source_location": "TEXT",
+                "destination_execution_node_id": "TEXT",
             }
             for name, declaration in migrations.items():
                 if name not in event_columns:
@@ -471,10 +483,13 @@ class SQLiteSessionStore:
                     artifact_download_request_count,
                     artifact_full_download_count, object_catalog_version,
                     artifact_handle_sha256,
+                    endpoint_id, source_node_id, source_location,
+                    destination_execution_node_id,
                     created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?
                 )
                 """,
                 (
@@ -500,6 +515,10 @@ class SQLiteSessionStore:
                     event.artifact_full_download_count,
                     event.object_catalog_version,
                     event.artifact_handle_sha256,
+                    event.endpoint_id,
+                    event.source_node_id,
+                    event.source_location,
+                    event.destination_execution_node_id,
                     event.created_at,
                 ),
             )
@@ -599,6 +618,12 @@ class SQLiteSessionStore:
             ],
             object_catalog_version=row["object_catalog_version"],
             artifact_handle_sha256=row["artifact_handle_sha256"],
+            endpoint_id=row["endpoint_id"],
+            source_node_id=row["source_node_id"],
+            source_location=row["source_location"],
+            destination_execution_node_id=row[
+                "destination_execution_node_id"
+            ],
         )
 
     def update_artifact_telemetry(
@@ -849,6 +874,12 @@ class AccessGateway:
                         if artifact_handle is not None
                         else None
                     ),
+                    endpoint_id=result.endpoint_id,
+                    source_node_id=result.source_node_id,
+                    source_location=result.source_location,
+                    destination_execution_node_id=(
+                        result.destination_execution_node_id
+                    ),
                 )
             )
             updated_state = self.list_offers(session_id)
@@ -865,6 +896,14 @@ class AccessGateway:
                 "felt_latency_ms": result.felt_latency_ms,
                 "content": result.content,
             }
+            if result.endpoint_id is not None:
+                # The Agent sees which node served it, never how to reach it.
+                response["endpoint_id"] = result.endpoint_id
+                response["source_node_id"] = result.source_node_id
+                response["source_location"] = result.source_location
+                response["destination_execution_node_id"] = (
+                    result.destination_execution_node_id
+                )
             if result.payload is not None:
                 response["payload"] = dict(result.payload)
             if artifact_handle is not None:
@@ -942,6 +981,8 @@ class AccessGateway:
             "size_bytes": artifact.size_bytes,
             "sha256": artifact.sha256,
             "content": artifact.content,
+            "endpoint_id": event.endpoint_id,
+            "source_node_id": event.source_node_id,
         }
 
     def _reject(
@@ -1047,7 +1088,17 @@ class AccessGateway:
         for event in self.store.list_events(session_id):
             if event.event_id is None or event.data_agent_access_id is None:
                 continue
-            telemetry = getter(event.data_agent_access_id)
+            # An endpoint-aware backend is asked the issuing endpoint
+            # directly. Polling every endpoint would work only until two of
+            # them minted the same access id, at which point the first
+            # answer would silently belong to the wrong node.
+            if getattr(self.backend, "endpoint_aware_telemetry", False):
+                telemetry = getter(
+                    event.data_agent_access_id,
+                    endpoint_id=event.endpoint_id,
+                )
+            else:
+                telemetry = getter(event.data_agent_access_id)
             # Checked here as well as in the client, because the gateway is
             # the component that actually writes the research observation and
             # must not depend on some other backend having enforced this.

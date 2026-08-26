@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Iterable
 from hashlib import sha256
 from urllib.parse import urlsplit
 
@@ -19,14 +20,21 @@ def redact_secrets(
     message: str,
     *,
     limit: int = MAXIMUM_REDACTED_LENGTH,
+    extra_environment_names: Iterable[str] = (),
 ) -> str:
     """Strip credentials and signed-URL query strings out of free text.
 
     Third-party exceptions and control-plane error strings must not turn a
     research log, a manifest, or terminal output into a credential sink.
+
+    ``extra_environment_names`` carries secret-bearing variable names that
+    are not known at import time. A multi-endpoint deployment names its own
+    per-endpoint token variables, and those values must be redacted just as
+    thoroughly as the built-in ones.
     """
     result = str(message)
-    for name in _SECRET_ENVIRONMENT_NAMES:
+    names = (*_SECRET_ENVIRONMENT_NAMES, *extra_environment_names)
+    for name in names:
         value = os.getenv(name)
         if value:
             result = result.replace(value, "<redacted>")

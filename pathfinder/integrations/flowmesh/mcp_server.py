@@ -27,6 +27,7 @@ def build_mcp_server(
     data_agent_timeout_seconds: float = 30.0,
     data_agent_max_retries: int = 1,
     telemetry_quiescence_timeout_seconds: float = 15.0,
+    endpoint_registry: str | Path | None = None,
 ) -> Any:
     try:
         from mcp.server.fastmcp import FastMCP
@@ -35,6 +36,27 @@ def build_mcp_server(
             "MCP dependencies are not installed. "
             "Install with `python -m pip install -e .[flowmesh]`."
         ) from exc
+
+    if endpoint_registry is not None:
+        # Multi-endpoint mode: the MCP Gateway performs every Data Agent
+        # access and artifact download, so it is the process that must hold
+        # the routing table. The worker only calls MCP.
+        from ...distributed.routing import build_routed_gateway_backend
+
+        backend, _registry = build_routed_gateway_backend(
+            endpoint_registry,
+            telemetry_quiescence_timeout_seconds=(
+                telemetry_quiescence_timeout_seconds
+            ),
+        )
+        return _build_server(
+            backend,
+            config_path=config_path,
+            state_db=state_db,
+            host=host,
+            port=port,
+            fast_mcp=FastMCP,
+        )
 
     resolved_data_agent_url = (
         data_agent_url or os.getenv("PATHFINDER_DATA_AGENT_URL")
@@ -53,12 +75,32 @@ def build_mcp_server(
             ),
         )
 
+    return _build_server(
+        backend,
+        config_path=config_path,
+        state_db=state_db,
+        host=host,
+        port=port,
+        fast_mcp=FastMCP,
+    )
+
+
+def _build_server(
+    backend: Any,
+    *,
+    config_path: str | Path,
+    state_db: str | Path,
+    host: str,
+    port: int,
+    fast_mcp: Any,
+) -> Any:
+    """Register the access tools over one Gateway, routed or not."""
     gateway = AccessGateway(
         load_config(config_path),
         SQLiteSessionStore(state_db),
         backend,
     )
-    server = FastMCP(
+    server = fast_mcp(
         "Pathfinder Access Gateway",
         host=host,
         port=port,
@@ -103,6 +145,7 @@ def run_mcp_server(
     data_agent_timeout_seconds: float = 30.0,
     data_agent_max_retries: int = 1,
     telemetry_quiescence_timeout_seconds: float = 15.0,
+    endpoint_registry: str | Path | None = None,
 ) -> None:
     server = build_mcp_server(
         config_path=config_path,
@@ -115,5 +158,6 @@ def run_mcp_server(
         telemetry_quiescence_timeout_seconds=(
             telemetry_quiescence_timeout_seconds
         ),
+        endpoint_registry=endpoint_registry,
     )
     server.run(transport="streamable-http")

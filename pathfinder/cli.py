@@ -501,6 +501,98 @@ def _parser() -> argparse.ArgumentParser:
     )
     awm_calibration.add_argument("--compact", action="store_true")
 
+    pilot_preflight = subcommands.add_parser(
+        "preflight-distributed-pilot",
+        help=(
+            "read-only verification of a distributed pilot deployment; "
+            "submits nothing and starts nothing"
+        ),
+    )
+    pilot_preflight.add_argument(
+        "--preregistration",
+        type=Path,
+        required=True,
+    )
+    pilot_preflight.add_argument(
+        "--endpoint-registry",
+        type=Path,
+        required=True,
+    )
+    pilot_preflight.add_argument(
+        "--worker-alias",
+        help="worker alias to check syntactically (no Root query)",
+    )
+    pilot_preflight.add_argument("--worker-id")
+    pilot_preflight.add_argument(
+        "--mode",
+        choices=("offline_validation", "live_pilot"),
+        default="offline_validation",
+        help=(
+            "live_pilot fails rather than warns on any remaining "
+            "placeholder identity, provenance, or conversion rate"
+        ),
+    )
+    pilot_preflight.add_argument(
+        "--measurement-manifest",
+        type=Path,
+        help="bind an operator measurement manifest to this preflight",
+    )
+    pilot_preflight.add_argument("--compact", action="store_true")
+
+    pilot_plan = subcommands.add_parser(
+        "plan-distributed-pilot",
+        help=(
+            "build and print the deterministic distributed-pilot trial "
+            "plan without executing any trial"
+        ),
+    )
+    pilot_plan.add_argument("--preregistration", type=Path, required=True)
+    pilot_plan.add_argument(
+        "--output-dir",
+        type=Path,
+        help="write the frozen plan document here",
+    )
+    pilot_plan.add_argument("--compact", action="store_true")
+
+    run_pilot = subcommands.add_parser(
+        "run-distributed-pilot",
+        help=(
+            "execute the frozen distributed plan through the real FlowMesh "
+            "adapter; starts no worker, Data Agent, or MCP service"
+        ),
+    )
+    run_pilot.add_argument("--preregistration", type=Path, required=True)
+    run_pilot.add_argument("--endpoint-registry", type=Path, required=True)
+    run_pilot.add_argument("--measurement-manifest", type=Path, required=True)
+    run_pilot.add_argument("--workload-manifest", type=Path, required=True)
+    run_pilot.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    run_pilot.add_argument("--state-db", type=Path, required=True)
+    run_pilot.add_argument("--output-dir", type=Path, required=True)
+    run_pilot.add_argument("--worker-id")
+    run_pilot.add_argument("--worker-alias")
+    run_pilot.add_argument("--flowmesh-base-url")
+    run_pilot.add_argument("--agent-config")
+    run_pilot.add_argument("--task-timeout", type=float)
+    run_pilot.add_argument("--poll-interval", type=float)
+    run_pilot.add_argument(
+        "--validate-workflow",
+        action="store_true",
+        default=None,
+    )
+    run_pilot.add_argument(
+        "--telemetry-quiescence-timeout",
+        type=float,
+        default=15.0,
+    )
+    run_pilot.add_argument("--max-attempts", type=int, default=3)
+    run_pilot.add_argument(
+        "--mode",
+        choices=("offline_validation", "live_pilot"),
+        default="live_pilot",
+        help="preflight strictness required before execution",
+    )
+    run_pilot.add_argument("--compact", action="store_true")
+
     oed_certificate = subcommands.add_parser(
         "run-oed-certificate-replay",
         help=(
@@ -630,6 +722,14 @@ def _parser() -> argparse.ArgumentParser:
         "--telemetry-quiescence-timeout",
         type=float,
         default=15.0,
+    )
+    gateway.add_argument(
+        "--endpoint-registry",
+        type=Path,
+        help=(
+            "route Data Agent access across the endpoints declared in this "
+            "registry instead of a single --data-agent-url"
+        ),
     )
 
     data_agent = subcommands.add_parser(
@@ -859,6 +959,169 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=args.output_dir,
             )
             return _print_payload(payload, compact=args.compact)
+        if args.command == "run-distributed-pilot":
+            from .distributed import (
+                FlowMeshDistributedSessionExecutor,
+                HttpDataAgentHealthProbe,
+                load_distributed_pilot_preregistration,
+                load_endpoint_registry,
+                load_measurement_manifest,
+                preflight_distributed_pilot,
+                run_distributed_pilot,
+            )
+            from .distributed.routing import (
+                build_routed_gateway_backend,
+                close_routed_backend,
+            )
+            from .integrations.flowmesh import (
+                AccessGateway,
+                FlowMeshAgentAdapter,
+                FlowMeshSettings,
+                SdkFlowMeshClient,
+                SQLiteSessionStore,
+            )
+
+            preregistration = load_distributed_pilot_preregistration(
+                args.preregistration
+            )
+            registry = load_endpoint_registry(args.endpoint_registry)
+            provider = load_measurement_manifest(args.measurement_manifest)
+            workloads = json.loads(
+                Path(args.workload_manifest).read_text(encoding="utf-8")
+            )
+            if not isinstance(workloads, dict):
+                raise ConfigError(
+                    "the workload manifest must map workload_id -> workload"
+                )
+            config = load_config(args.config)
+
+            backend, _ = build_routed_gateway_backend(
+                args.endpoint_registry,
+                telemetry_quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout
+                ),
+            )
+            probe = HttpDataAgentHealthProbe(registry)
+            try:
+                report = preflight_distributed_pilot(
+                    preregistration,
+                    registry,
+                    probe=probe,
+                    worker_pin=(
+                        {"kind": "worker_id", "value": args.worker_id}
+                        if args.worker_id
+                        else (
+                            {
+                                "kind": "worker_alias",
+                                "value": args.worker_alias,
+                            }
+                            if args.worker_alias
+                            else None
+                        )
+                    ),
+                    mode=args.mode,
+                    measurement_manifest_sha256=provider.manifest_sha256,
+                )
+                if report["status"] != "ok":
+                    return _print_payload(
+                        {
+                            "status": "error",
+                            "message": (
+                                "preflight failed; refusing to execute"
+                            ),
+                            "failed_checks": report["failed_checks"],
+                        },
+                        compact=args.compact,
+                    ) or 1
+                settings = FlowMeshSettings.from_environment(
+                    base_url=args.flowmesh_base_url,
+                    agent_config_name=args.agent_config,
+                    task_timeout_seconds=args.task_timeout,
+                    poll_interval_seconds=args.poll_interval,
+                    worker_id=args.worker_id,
+                    worker_alias=args.worker_alias,
+                    validate_before_submit=(
+                        True if args.validate_workflow else None
+                    ),
+                )
+                gateway = AccessGateway(
+                    config,
+                    SQLiteSessionStore(args.state_db),
+                    backend,
+                )
+                client = SdkFlowMeshClient(settings)
+                try:
+                    executor = FlowMeshDistributedSessionExecutor(
+                        FlowMeshAgentAdapter(client, gateway, settings)
+                    )
+                    payload = run_distributed_pilot(
+                        preregistration,
+                        registry,
+                        executor,
+                        output_dir=args.output_dir,
+                        workloads=workloads,
+                        provider=provider,
+                        preflight=report,
+                        max_attempts=args.max_attempts,
+                    )
+                finally:
+                    client.close()
+            finally:
+                close_routed_backend(backend)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "preflight-distributed-pilot":
+            from .distributed import (
+                load_distributed_pilot_preregistration,
+                load_endpoint_registry,
+                preflight_distributed_pilot,
+            )
+
+            pin = None
+            if args.worker_id:
+                pin = {"kind": "worker_id", "value": args.worker_id}
+            elif args.worker_alias:
+                pin = {"kind": "worker_alias", "value": args.worker_alias}
+            manifest_sha256 = None
+            if args.measurement_manifest is not None:
+                from .distributed import load_measurement_manifest
+
+                manifest_sha256 = load_measurement_manifest(
+                    args.measurement_manifest
+                ).manifest_sha256
+            payload = preflight_distributed_pilot(
+                load_distributed_pilot_preregistration(args.preregistration),
+                load_endpoint_registry(args.endpoint_registry),
+                worker_pin=pin,
+                mode=args.mode,
+                measurement_manifest_sha256=manifest_sha256,
+            )
+            _print_payload(payload, compact=args.compact)
+            return 0 if payload["status"] == "ok" else 1
+        if args.command == "plan-distributed-pilot":
+            from .distributed import (
+                build_distributed_trial_plan,
+                ensure_frozen_plan,
+                load_distributed_pilot_preregistration,
+                trial_plan_payload,
+            )
+
+            preregistration = load_distributed_pilot_preregistration(
+                args.preregistration
+            )
+            trials = build_distributed_trial_plan(preregistration)
+            plan = trial_plan_payload(preregistration, trials)
+            if args.output_dir is not None:
+                ensure_frozen_plan(
+                    Path(args.output_dir) / "distributed_pilot_plan.json",
+                    plan,
+                )
+            summary = {
+                key: value
+                for key, value in plan.items()
+                if key != "trials"
+            }
+            summary["preregistration"] = preregistration.to_public_dict()
+            return _print_payload(summary, compact=args.compact)
         if args.command == "run-oed-certificate-replay":
             from .oed import run_oed_certificate_replay
 
@@ -1226,6 +1489,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 telemetry_quiescence_timeout_seconds=(
                     args.telemetry_quiescence_timeout
                 ),
+                endpoint_registry=args.endpoint_registry,
             )
             return 0
     except (ConfigError, OSError, RuntimeError, ValueError) as exc:

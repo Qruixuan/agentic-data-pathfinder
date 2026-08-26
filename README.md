@@ -24,6 +24,24 @@ The staged experiment and acceptance criteria for moving from the completed
 FlowMesh smoke tests to full Performative Physical Design validation are in
 [PPD_VALIDATION_PROTOCOL.md](PPD_VALIDATION_PROTOCOL.md).
 
+The minimum infrastructure for a *distributed* pilot, in which origin and
+local representations live on different Data Agent nodes, is in
+`pathfinder/distributed/` and documented in
+[DISTRIBUTED_PILOT_PLAN.md](DISTRIBUTED_PILOT_PLAN.md). It adds a versioned
+pilot preregistration contract, a five-component total-cost ledger
+(`total_cost = service + network + storage + amortized_materialization +
+transition`), a multi-endpoint registry that routes each access to exactly one
+declared Data Agent without ever falling back, deterministic stratum-specific
+trial planning with audit-safe resume, and a read-only preflight. No component
+starts a worker, a Data Agent, or an MCP service, and none submits a workflow.
+Conversion rates are required external configuration; the committed example
+ships transparent placeholders. The AWM v3alpha5 certificate can select
+`cost_basis: "total_cost"` for the new pilot, which changes the measured
+scalar but not its statistical decision rule, and fails closed on
+service-cost-only data. That run will be an engineering pilot: its candidate
+restriction is post-hoc, its thresholds are engineering values, and its
+loader refuses to declare confirmatory status or scientific eligibility.
+
 The first preregistered four-design controlled testbed run is defined in
 [MULTI_CANDIDATE_FORMAL_V1_PREREGISTRATION.md](MULTI_CANDIDATE_FORMAL_V1_PREREGISTRATION.md).
 It contains 128 real FlowMesh sessions, paired AWM train/holdout partitions,
