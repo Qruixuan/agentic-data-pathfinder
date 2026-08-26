@@ -204,6 +204,10 @@ The coupling layer includes:
 - workflow validation that does not submit or execute a task;
 - a frozen, block-randomized real-FlowMesh pilot runner with durable per-trial
   records, fail-closed telemetry classification, and resume support;
+- an audited Reduced Oracle recovery path that snapshots an incident as
+  immutable evidence, retries only missing or infrastructure-failed trials
+  under new session identities, opens a circuit after repeated infrastructure
+  failures, and emits a separately fingerprinted canonical Oracle;
 - a read-only pilot analyzer that reclassifies missing artifact downloads and
   regenerates workload-stratified and paired-contrast summaries;
 - versioned feasibility-control and cost-aware quote-response pilot

@@ -294,6 +294,89 @@ def _parser() -> argparse.ArgumentParser:
     )
     reduced_oracle.add_argument("--compact", action="store_true")
 
+    oracle_recovery_plan = subcommands.add_parser(
+        "plan-reduced-oracle-recovery",
+        help=(
+            "audit an interrupted Oracle as immutable evidence and freeze "
+            "the exact missing/infrastructure-failure retry set"
+        ),
+    )
+    oracle_recovery_plan.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    oracle_recovery_plan.add_argument(
+        "--incident-dir",
+        type=Path,
+        required=True,
+    )
+    oracle_recovery_plan.add_argument(
+        "--recovery-dir",
+        type=Path,
+        required=True,
+    )
+    oracle_recovery_plan.add_argument("--compact", action="store_true")
+
+    oracle_recovery = subcommands.add_parser(
+        "run-reduced-oracle-recovery",
+        help=(
+            "retry only an audited Oracle's missing and infrastructure-failed "
+            "trials using new session identities"
+        ),
+    )
+    oracle_recovery.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    oracle_recovery.add_argument(
+        "--incident-dir",
+        type=Path,
+        required=True,
+    )
+    oracle_recovery.add_argument(
+        "--recovery-dir",
+        type=Path,
+        required=True,
+    )
+    oracle_recovery.add_argument("--state-db", type=Path, required=True)
+    oracle_recovery.add_argument("--flowmesh-base-url")
+    oracle_recovery.add_argument("--agent-config")
+    oracle_recovery.add_argument("--task-timeout", type=int, default=600)
+    oracle_recovery.add_argument("--poll-interval", type=float, default=2.0)
+    recovery_pin = oracle_recovery.add_mutually_exclusive_group()
+    recovery_pin.add_argument("--worker-id")
+    recovery_pin.add_argument("--worker-alias")
+    oracle_recovery.add_argument("--validate-workflow", action="store_true")
+    oracle_recovery.add_argument("--data-agent-url")
+    oracle_recovery.add_argument(
+        "--data-agent-timeout",
+        type=float,
+        default=30.0,
+    )
+    oracle_recovery.add_argument(
+        "--data-agent-max-retries",
+        type=int,
+        default=1,
+    )
+    oracle_recovery.add_argument(
+        "--telemetry-quiescence-timeout",
+        type=float,
+        default=15.0,
+    )
+    oracle_recovery.add_argument(
+        "--max-consecutive-infrastructure-failures",
+        type=int,
+        default=3,
+    )
+    oracle_recovery.add_argument(
+        "--max-attempts-per-trial",
+        type=int,
+        default=3,
+    )
+    oracle_recovery.add_argument("--compact", action="store_true")
+
     oracle_analysis = subcommands.add_parser(
         "analyze-reduced-oracle",
         help="recompute a reduced-oracle table and lock-in trace",
@@ -662,6 +745,119 @@ def main(argv: Sequence[str] | None = None) -> int:
                 oracle_output_dir=args.oracle_output_dir,
                 output_dir=args.output_dir,
             )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-reduced-oracle-recovery":
+            from .integrations.flowmesh.pilot import (
+                load_flowmesh_pilot_config,
+            )
+            from .reduced_oracle import (
+                load_reduced_oracle_config,
+                plan_reduced_oracle_recovery,
+            )
+
+            oracle_config = load_reduced_oracle_config(args.oracle_config)
+            workload_pilot = load_flowmesh_pilot_config(
+                oracle_config.workload_pilot_config_path
+            )
+            config = load_config(workload_pilot.system_config_path)
+            payload = plan_reduced_oracle_recovery(
+                config=oracle_config,
+                system=config,
+                incident_dir=args.incident_dir,
+                recovery_dir=args.recovery_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-reduced-oracle-recovery":
+            from .data_agent_client import (
+                DataAgentClientSettings,
+                HttpDataAgentClient,
+            )
+            from .integrations.flowmesh import (
+                AccessGateway,
+                FlowMeshAgentAdapter,
+                FlowMeshSettings,
+                RemoteDataAgentBackend,
+                SdkFlowMeshClient,
+                SQLiteSessionStore,
+            )
+            from .integrations.flowmesh.pilot import (
+                load_flowmesh_pilot_config,
+            )
+            from .reduced_oracle import (
+                load_reduced_oracle_config,
+                run_reduced_oracle_recovery,
+            )
+
+            oracle_config = load_reduced_oracle_config(args.oracle_config)
+            workload_pilot = load_flowmesh_pilot_config(
+                oracle_config.workload_pilot_config_path
+            )
+            config = load_config(workload_pilot.system_config_path)
+            resolved_data_agent_url = (
+                args.data_agent_url
+                or os.getenv("PATHFINDER_DATA_AGENT_URL")
+            )
+            if not resolved_data_agent_url:
+                raise ConfigError(
+                    "run-reduced-oracle-recovery requires "
+                    "--data-agent-url or PATHFINDER_DATA_AGENT_URL"
+                )
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                agent_config_name=args.agent_config,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_id=args.worker_id,
+                worker_alias=args.worker_alias,
+                validate_before_submit=(
+                    True if args.validate_workflow else None
+                ),
+            )
+            backend = RemoteDataAgentBackend(
+                HttpDataAgentClient(
+                    DataAgentClientSettings.from_environment(
+                        base_url=resolved_data_agent_url,
+                        timeout_seconds=args.data_agent_timeout,
+                        max_retries=args.data_agent_max_retries,
+                    )
+                ),
+                telemetry_quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout
+                ),
+            )
+            gateway = AccessGateway(
+                config,
+                SQLiteSessionStore(args.state_db),
+                backend,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_reduced_oracle_recovery(
+                    config=oracle_config,
+                    system=config,
+                    adapter=FlowMeshAgentAdapter(
+                        client,
+                        gateway,
+                        settings,
+                    ),
+                    incident_dir=args.incident_dir,
+                    recovery_dir=args.recovery_dir,
+                    max_consecutive_infrastructure_failures=(
+                        args.max_consecutive_infrastructure_failures
+                    ),
+                    max_attempts_per_trial=args.max_attempts_per_trial,
+                    progress_callback=lambda event: print(
+                        json.dumps(
+                            {"status": "recovery_attempt_recorded", **event},
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        file=sys.stderr,
+                        flush=True,
+                    ),
+                )
+            finally:
+                client.close()
             return _print_payload(payload, compact=args.compact)
         if args.command == "run-reduced-oracle":
             from .data_agent_client import (

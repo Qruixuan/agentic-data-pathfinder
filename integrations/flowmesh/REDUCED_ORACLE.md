@@ -126,9 +126,84 @@ PYTHONPATH=. python -m pathfinder run-reduced-oracle \
   2>&1 | tee "$PF_ORACLE_ROOT/logs/reduced-oracle-v1.console.log"
 ```
 
-The command is resumable. Run the same command with the same output directory
-after an interruption. It restores the safe design before continuing and does
-not resubmit a completed design batch.
+The normal command is resumable only for trials that have no durable record.
+It deliberately treats every recorded outcome, including an infrastructure
+failure, as final. It must therefore **not** be pointed back at an incident
+directory when failed records already exist: doing so would skip those trials
+and could produce a superficially complete but scientifically incomplete run.
+
+## Audited Incident Recovery
+
+`plan-reduced-oracle-recovery` and `run-reduced-oracle-recovery` provide the
+fail-closed path for an interrupted Oracle that contains missing trials or
+durable `infrastructure_failure` records. The mechanism has five invariants:
+
+1. the incident directory and recovery directory must be separate and
+   non-nested;
+2. every incident evidence file is SHA-256 snapshotted, and any later added,
+   removed, or changed file blocks recovery before submission;
+3. only missing trials and `infrastructure_failure` records are retried;
+   telemetry, artifact-delivery, malformed, or non-evaluable completed records
+   require human review instead of automatic rerun;
+4. every retry gets a deterministic new session and trial identity, while the
+   original planned identity and record fingerprint remain in the attempt
+   ledger; and
+5. three consecutive infrastructure failures open the circuit by default,
+   restore the safe design, and stop further workflow submission.
+
+First create the read-only recovery plan. This command does not call FlowMesh
+or mutate the physical design:
+
+```bash
+export PF_INCIDENT_OUT="$HOME/pathfinder-multi-candidate-formal-v2/oracle-v1"
+export PF_RECOVERY_ROOT="$HOME/pathfinder-multi-candidate-formal-v2-recovery-v1"
+
+PYTHONPATH=. python -m pathfinder plan-reduced-oracle-recovery \
+  --oracle-config configs/multi_candidate_formal_v2_oracle.json \
+  --incident-dir "$PF_INCIDENT_OUT" \
+  --recovery-dir "$PF_RECOVERY_ROOT"
+```
+
+Review `recovery_plan.json`, especially `incident_snapshot_sha256`,
+`disposition_counts`, and `recoverable_trial_count`. Then, with the manually
+managed worker, Data Agent, and MCP Gateway already healthy, execute only that
+frozen retry set against a separate Gateway state database:
+
+```bash
+: "${PF_CONFIRM_WORKER_ALIAS:?set the dedicated worker alias}"
+
+set -a
+. "$HOME/.config/pathfinder/flowmesh-client.env"
+. "$HOME/.config/pathfinder/data-agent.env"
+set +a
+unset PATHFINDER_DATA_AGENT_ARTIFACT_SECRET
+
+PYTHONPATH=. python -m pathfinder run-reduced-oracle-recovery \
+  --oracle-config configs/multi_candidate_formal_v2_oracle.json \
+  --incident-dir "$PF_INCIDENT_OUT" \
+  --recovery-dir "$PF_RECOVERY_ROOT" \
+  --state-db "$PF_RECOVERY_ROOT/runtime/gateway.sqlite3" \
+  --worker-alias "$PF_CONFIRM_WORKER_ALIAS" \
+  --flowmesh-base-url "$FLOWMESH_BASE_URL" \
+  --agent-config pathfinder_video_cost_aware \
+  --data-agent-url http://127.0.0.1:8780 \
+  --telemetry-quiescence-timeout 15 \
+  --max-consecutive-infrastructure-failures 3 \
+  --max-attempts-per-trial 3 \
+  --validate-workflow
+```
+
+Attempts are append-only and SHA-256 hash-chained to the incident snapshot in
+`attempts.jsonl`; an edited or reordered attempt blocks resumption. Re-running
+the same command after an operator fixes an outage resumes only unresolved
+recovery items; it does not repeat a valid recovery attempt. Once every frozen
+trial has exactly one valid source result, the command creates
+`canonical-oracle/`. That directory combines
+untouched successful incident records with successful recovery attempts,
+contains exactly one complete record per frozen trial, restores the safe
+design, and records per-record provenance plus core-file fingerprints in
+`canonical_provenance.json`. AWM and OED should consume this canonical
+directory, never the raw incident or the attempt ledger.
 
 Recompute the analysis without submitting work:
 
