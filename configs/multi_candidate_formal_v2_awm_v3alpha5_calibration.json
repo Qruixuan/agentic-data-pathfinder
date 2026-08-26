@@ -1,0 +1,186 @@
+{
+  "schema_version": "pathfinder.awm-certificate-calibration/v1alpha1",
+  "calibration_id": "awm-v3alpha5-certificate-monte-carlo-v1",
+  "seed": 90210,
+  "simulations": 2000,
+  "repetitions": 4,
+  "alpha": 0.05,
+  "minimum_independent_workloads": 1,
+  "thresholds": {
+    "delta_success_margin": 0.05,
+    "minimum_cost_saving": 0.2
+  },
+  "supports": {
+    "success_difference": {
+      "lower": -1.0,
+      "upper": 1.0
+    },
+    "cost_saving": {
+      "lower": -1.0,
+      "upper": 1.0
+    }
+  },
+  "generator": {
+    "origin_success_probabilities": [
+      0.2,
+      0.4,
+      0.6
+    ],
+    "origin_costs": [
+      1.0,
+      1.2
+    ],
+    "task_value": 10.0,
+    "resource_cost_weight": 1.0
+  },
+  "tolerances": {
+    "monte_carlo_confidence": 0.99,
+    "false_safe_rate_tolerance": 0.01,
+    "coverage_tolerance": 0.01,
+    "control_minimum_false_safe_rate": 0.05
+  },
+  "scenarios": [
+    {
+      "scenario_id": "success_at_non_inferiority_boundary",
+      "description": "True mean success difference sits exactly on -delta_success_margin. Non-inferiority holds weakly, so SAFE_TO_COMMIT is not an error but is unreachable, and UNSAFE would be a false-harm decision.",
+      "strata": [
+        {
+          "stratum_id": "boundary",
+          "workload_count": 40,
+          "true_success_difference": -0.05,
+          "success_heterogeneity": 0.1,
+          "true_cost_saving": 0.6,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        }
+      ]
+    },
+    {
+      "scenario_id": "success_just_beyond_harmful_boundary",
+      "description": "True mean success difference is 0.02 below the margin, so any SAFE_TO_COMMIT is a false-safe commit. This is the primary family-wise error stress case.",
+      "strata": [
+        {
+          "stratum_id": "marginally_harmful",
+          "workload_count": 40,
+          "true_success_difference": -0.07,
+          "success_heterogeneity": 0.1,
+          "true_cost_saving": 0.6,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        }
+      ]
+    },
+    {
+      "scenario_id": "clearly_safe_effect",
+      "description": "Large true success gain and a large true cost saving with enough independent workloads for both gates to clear.",
+      "strata": [
+        {
+          "stratum_id": "clearly_safe",
+          "workload_count": 100,
+          "true_success_difference": 0.3,
+          "success_heterogeneity": 0.05,
+          "true_cost_saving": 0.6,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        }
+      ]
+    },
+    {
+      "scenario_id": "cost_at_minimum_saving_boundary",
+      "description": "True mean cost saving sits exactly on minimum_cost_saving while success is clearly safe.",
+      "strata": [
+        {
+          "stratum_id": "cost_boundary",
+          "workload_count": 60,
+          "true_success_difference": 0.3,
+          "success_heterogeneity": 0.05,
+          "true_cost_saving": 0.2,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        }
+      ]
+    },
+    {
+      "scenario_id": "cost_just_below_minimum_saving",
+      "description": "True mean cost saving is 0.01 below minimum_cost_saving, so any SAFE_TO_COMMIT is a false-safe commit driven by the cost gate rather than the success gate.",
+      "strata": [
+        {
+          "stratum_id": "cost_marginal",
+          "workload_count": 100,
+          "true_success_difference": 0.3,
+          "success_heterogeneity": 0.05,
+          "true_cost_saving": 0.19,
+          "cost_heterogeneity": 0.05,
+          "cost_repetition_jitter": 0.05
+        }
+      ]
+    },
+    {
+      "scenario_id": "cost_clearly_below_minimum_saving",
+      "description": "True mean cost saving is far below minimum_cost_saving with enough independent workloads for the cost gate to establish the violation and return UNSAFE.",
+      "strata": [
+        {
+          "stratum_id": "cost_harmful",
+          "workload_count": 150,
+          "true_success_difference": 0.3,
+          "success_heterogeneity": 0.05,
+          "true_cost_saving": -0.1,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        }
+      ]
+    },
+    {
+      "scenario_id": "success_clearly_harmful",
+      "description": "True mean success difference is far below -delta_success_margin with enough independent workloads for the success gate to establish the violation and return UNSAFE.",
+      "strata": [
+        {
+          "stratum_id": "clearly_harmful",
+          "workload_count": 60,
+          "true_success_difference": -0.5,
+          "success_heterogeneity": 0.1,
+          "true_cost_saving": 0.6,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05,
+          "origin_success_probabilities": [
+            0.7,
+            0.9
+          ]
+        }
+      ]
+    },
+    {
+      "scenario_id": "complete_multi_stratum_family",
+      "description": "Three strata certified simultaneously under one Bonferroni family of twelve one-sided bounds: one clearly safe, one exactly on the success boundary, one marginally harmful.",
+      "strata": [
+        {
+          "stratum_id": "safe_like_causal",
+          "workload_count": 100,
+          "true_success_difference": 0.3,
+          "success_heterogeneity": 0.05,
+          "true_cost_saving": 0.6,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        },
+        {
+          "stratum_id": "boundary_like_descriptive",
+          "workload_count": 60,
+          "true_success_difference": -0.05,
+          "success_heterogeneity": 0.1,
+          "true_cost_saving": 0.6,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        },
+        {
+          "stratum_id": "harmful_like_temporal",
+          "workload_count": 60,
+          "true_success_difference": -0.07,
+          "success_heterogeneity": 0.1,
+          "true_cost_saving": 0.6,
+          "cost_heterogeneity": 0.1,
+          "cost_repetition_jitter": 0.05
+        }
+      ]
+    }
+  ]
+}

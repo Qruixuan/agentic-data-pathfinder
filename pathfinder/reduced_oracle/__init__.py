@@ -21,9 +21,18 @@ from .recovery import (
     run_reduced_oracle_recovery,
 )
 from .runner import run_reduced_oracle
+from .snapshot import (
+    ORACLE_SNAPSHOT_ALGORITHM,
+    OracleSnapshot,
+    OracleSnapshotError,
+    reduced_oracle_snapshot,
+)
 from .transition import FilesystemTransitionExecutor, TransitionObservation
 
 __all__ = [
+    "ORACLE_SNAPSHOT_ALGORITHM",
+    "OracleSnapshot",
+    "OracleSnapshotError",
     "REDUCED_ORACLE_SCHEMA_VERSION",
     "FilesystemTransitionExecutor",
     "MaterializationSpec",
@@ -38,6 +47,7 @@ __all__ = [
     "assert_not_synthetic_fixture",
     "load_reduced_oracle_config",
     "plan_reduced_oracle_recovery",
+    "reduced_oracle_snapshot",
     "run_reduced_oracle",
     "run_reduced_oracle_recovery",
     "synthetic_fixture_evidence",

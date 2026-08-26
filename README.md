@@ -65,6 +65,34 @@ bins; and certifies their cumulative probabilities with simultaneous
 Bernoulli-KL intervals. The support hash, effective bins, counts, and allocated
 alpha are emitted into both AWM and OED outputs. This remains post-hoc method
 development on the frozen Oracle, not new confirmatory evidence.
+AWM v3alpha5 adds a risk-constrained, workload-aware safety certificate. It
+compares a restricted, stratum-conditional candidate policy against
+`D_origin_remote` behind two separate one-sided gates — success
+non-inferiority and cost improvement — and commits only when both pass. The
+workload object is the independent cluster, the complete repetition block
+inside a workload is averaged first, and the bounds are one-sided
+binary-relative-entropy inversions over the declared finite support rather
+than a normal approximation. A declared Bonferroni family covers every tested
+stratum, gate, and tail, and both adjusted and unadjusted confidence levels
+are recorded. `delta_success_margin` and `minimum_cost_saving` are required
+configuration inputs that this repository does not choose. Every non-safe
+outcome falls back to the safe origin design.
+The certificate's estimand is declared, not assumed: with
+`estimand.target=finite-supplied-workload-set` the interval quantifies
+uncertainty about the mean effect over the supplied workload clusters under an
+unverified exchangeability assumption and is explicitly **not** a
+generalization claim about future workloads. A superpopulation target is
+refused unless a workload sampling mechanism and a preregistered selection
+rule are declared, which in turn requires confirmatory mode.
+The decision rule is calibrated empirically rather than only unit-tested. A
+fixed-seed Monte Carlo harness draws repeated synthetic workload-cluster
+datasets whose true stratum effects are known by construction — at the
+non-inferiority boundary, just beyond it, clearly safe, at and below the
+minimum-saving boundary, and across a complete multi-stratum family — and
+reports the family-wise false-safe rate, the simultaneous coverage rate, and
+every certificate-state frequency with Monte Carlo intervals. It runs a
+deliberately anti-conservative negative control alongside, so that a
+zero false-safe rate is an informative result rather than an untested claim.
 
 ## Current Scope
 
@@ -237,6 +265,37 @@ The first v3alpha5 development gate is a read-only workload-heterogeneity
 audit. It uses leave-one-workload-out policy selection, falls back to the safe
 origin when its diagnostic thresholds are not met, and is permanently marked
 post-hoc and ineligible for scientific claims.
+`certify-awm-restricted-policy` runs the v3alpha5 safety certificate over a
+frozen Reduced Oracle and writes `certificate_summary.csv`,
+`certificate_evaluation.json`, and `certificate_manifest.json`. It fails
+closed on incomplete telemetry, artifact-delivery failure, missing or
+duplicate response cells, and incomplete repetition blocks; it reports the
+independent workload count separately from the raw repetition-pair count; and
+it refuses configurations in which a selection workload also appears in the
+certified set. The committed candidate restriction — causal and descriptive to
+`D_local_frames`, temporal to `D_local_digest`, with `D_local_pair` excluded —
+was chosen **post-hoc** from the heterogeneity audit of this same Oracle and
+requires validation on new independent workloads. Post-hoc runs always emit
+`posthoc=true` and `eligible_for_scientific_claims=false`; the confirmatory
+mode is refused unless the thresholds, candidate restriction, and workload
+split are declared before evaluation outcomes are read and the Oracle snapshot
+has not already been inspected.
+`calibrate-awm-certificate` runs that Monte Carlo plan and writes
+`calibration_summary.csv`, `calibration_report.json`, and
+`calibration_manifest.json`, all flagged `synthetic=true`.
+`run-oed-certificate-replay` replays Commit/Reveal/Stop under the three-state
+certificate: `SAFE_TO_COMMIT` may commit subject to the value margin and the
+exploration budget, `UNSAFE` is never committed under any budget, and
+`INSUFFICIENT_EVIDENCE` may trigger a Reveal only when a further observation
+could still reduce decision-relevant uncertainty and is budget-feasible.
+A candidate's frozen Oracle records are opened only after its own Reveal
+action, so the simulation cannot condition on an outcome it has not paid for.
+All read-only tools over a Reduced Oracle share one snapshot digest
+implementation. Because they legitimately read different design subsets, the
+scope travels with every digest: the certificate reports both
+`oracle_analysed_snapshot_sha256` (its restricted design subset) and
+`oracle_full_snapshot_sha256`, and the latter is byte-identical to the
+heterogeneity audit's `oracle_snapshot_sha256`.
 The offline Commit/Reveal/Hold/Stop controller, equal-budget baselines, replay
 contract, and Gate B4 boundary are documented in
 [`integrations/flowmesh/OED.md`](integrations/flowmesh/OED.md).

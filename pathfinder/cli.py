@@ -443,6 +443,90 @@ def _parser() -> argparse.ArgumentParser:
     )
     awm_heterogeneity.add_argument("--compact", action="store_true")
 
+    awm_certificate = subcommands.add_parser(
+        "certify-awm-restricted-policy",
+        help=(
+            "run a read-only risk-constrained, workload-aware safety "
+            "certificate for a restricted candidate policy over a frozen "
+            "Reduced Oracle"
+        ),
+    )
+    awm_certificate.add_argument(
+        "--certificate-config",
+        type=Path,
+        required=True,
+    )
+    awm_certificate.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    awm_certificate.add_argument(
+        "--oracle-output-dir",
+        type=Path,
+        required=True,
+    )
+    awm_certificate.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+    )
+    awm_certificate.add_argument("--compact", action="store_true")
+
+    awm_calibration = subcommands.add_parser(
+        "calibrate-awm-certificate",
+        help=(
+            "run the fixed-seed Monte Carlo calibration of the v3alpha5 "
+            "safety certificate over synthetic datasets with known truths"
+        ),
+    )
+    awm_calibration.add_argument(
+        "--calibration-config",
+        type=Path,
+        required=True,
+    )
+    awm_calibration.add_argument("--output-dir", type=Path, required=True)
+    awm_calibration.add_argument(
+        "--simulations",
+        type=int,
+        help="override the configured simulation count",
+    )
+    awm_calibration.add_argument(
+        "--no-negative-control",
+        action="store_true",
+        help=(
+            "skip the deliberately anti-conservative control arm; the "
+            "control is what makes a zero false-safe rate informative"
+        ),
+    )
+    awm_calibration.add_argument("--compact", action="store_true")
+
+    oed_certificate = subcommands.add_parser(
+        "run-oed-certificate-replay",
+        help=(
+            "replay Commit/Reveal/Stop under v3alpha5 three-state safety "
+            "certificates against a frozen Reduced Oracle"
+        ),
+    )
+    oed_certificate.add_argument("--oed-config", type=Path, required=True)
+    oed_certificate.add_argument(
+        "--certificate-config",
+        type=Path,
+        required=True,
+    )
+    oed_certificate.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    oed_certificate.add_argument(
+        "--oracle-output-dir",
+        type=Path,
+        required=True,
+    )
+    oed_certificate.add_argument("--output-dir", type=Path, required=True)
+    oed_certificate.add_argument("--compact", action="store_true")
+
     oed_replay = subcommands.add_parser(
         "run-oed-replay",
         help=(
@@ -770,6 +854,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = run_oed_replay(
                 args.oed_config,
                 args.awm_config,
+                args.oracle_config,
+                oracle_output_dir=args.oracle_output_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-oed-certificate-replay":
+            from .oed import run_oed_certificate_replay
+
+            payload = run_oed_certificate_replay(
+                args.oed_config,
+                args.certificate_config,
+                args.oracle_config,
+                oracle_output_dir=args.oracle_output_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "calibrate-awm-certificate":
+            from .awm import calibrate_awm_certificate
+
+            payload = calibrate_awm_certificate(
+                args.calibration_config,
+                output_dir=args.output_dir,
+                include_negative_control=not args.no_negative_control,
+                simulations=args.simulations,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "certify-awm-restricted-policy":
+            from .awm import certify_awm_restricted_policy
+
+            payload = certify_awm_restricted_policy(
+                args.certificate_config,
                 args.oracle_config,
                 oracle_output_dir=args.oracle_output_dir,
                 output_dir=args.output_dir,

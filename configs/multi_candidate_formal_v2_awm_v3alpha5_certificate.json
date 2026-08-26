@@ -1,0 +1,109 @@
+{
+  "schema_version": "pathfinder.awm-safety-certificate/v1alpha1",
+  "certificate_id": "multi-candidate-formal-v2-awm-v3alpha5-certificate-posthoc",
+  "mode": "posthoc",
+  "posthoc": true,
+  "eligible_for_scientific_claims": false,
+  "safe_design_id": "D_origin_remote",
+  "design_ids": [
+    "D_origin_remote",
+    "D_local_frames",
+    "D_local_digest",
+    "D_local_pair"
+  ],
+  "excluded_design_ids": [
+    "D_local_pair"
+  ],
+  "candidate_restriction": {
+    "provenance": "posthoc-selected-on-inspected-oracle",
+    "note": "The stratum/candidate restriction (causal and descriptive to D_local_frames, temporal to D_local_digest, D_local_pair excluded) was selected POST-HOC from the workload heterogeneity audit of this same frozen Reduced Oracle. It is a hypothesis, not a validated policy, and requires confirmation on new independent workloads under a preregistered threshold and workload split."
+  },
+  "strata": {
+    "causal": {
+      "candidate_design_id": "D_local_frames",
+      "workload_ids": [
+        "causal-nextqa-val-4882821564-q1",
+        "causal-nextqa-val-4260763967-q4",
+        "causal-nextqa-val-9088819598-q1",
+        "causal-nextqa-val-8132842161-q2",
+        "causal-nextqa-val-3462517143-q2",
+        "causal-nextqa-val-5026660202-q8"
+      ]
+    },
+    "descriptive": {
+      "candidate_design_id": "D_local_frames",
+      "workload_ids": [
+        "descriptive-nextqa-val-8547321641-q7",
+        "descriptive-nextqa-val-4130504920-q4",
+        "descriptive-nextqa-val-4942054721-q7",
+        "descriptive-nextqa-val-5840177726-q3"
+      ]
+    },
+    "temporal": {
+      "candidate_design_id": "D_local_digest",
+      "workload_ids": [
+        "temporal-nextqa-val-2834146886-q8",
+        "temporal-nextqa-val-3441428429-q10",
+        "temporal-nextqa-val-2976913210-q6",
+        "temporal-nextqa-val-6356067859-q6",
+        "temporal-nextqa-val-5296635780-q7",
+        "temporal-nextqa-val-5735711594-q5"
+      ]
+    }
+  },
+  "workload_split": {
+    "selection_workload_ids": [],
+    "certificate_workload_ids": [
+      "causal-nextqa-val-4882821564-q1",
+      "causal-nextqa-val-4260763967-q4",
+      "causal-nextqa-val-9088819598-q1",
+      "causal-nextqa-val-8132842161-q2",
+      "causal-nextqa-val-3462517143-q2",
+      "causal-nextqa-val-5026660202-q8",
+      "descriptive-nextqa-val-8547321641-q7",
+      "descriptive-nextqa-val-4130504920-q4",
+      "descriptive-nextqa-val-4942054721-q7",
+      "descriptive-nextqa-val-5840177726-q3",
+      "temporal-nextqa-val-2834146886-q8",
+      "temporal-nextqa-val-3441428429-q10",
+      "temporal-nextqa-val-2976913210-q6",
+      "temporal-nextqa-val-6356067859-q6",
+      "temporal-nextqa-val-5296635780-q7",
+      "temporal-nextqa-val-5735711594-q5"
+    ]
+  },
+  "confidence": {
+    "alpha": 0.05,
+    "family_adjustment": "bonferroni",
+    "bound_method": "workload-cluster-one-sided-bounded-mean-kl",
+    "minimum_independent_workloads": 3
+  },
+  "thresholds": {
+    "delta_success_margin": 0.05,
+    "minimum_cost_saving": 0.0,
+    "provenance": "posthoc-engineering-placeholder",
+    "note": "These two values are engineering placeholders supplied so that the post-hoc diagnostic can run. They are NOT scientifically justified operating points and were not derived from any declared risk budget. A confirmatory run must replace them with preregistered values."
+  },
+  "supports": {
+    "success_difference": {
+      "lower": -1.0,
+      "upper": 1.0
+    },
+    "cost_saving": {
+      "lower": -2.0,
+      "upper": 2.0
+    }
+  },
+  "preregistration": {
+    "declared_before_evaluation_outcomes": false,
+    "declaration_id": "none-posthoc-diagnostic",
+    "declaration_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "inspected_oracle_snapshot_sha256": []
+  },
+  "estimand": {
+    "target": "finite-supplied-workload-set",
+    "workload_sampling_mechanism": "none-declared",
+    "workload_selection_rule": "none-declared",
+    "note": "The 16 workloads were selected for the formal v2 testbed by a fixed deterministic expansion of the NExT-QA validation split, not by a declared probability sample from a target workload population. This certificate therefore reports uncertainty about the mean effect over these supplied workload clusters only. It makes no generalization claim about future workloads, and a superpopulation target is refused in post-hoc mode."
+  }
+}

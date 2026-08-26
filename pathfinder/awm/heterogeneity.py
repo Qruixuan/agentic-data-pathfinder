@@ -21,6 +21,7 @@ from ..reduced_oracle.contracts import (
     ReducedOracleConfig,
     load_reduced_oracle_config,
 )
+from ..reduced_oracle.snapshot import reduced_oracle_snapshot
 from .contracts import AWMConfigError
 
 
@@ -358,31 +359,6 @@ def _load_response_matrix(
             f"missing={len(missing_cells)}, extra={len(extra_cells)}"
         )
     return matrix, pilot_workloads
-
-
-def _snapshot_sha256(
-    oracle_output_dir: Path,
-    design_ids: Iterable[str],
-) -> str:
-    paths = [oracle_output_dir / "oracle_table.csv"]
-    manifest = oracle_output_dir / "oracle_manifest.json"
-    if manifest.is_file():
-        paths.append(manifest)
-    paths.extend(
-        oracle_output_dir / "designs" / design_id / "runs.jsonl"
-        for design_id in design_ids
-    )
-    digest = sha256()
-    for path in sorted(paths, key=lambda value: value.as_posix()):
-        if not path.is_file():
-            raise AWMConfigError(
-                f"heterogeneity snapshot input does not exist: {path}"
-            )
-        relative = path.relative_to(oracle_output_dir).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(sha256(path.read_bytes()).digest())
-    return digest.hexdigest()
 
 
 def _mean_response(
@@ -848,7 +824,11 @@ def audit_awm_workload_heterogeneity(
         ],
     }
     _write_json(evaluation, evaluation_path)
-    snapshot_hash = _snapshot_sha256(source, config.design_ids)
+    snapshot = reduced_oracle_snapshot(
+        source,
+        config.design_ids,
+        scope="full-declared-design-set",
+    )
     manifest = {
         "schema_version": HETEROGENEITY_EVALUATION_SCHEMA_VERSION,
         "audit_id": config.audit_id,
@@ -862,7 +842,7 @@ def audit_awm_workload_heterogeneity(
         "oracle_config_path": str(oracle.source_path),
         "oracle_config_sha256": oracle.source_sha256,
         "oracle_output_dir": str(source),
-        "oracle_snapshot_sha256": snapshot_hash,
+        **snapshot.to_manifest_fields("oracle_snapshot"),
         "workload_effects_path": str(workload_effects_path),
         "stratum_summary_path": str(stratum_summary_path),
         "policy_assignments_path": str(policy_assignments_path),

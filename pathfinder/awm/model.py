@@ -469,6 +469,78 @@ def _bounded_kl_mean_interval(
     )
 
 
+def _one_sided_bounded_kl_mean_bound(
+    sample_mean: float,
+    independent_units: int,
+    delta: float,
+    *,
+    upper: bool,
+) -> float:
+    """Invert the binary relative entropy for a single bounded-mean tail.
+
+    Bernoulli variables are extremal for the moment generating function of a
+    [0, 1] variable, so the Chernoff/KL tail bound applies to the mean of
+    independent bounded units without assuming each unit is Bernoulli and
+    without a normal approximation. Only one tail is spent here, so the
+    threshold is ``log(1 / delta) / n`` rather than the two-sided
+    ``log(2 / delta) / n``.
+    """
+    if not 0.0 <= sample_mean <= 1.0:
+        raise ValueError("bounded sample mean must be in [0, 1]")
+    if independent_units <= 0:
+        raise ValueError("independent unit count must be positive")
+    if not 0.0 < delta < 1.0:
+        raise ValueError("one-sided bounded-mean delta must be in (0, 1)")
+    threshold = math.log(1.0 / delta) / independent_units
+    if upper:
+        if sample_mean == 1.0:
+            return 1.0
+        inside = sample_mean
+        outside = 1.0
+    else:
+        if sample_mean == 0.0:
+            return 0.0
+        inside = sample_mean
+        outside = 0.0
+    for _ in range(80):
+        middle = (inside + outside) / 2.0
+        if _bernoulli_kl(sample_mean, middle) > threshold:
+            outside = middle
+        else:
+            inside = middle
+    return inside
+
+
+def one_sided_bounded_mean_bounds(
+    sample_mean: float,
+    independent_units: int,
+    delta: float,
+) -> Interval:
+    """Return two separately valid one-sided level-``delta`` bounds.
+
+    ``lower`` is a level-``delta`` lower confidence bound and ``upper`` is a
+    level-``delta`` upper confidence bound for the mean of
+    ``independent_units`` independent [0, 1] units. Each tail spends
+    ``delta`` on its own, so a caller that consults both tails, several
+    strata, or several gates must allocate ``delta`` across every consulted
+    bound by a union bound.
+    """
+    return Interval(
+        _one_sided_bounded_kl_mean_bound(
+            sample_mean,
+            independent_units,
+            delta,
+            upper=False,
+        ),
+        _one_sided_bounded_kl_mean_bound(
+            sample_mean,
+            independent_units,
+            delta,
+            upper=True,
+        ),
+    )
+
+
 def _joint_state_number(value: float) -> float:
     result = round(float(value), _JOINT_STATE_DECIMAL_PLACES)
     return 0.0 if result == -0.0 else result
