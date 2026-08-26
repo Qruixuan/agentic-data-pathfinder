@@ -1,0 +1,44 @@
+{
+  "schema_version": "pathfinder.awm-heterogeneity/v1alpha1",
+  "audit_id": "multi-candidate-formal-v2-awm-v3alpha5-heterogeneity-posthoc",
+  "posthoc": true,
+  "eligible_for_scientific_claims": false,
+  "safe_design_id": "D_origin_remote",
+  "design_ids": [
+    "D_origin_remote",
+    "D_local_frames",
+    "D_local_digest",
+    "D_local_pair"
+  ],
+  "training_repetitions": [0, 1],
+  "evaluation_repetitions": [2, 3],
+  "workload_groups": {
+    "temporal": [
+      "temporal-nextqa-val-2834146886-q8",
+      "temporal-nextqa-val-3441428429-q10",
+      "temporal-nextqa-val-2976913210-q6",
+      "temporal-nextqa-val-6356067859-q6",
+      "temporal-nextqa-val-5296635780-q7",
+      "temporal-nextqa-val-5735711594-q5"
+    ],
+    "causal": [
+      "causal-nextqa-val-4882821564-q1",
+      "causal-nextqa-val-4260763967-q4",
+      "causal-nextqa-val-9088819598-q1",
+      "causal-nextqa-val-8132842161-q2",
+      "causal-nextqa-val-3462517143-q2",
+      "causal-nextqa-val-5026660202-q8"
+    ],
+    "descriptive": [
+      "descriptive-nextqa-val-8547321641-q7",
+      "descriptive-nextqa-val-4130504920-q4",
+      "descriptive-nextqa-val-4942054721-q7",
+      "descriptive-nextqa-val-5840177726-q3"
+    ]
+  },
+  "policy": {
+    "minimum_training_workloads_per_group": 3,
+    "minimum_candidate_mean_gain": 0,
+    "minimum_candidate_positive_fraction": 0.6
+  }
+}

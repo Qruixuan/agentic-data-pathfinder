@@ -513,6 +513,46 @@ coverage, false-safe Commit count, projected independent-workload requirement,
 and OED action. A narrower post-hoc interval is useful method evidence only; it
 does not select the confirmatory method without a new independent split.
 
+## Workload-Heterogeneity Gate for v3alpha5
+
+Do not interpret repeated `certificate_limited_stop` outcomes as a reason to
+keep replacing concentration inequalities. The v3alpha5 feasibility gate first
+tests whether a single global physical design is masking stable conditional
+effects. It is a read-only, post-hoc diagnostic over a frozen Oracle:
+
+```bash
+PYTHONPATH=. python -m pathfinder audit-awm-heterogeneity \
+  --audit-config \
+  configs/multi_candidate_formal_v2_awm_v3alpha5_heterogeneity.json \
+  --oracle-config configs/multi_candidate_formal_v2_oracle.json \
+  --oracle-output-dir "$PF_FROZEN_ORACLE" \
+  --output-dir "$PF_V3A5_HETEROGENEITY_OUT"
+```
+
+The command does not call FlowMesh, the Data Agent, MCP, or an LLM. It writes:
+
+- `workload_effects.csv`, containing paired success, service-cost, and
+  service-utility effects for every workload and candidate;
+- `stratum_summary.csv`, comparing temporal, causal, and descriptive groups;
+- `policy_assignments.csv`, containing leave-one-workload-out selections and
+  explicit safe-origin fallbacks; and
+- `heterogeneity_evaluation.json` plus a content-hashed manifest.
+
+Policy selection sees only repetitions 0 and 1. Repetitions 2 and 3 are used
+only after selection to diagnose the chosen action. The selected workload is
+also removed from its policy-training set. Changing evaluation outcomes
+therefore cannot change the recorded policy choice.
+
+This gate is deliberately not an AWM confidence certificate. The committed
+configuration requires `posthoc=true` and
+`eligible_for_scientific_claims=false`, and the loader refuses attempts to
+reverse either marker. Its service-utility comparison also excludes allocation
+of global storage and transition costs to conditional policies, because the
+current Oracle identifies complete global designs rather than per-workload
+materialization actions. A positive result justifies developing and freezing a
+workload-aware safety certificate on a new independent-workload split; it does
+not validate v3alpha5 or authorize a Commit.
+
 ## Current Boundary
 
 The implementation is ready before the server experiment, and its synthetic

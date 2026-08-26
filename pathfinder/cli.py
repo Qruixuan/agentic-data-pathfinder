@@ -414,6 +414,35 @@ def _parser() -> argparse.ArgumentParser:
     awm_evaluation.add_argument("--output-dir", type=Path, required=True)
     awm_evaluation.add_argument("--compact", action="store_true")
 
+    awm_heterogeneity = subcommands.add_parser(
+        "audit-awm-heterogeneity",
+        help=(
+            "run a read-only post-hoc workload heterogeneity and "
+            "safe-fallback policy diagnostic over a frozen Reduced Oracle"
+        ),
+    )
+    awm_heterogeneity.add_argument(
+        "--audit-config",
+        type=Path,
+        required=True,
+    )
+    awm_heterogeneity.add_argument(
+        "--oracle-config",
+        type=Path,
+        default=DEFAULT_REDUCED_ORACLE_CONFIG,
+    )
+    awm_heterogeneity.add_argument(
+        "--oracle-output-dir",
+        type=Path,
+        required=True,
+    )
+    awm_heterogeneity.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+    )
+    awm_heterogeneity.add_argument("--compact", action="store_true")
+
     oed_replay = subcommands.add_parser(
         "run-oed-replay",
         help=(
@@ -741,6 +770,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = run_oed_replay(
                 args.oed_config,
                 args.awm_config,
+                args.oracle_config,
+                oracle_output_dir=args.oracle_output_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "audit-awm-heterogeneity":
+            from .awm import audit_awm_workload_heterogeneity
+
+            payload = audit_awm_workload_heterogeneity(
+                args.audit_config,
                 args.oracle_config,
                 oracle_output_dir=args.oracle_output_dir,
                 output_dir=args.output_dir,

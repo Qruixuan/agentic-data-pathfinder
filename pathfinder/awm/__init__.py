@@ -22,6 +22,13 @@ from .dataset import (
     load_oracle_dataset,
 )
 from .evaluation import evaluate_awm, holdout_truth
+from .heterogeneity import (
+    HETEROGENEITY_CONFIG_SCHEMA_VERSION,
+    HETEROGENEITY_EVALUATION_SCHEMA_VERSION,
+    WorkloadHeterogeneityAuditConfig,
+    audit_awm_workload_heterogeneity,
+    load_workload_heterogeneity_audit_config,
+)
 from .model import (
     AWM_MODEL_KINDS,
     AdaptiveWorkloadModel,
@@ -51,12 +58,17 @@ __all__ = [
     "DesignBounds",
     "DesignSample",
     "EmpiricalBernsteinEstimate",
+    "HETEROGENEITY_CONFIG_SCHEMA_VERSION",
+    "HETEROGENEITY_EVALUATION_SCHEMA_VERSION",
     "Interval",
     "PairedGainCertificate",
     "PairedGainPowerAnalysis",
     "TrialObservation",
+    "WorkloadHeterogeneityAuditConfig",
+    "audit_awm_workload_heterogeneity",
     "evaluate_awm",
     "holdout_truth",
     "load_awm_config",
     "load_oracle_dataset",
+    "load_workload_heterogeneity_audit_config",
 ]

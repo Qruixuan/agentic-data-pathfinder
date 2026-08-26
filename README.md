@@ -233,6 +233,10 @@ schema, and manual server runbook are in
 The offline Adaptive Workload Model, configuration-gated assumptions,
 confidence sets, baselines, and held-out evaluation are documented in
 [`integrations/flowmesh/AWM.md`](integrations/flowmesh/AWM.md).
+The first v3alpha5 development gate is a read-only workload-heterogeneity
+audit. It uses leave-one-workload-out policy selection, falls back to the safe
+origin when its diagnostic thresholds are not met, and is permanently marked
+post-hoc and ineligible for scientific claims.
 The offline Commit/Reveal/Hold/Stop controller, equal-budget baselines, replay
 contract, and Gate B4 boundary are documented in
 [`integrations/flowmesh/OED.md`](integrations/flowmesh/OED.md).
