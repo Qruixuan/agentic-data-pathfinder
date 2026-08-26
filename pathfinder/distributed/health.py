@@ -15,7 +15,12 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    OpenerDirector,
+    Request,
+    build_opener,
+)
 
 from ..data_agent_client import DATA_AGENT_API_VERSION
 from ..integrations.flowmesh.redaction import redact_secrets
@@ -26,8 +31,22 @@ HEALTH_PROBE_SCHEMA_VERSION = "pathfinder.data-agent-health/v1alpha1"
 MAXIMUM_HEALTH_RESPONSE_BYTES = 64 * 1024
 
 
-class _NoRedirect:
-    """Sentinel documenting that redirects are deliberately unsupported."""
+class _RefuseRedirects(HTTPRedirectHandler):
+    """A redirect handler that refuses instead of following.
+
+    Following a redirect would let a health check silently move to a host the
+    registry never declared, and -- worse -- urllib would replay the request
+    there, carrying any Authorization header to an unvetted origin. Every 3xx
+    is therefore surfaced to the caller as an ordinary HTTPError.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _no_redirect_opener() -> OpenerDirector:
+    """Build an opener that will not follow a redirect."""
+    return build_opener(_RefuseRedirects)
 
 
 @dataclass(frozen=True)
@@ -73,9 +92,10 @@ class HttpDataAgentHealthProbe:
         self.registry = registry
         self.environment = environment
         self.timeout_seconds = timeout_seconds
-        # Injected for tests; production uses urllib's default opener, which
-        # this class never configures with a redirect handler.
-        self._opener = opener or urlopen
+        # Injected for tests; production uses an opener whose redirect
+        # handler refuses rather than follows. urlopen's default opener does
+        # follow redirects, so it is deliberately not used here.
+        self._opener = opener or _no_redirect_opener().open
 
     @property
     def _secret_names(self) -> tuple[str, ...]:
@@ -124,7 +144,24 @@ class HttpDataAgentHealthProbe:
         except HTTPError as exc:
             # A reachable endpoint that answered non-2xx is still a failed
             # health check, but it is reported with its status so an auth
-            # problem is distinguishable from a dead node.
+            # problem is distinguishable from a dead node. A 3xx arrives here
+            # because redirects are refused rather than followed.
+            if 300 <= int(exc.code) < 400:
+                return EndpointHealth(
+                    endpoint_id=endpoint_id,
+                    healthy=False,
+                    authenticated=bool(token),
+                    status_code=int(exc.code),
+                    api_version=None,
+                    node_id=None,
+                    representations=(),
+                    object_catalog_version=None,
+                    detail=self._redact(
+                        f"health check refused: HTTP {exc.code} redirect; "
+                        "a Data Agent endpoint must answer directly at its "
+                        "declared address"
+                    ),
+                )
             return EndpointHealth(
                 endpoint_id=endpoint_id,
                 healthy=False,
@@ -167,7 +204,13 @@ class HttpDataAgentHealthProbe:
                 node_id=None,
                 representations=(),
                 object_catalog_version=None,
-                detail=f"Data Agent returned HTTP {status}",
+                detail=(
+                    f"health check refused: HTTP {status} redirect; a Data "
+                    "Agent endpoint must answer directly at its declared "
+                    "address"
+                    if 300 <= status < 400
+                    else f"Data Agent returned HTTP {status}"
+                ),
             )
         try:
             payload = json.loads(body.decode("utf-8"))

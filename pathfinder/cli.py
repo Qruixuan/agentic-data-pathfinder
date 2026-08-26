@@ -550,7 +550,28 @@ def _parser() -> argparse.ArgumentParser:
     pilot_plan.add_argument(
         "--output-dir",
         type=Path,
-        help="write the frozen plan document here",
+        help=(
+            "write the frozen plan document here; requires "
+            "--workload-manifest so the plan is bound to real workload "
+            "content and stays resumable"
+        ),
+    )
+    pilot_plan.add_argument(
+        "--workload-manifest",
+        type=Path,
+        help=(
+            "workload definitions to bind into the written plan; required "
+            "with --output-dir"
+        ),
+    )
+    pilot_plan.add_argument(
+        "--endpoint-registry",
+        type=Path,
+        help=(
+            "endpoint registry to bind into the written plan; required "
+            "with --output-dir so the document matches the one execution "
+            "recomputes"
+        ),
     )
     pilot_plan.add_argument("--compact", action="store_true")
 
@@ -1068,9 +1089,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     client.close()
             finally:
                 close_routed_backend(backend)
-            return _print_payload(payload, compact=args.compact)
+            _print_payload(payload, compact=args.compact)
+            # A PARTIAL run, an exhausted retry budget, or any incomplete
+            # Oracle is a failure: exiting 0 would let a scheduler treat a
+            # half-finished dataset as a finished one.
+            complete = (
+                payload.get("status") == "COMPLETE"
+                and bool(payload.get("oracle_complete"))
+            )
+            return 0 if complete else 1
         if args.command == "preflight-distributed-pilot":
             from .distributed import (
+                HttpDataAgentHealthProbe,
                 load_distributed_pilot_preregistration,
                 load_endpoint_registry,
                 preflight_distributed_pilot,
@@ -1088,9 +1118,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest_sha256 = load_measurement_manifest(
                     args.measurement_manifest
                 ).manifest_sha256
+            # Loaded once and shared: the probe must resolve endpoints from
+            # the same registry the preflight is checking, and without a
+            # probe every endpoint health check fails by construction.
+            registry = load_endpoint_registry(args.endpoint_registry)
             payload = preflight_distributed_pilot(
                 load_distributed_pilot_preregistration(args.preregistration),
-                load_endpoint_registry(args.endpoint_registry),
+                registry,
+                probe=HttpDataAgentHealthProbe(registry),
                 worker_pin=pin,
                 mode=args.mode,
                 measurement_manifest_sha256=manifest_sha256,
@@ -1100,26 +1135,74 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "plan-distributed-pilot":
             from .distributed import (
                 build_distributed_trial_plan,
+                build_frozen_plan_document,
                 ensure_frozen_plan,
                 load_distributed_pilot_preregistration,
+                load_endpoint_registry,
                 trial_plan_payload,
             )
 
             preregistration = load_distributed_pilot_preregistration(
                 args.preregistration
             )
-            trials = build_distributed_trial_plan(preregistration)
-            plan = trial_plan_payload(preregistration, trials)
             if args.output_dir is not None:
+                # A plan written with a null content hash, or without the
+                # registry digest, looks resumable but is not: what
+                # execution recomputes would differ and the run would refuse
+                # to start on the very plan this command prepared.
+                missing = [
+                    name
+                    for name, value in (
+                        ("--workload-manifest", args.workload_manifest),
+                        ("--endpoint-registry", args.endpoint_registry),
+                    )
+                    if value is None
+                ]
+                if missing:
+                    raise ConfigError(
+                        "plan-distributed-pilot --output-dir requires "
+                        + " and ".join(missing)
+                        + "; a plan missing either would block the pilot it "
+                        "was meant to prepare. Omit --output-dir for an "
+                        "inspection preview."
+                    )
+            workloads = None
+            if args.workload_manifest is not None:
+                workloads = json.loads(
+                    Path(args.workload_manifest).read_text(encoding="utf-8")
+                )
+                if not isinstance(workloads, dict):
+                    raise ConfigError(
+                        "the workload manifest must map workload_id -> "
+                        "workload"
+                    )
+            trials = build_distributed_trial_plan(preregistration)
+            if args.output_dir is not None:
+                plan = build_frozen_plan_document(
+                    preregistration,
+                    load_endpoint_registry(args.endpoint_registry),
+                    workloads=workloads,
+                    trials=trials,
+                )
                 ensure_frozen_plan(
                     Path(args.output_dir) / "distributed_pilot_plan.json",
                     plan,
+                )
+            else:
+                plan = trial_plan_payload(
+                    preregistration,
+                    trials,
+                    workloads=workloads,
                 )
             summary = {
                 key: value
                 for key, value in plan.items()
                 if key != "trials"
             }
+            summary["preview_only"] = args.output_dir is None
+            summary["workload_content_bound"] = (
+                plan.get("workload_content_sha256") is not None
+            )
             summary["preregistration"] = preregistration.to_public_dict()
             return _print_payload(summary, compact=args.compact)
         if args.command == "run-oed-certificate-replay":

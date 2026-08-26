@@ -1772,6 +1772,121 @@ class HttpHealthProbeTest(unittest.TestCase):
         with self.assertRaises(EndpointUnreachableError):
             probe.describe("origin_remote")
 
+
+    def test_a_redirect_is_refused_not_followed(self) -> None:
+        from urllib.error import HTTPError
+
+        for code in (301, 302, 303, 307, 308):
+            with self.subTest(status=code):
+                followed: list[str] = []
+
+                def opener(request, timeout=None, _code=code):
+                    followed.append(request.full_url)
+                    raise HTTPError(
+                        request.full_url,
+                        _code,
+                        "redirect",
+                        {"Location": "https://elsewhere.invalid/healthz"},
+                        None,
+                    )
+
+                health = self._probe(opener).describe("origin_remote")
+                self.assertFalse(health.healthy)
+                self.assertEqual(code, health.status_code)
+                self.assertIn("refused", health.detail)
+                self.assertEqual(
+                    1,
+                    len(followed),
+                    "the probe must not request the redirect target",
+                )
+
+    def test_a_cross_origin_redirect_is_refused(self) -> None:
+        from urllib.error import HTTPError
+
+        requested: list[str] = []
+
+        def opener(request, timeout=None):
+            requested.append(request.full_url)
+            raise HTTPError(
+                request.full_url,
+                302,
+                "moved",
+                {"Location": "https://attacker.invalid/healthz"},
+                None,
+            )
+
+        health = self._probe(opener).describe("origin_remote")
+        self.assertFalse(health.healthy)
+        self.assertEqual(1, len(requested))
+        self.assertNotIn("attacker.invalid", json.dumps(
+            health.to_public_dict()
+        ))
+
+    def test_a_redirect_status_returned_as_a_response_is_refused(
+        self,
+    ) -> None:
+        opener = _opener_returning(_health_document(), status=302)
+        health = self._probe(opener).describe("origin_remote")
+        self.assertFalse(health.healthy)
+        self.assertEqual(302, health.status_code)
+        self.assertIn("refused", health.detail)
+
+    def test_an_authenticated_redirect_never_forwards_the_token(
+        self,
+    ) -> None:
+        from urllib.error import HTTPError
+
+        payload = _registry_payload()
+        payload["endpoints"][0]["health_requires_auth"] = True
+        registry = build_endpoint_registry(payload, source_sha256="0" * 64)
+        seen: list[dict[str, str]] = []
+
+        def opener(request, timeout=None):
+            seen.append(
+                {k.lower(): v for k, v in request.header_items()}
+            )
+            raise HTTPError(
+                request.full_url,
+                307,
+                "temporary redirect",
+                {"Location": "https://attacker.invalid/healthz"},
+                None,
+            )
+
+        with mock.patch.dict(os.environ, TEST_ENVIRONMENT):
+            health = HttpDataAgentHealthProbe(
+                registry,
+                environment=TEST_ENVIRONMENT,
+                opener=opener,
+            ).describe("origin_remote")
+        self.assertFalse(health.healthy)
+        # Exactly one request was made -- to the declared endpoint only.
+        self.assertEqual(1, len(seen))
+        self.assertIn("authorization", seen[0])
+        report = json.dumps(health.to_public_dict())
+        self.assertNotIn(TEST_ENVIRONMENT[ORIGIN_TOKEN_ENV], report)
+        self.assertNotIn("attacker.invalid", report)
+
+    def test_the_production_opener_refuses_redirects(self) -> None:
+        from pathfinder.distributed.health import (
+            _RefuseRedirects,
+            _no_redirect_opener,
+        )
+
+        opener = _no_redirect_opener()
+        self.assertTrue(
+            any(
+                isinstance(handler, _RefuseRedirects)
+                for handler in opener.handlers
+            ),
+            "the default opener must refuse redirects, not follow them",
+        )
+        self.assertIsNone(
+            _RefuseRedirects().redirect_request(
+                None, None, 302, "", {}, "https://elsewhere.invalid"
+            )
+        )
+
     def test_the_health_mapping_matches_the_preflight_contract(
         self,
     ) -> None:
@@ -2153,21 +2268,58 @@ class DistributedCLITest(unittest.TestCase):
         )
 
     def test_plan_command_freezes_and_resumes(self) -> None:
+        prereg = load_distributed_pilot_preregistration(
+            EXAMPLE_PREREGISTRATION
+        )
         with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest = root / "workloads.json"
+            _write_json(manifest, {
+                workload_id: {
+                    "object_id": f"object-{workload_id}",
+                    "question": f"Question for {workload_id}?",
+                    "accepted_answer_substrings": ["answer"],
+                }
+                for workload_id in prereg.workload_ids
+            })
             argv = [
                 "plan-distributed-pilot",
                 "--preregistration",
                 str(EXAMPLE_PREREGISTRATION),
+                "--workload-manifest",
+                str(manifest),
+                "--endpoint-registry",
+                str(EXAMPLE_REGISTRY),
                 "--output-dir",
-                temporary,
+                str(root / "plan"),
                 "--compact",
             ]
-            first, _ = self._cli(argv)
+            first, payload = self._cli(argv)
             second, _ = self._cli(argv)
             self.assertEqual(0, first)
             self.assertEqual(0, second)
+            self.assertTrue(payload["workload_content_bound"])
             self.assertTrue(
-                (Path(temporary) / "distributed_pilot_plan.json").is_file()
+                (
+                    root / "plan" / "distributed_pilot_plan.json"
+                ).is_file()
+            )
+
+    def test_plan_command_refuses_to_write_an_unbound_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "unbound"
+            code, payload = self._cli([
+                "plan-distributed-pilot",
+                "--preregistration",
+                str(EXAMPLE_PREREGISTRATION),
+                "--output-dir",
+                str(target),
+                "--compact",
+            ])
+            self.assertEqual(2, code)
+            self.assertIn("--output-dir requires", payload["message"])
+            self.assertFalse(
+                (target / "distributed_pilot_plan.json").exists()
             )
 
     def test_preflight_command_fails_closed_without_endpoints(self) -> None:

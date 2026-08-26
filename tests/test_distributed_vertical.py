@@ -8,16 +8,21 @@ opened, no worker or service is started, and no workflow is submitted.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import io
 import json
+import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
 
+from pathfinder.cli import main as cli_main
 from pathfinder.config import load_config
 from pathfinder.data_agent_client import (
     DataAgentAccessRequest,
@@ -28,7 +33,13 @@ from pathfinder.data_agent_client import (
     DataAgentUnavailableError,
 )
 from pathfinder.distributed import (
+    CanonicalRecordError,
+    build_distributed_trial_plan,
+    load_endpoint_registry,
+    workload_content_sha256,
     EndpointRegistryError,
+    PilotPreregistrationError,
+    PilotResumeError,
     CrossEndpointArtifactError,
     EndpointRegistryError,
     EndpointUnreachableError,
@@ -1479,6 +1490,1190 @@ class VerticalNegativeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class WorkloadContentFreezeTest(unittest.TestCase):
+    """The plan binds what a workload says, not merely its id."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = VerticalFixture(
+            self.root,
+            _origin_agent(),
+            _local_agent(),
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, workloads, *, output: str = "run"):
+        return run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            _GatewayExecutor(self.fixture),
+            output_dir=self.root / output,
+            workloads=workloads,
+            provider=self.fixture.provider,
+            preflight=self.fixture.preflight(),
+        )
+
+    def test_the_plan_records_a_content_digest(self) -> None:
+        summary = self._run(self.fixture.workloads())
+        plan = json.loads(
+            (
+                self.root / "run" / "distributed_pilot_plan.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(64, len(plan["workload_content_sha256"]))
+        self.assertNotEqual(
+            plan["workload_content_sha256"],
+            plan["workload_id_manifest_sha256"],
+        )
+        self.assertEqual(
+            plan["workload_content_sha256"],
+            summary["workload_content_sha256"],
+        )
+        # The id-only digest is retained but never labelled as content.
+        self.assertNotIn("workload_manifest_sha256", plan)
+
+    def test_changing_any_workload_field_is_rejected_on_resume(
+        self,
+    ) -> None:
+        mutations = {
+            "question": lambda w: {**w, "question": "A different question?"},
+            "object_id": lambda w: {**w, "object_id": "video-object-999"},
+            "accepted_answer": lambda w: {
+                **w,
+                "accepted_answer_substrings": ["cat"],
+            },
+            "task_class_id": lambda w: {**w, "task_class_id": "other_class"},
+            "latency_multiplier": lambda w: {**w, "latency_multiplier": 2},
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(field=label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = VerticalFixture(
+                        root,
+                        _origin_agent(),
+                        _local_agent(),
+                    )
+                    baseline = fixture.workloads()
+                    run_distributed_pilot(
+                        fixture.preregistration,
+                        fixture.registry,
+                        _GatewayExecutor(fixture),
+                        output_dir=root / "run",
+                        workloads=baseline,
+                        provider=fixture.provider,
+                        preflight=fixture.preflight(),
+                    )
+                    target = WORKLOAD_IDS[0]
+                    edited = {
+                        **baseline,
+                        target: mutate(baseline[target]),
+                    }
+                    with self.assertRaises(PilotResumeError) as caught:
+                        run_distributed_pilot(
+                            fixture.preregistration,
+                            fixture.registry,
+                            _GatewayExecutor(fixture),
+                            output_dir=root / "run",
+                            workloads=edited,
+                            provider=fixture.provider,
+                            preflight=fixture.preflight(),
+                        )
+                    self.assertIn(
+                        "workload definitions",
+                        str(caught.exception),
+                    )
+
+    def test_key_order_changes_are_accepted(self) -> None:
+        self._run(self.fixture.workloads())
+        reordered = {
+            workload_id: dict(
+                sorted(payload.items(), reverse=True)
+            )
+            for workload_id, payload in self.fixture.workloads().items()
+        }
+        # Equivalent JSON with different key order must not invalidate the
+        # frozen run.
+        summary = self._run(reordered)
+        self.assertEqual(0, summary["executed_this_invocation"])
+        self.assertTrue(summary["oracle_complete"])
+
+    def test_an_unrelated_extra_workload_does_not_invalidate_the_run(
+        self,
+    ) -> None:
+        self._run(self.fixture.workloads())
+        widened = {
+            **self.fixture.workloads(),
+            "not-in-this-plan": {"question": "irrelevant"},
+        }
+        summary = self._run(widened)
+        self.assertEqual(0, summary["executed_this_invocation"])
+
+    def test_content_hashing_refuses_a_missing_definition(self) -> None:
+        from pathfinder.distributed import workload_content_sha256
+
+        with self.assertRaisesRegex(
+            PilotPreregistrationError,
+            "no definition for",
+        ):
+            workload_content_sha256({"a": {}}, ["a", "b"])
+
+
+
+class CanonicalWindowTest(unittest.TestCase):
+    """The window between the canonical fsync and the journal write."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = VerticalFixture(
+            self.root,
+            _origin_agent(),
+            _local_agent(),
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, *, output: str = "run", **overrides: Any):
+        arguments: dict[str, Any] = {
+            "output_dir": self.root / output,
+            "workloads": self.fixture.workloads(),
+            "provider": self.fixture.provider,
+            "preflight": self.fixture.preflight(),
+        }
+        arguments.update(overrides)
+        executor = arguments.pop("executor", None) or _GatewayExecutor(
+            self.fixture
+        )
+        return run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            executor,
+            **arguments,
+        ), executor
+
+    def _crash_between_append_and_journal(self, output: str) -> None:
+        """Die in the exact gap: record fsynced, journal not yet advanced."""
+        import pathfinder.distributed.execution as execution
+
+        real_record = execution.CellJournal.record
+        state = {"armed": True}
+
+        def crashing_record(self, trial_key, cell_state, **detail):
+            if state["armed"] and cell_state == "CANONICAL_WRITTEN":
+                state["armed"] = False
+                raise _CanonicalBoom("died before journaling the record")
+            return real_record(self, trial_key, cell_state, **detail)
+
+        with mock.patch.object(
+            execution.CellJournal,
+            "record",
+            crashing_record,
+        ):
+            try:
+                self._run(output=output, max_attempts=1)
+            except _CanonicalBoom:
+                pass
+
+    def test_a_crash_in_the_window_leaves_a_record_the_journal_lacks(
+        self,
+    ) -> None:
+        self._crash_between_append_and_journal("gap")
+        records = [
+            json.loads(line)
+            for line in (
+                self.root / "gap" / "canonical_records.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(1, len(records))
+        journal_states = {
+            row["trial_key"]: row["state"]
+            for row in (
+                json.loads(line)
+                for line in (
+                    self.root / "gap" / "cell_journal.jsonl"
+                ).read_text(encoding="utf-8").splitlines()
+            )
+        }
+        # This is the precondition the fix exists for.
+        self.assertEqual(
+            "RESULT_OBTAINED",
+            journal_states[records[0]["trial_key"]],
+        )
+
+    def test_resume_replays_that_record_without_re_executing(self) -> None:
+        self._crash_between_append_and_journal("gap")
+        crashed_key = json.loads(
+            (
+                self.root / "gap" / "canonical_records.jsonl"
+            ).read_text(encoding="utf-8").splitlines()[0]
+        )["trial_key"]
+
+        summary, executor = self._run(output="gap")
+        self.assertTrue(summary["oracle_complete"])
+        rows = [
+            json.loads(line)
+            for line in (
+                self.root / "gap" / "canonical_records.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        keys = [row["trial_key"] for row in rows]
+        self.assertEqual(8, len(keys))
+        self.assertEqual(
+            len(keys),
+            len(set(keys)),
+            "the cell in the crash window was appended twice",
+        )
+        self.assertEqual(1, keys.count(crashed_key))
+        # The recovered cell was replayed, not run again.
+        replayed = [
+            row for row in (
+                json.loads(line)
+                for line in (
+                    self.root / "gap" / "attempt_ledger.jsonl"
+                ).read_text(encoding="utf-8").splitlines()
+            )
+            if row.get("replayed_from_canonical_record")
+        ]
+        self.assertEqual(1, len(replayed))
+        self.assertEqual(crashed_key, replayed[0]["trial_key"])
+        self.assertNotIn(
+            crashed_key,
+            {
+                session.split("|")[-1]
+                for session in executor.sessions
+            },
+        )
+
+    def test_a_duplicate_canonical_record_fails_closed(self) -> None:
+        self._run(output="dupe")
+        ledger = self.root / "dupe" / "canonical_records.jsonl"
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+        ledger.write_text(
+            "\n".join(lines + [lines[0]]) + "\n",
+            encoding="utf-8",
+        )
+        (self.root / "dupe" / "attempt_ledger.jsonl").unlink()
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "duplicate canonical record",
+        ):
+            self._run(output="dupe")
+
+    def test_conflicting_canonical_records_fail_closed(self) -> None:
+        self._run(output="conflict")
+        ledger = self.root / "conflict" / "canonical_records.jsonl"
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+        conflicting = json.loads(lines[0])
+        conflicting["task_success"] = not conflicting["task_success"]
+        ledger.write_text(
+            "\n".join(lines + [json.dumps(conflicting, sort_keys=True)])
+            + "\n",
+            encoding="utf-8",
+        )
+        (self.root / "conflict" / "attempt_ledger.jsonl").unlink()
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "conflicting canonical records",
+        ):
+            self._run(output="conflict")
+
+    def test_an_unknown_trial_key_fails_closed(self) -> None:
+        self._run(output="unknown")
+        ledger = self.root / "unknown" / "canonical_records.jsonl"
+        rogue = json.loads(
+            ledger.read_text(encoding="utf-8").splitlines()[0]
+        )
+        rogue["trial_key"] = "not|in|the|plan|r0"
+        with ledger.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(rogue, sort_keys=True) + "\n")
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "not in the frozen plan",
+        ):
+            self._run(output="unknown")
+
+    def test_malformed_records_fail_closed(self) -> None:
+        cases = {
+            "no trial_key": lambda row: {
+                k: v for k, v in row.items() if k != "trial_key"
+            },
+            "missing design_id": lambda row: {**row, "design_id": None},
+            "incomplete telemetry": lambda row: {
+                **row,
+                "telemetry_complete": False,
+            },
+            "undelivered artifact": lambda row: {
+                **row,
+                "artifact_delivery_complete": False,
+            },
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = VerticalFixture(
+                        root,
+                        _origin_agent(),
+                        _local_agent(),
+                    )
+                    run_distributed_pilot(
+                        fixture.preregistration,
+                        fixture.registry,
+                        _GatewayExecutor(fixture),
+                        output_dir=root / "run",
+                        workloads=fixture.workloads(),
+                        provider=fixture.provider,
+                        preflight=fixture.preflight(),
+                    )
+                    ledger = root / "run" / "canonical_records.jsonl"
+                    lines = ledger.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    edited = mutate(json.loads(lines[0]))
+                    ledger.write_text(
+                        "\n".join(
+                            [json.dumps(edited, sort_keys=True)] + lines[1:]
+                        ) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(CanonicalRecordError):
+                        run_distributed_pilot(
+                            fixture.preregistration,
+                            fixture.registry,
+                            _GatewayExecutor(fixture),
+                            output_dir=root / "run",
+                            workloads=fixture.workloads(),
+                            provider=fixture.provider,
+                            preflight=fixture.preflight(),
+                        )
+
+
+class _CanonicalBoom(RuntimeError):
+    """Simulated process death inside the canonical write window."""
+
+
+
+class OperatorInterruptionTest(unittest.TestCase):
+    """Ctrl-C is a decision, not a flaky endpoint."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = VerticalFixture(
+            self.root,
+            _origin_agent(),
+            _local_agent(),
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, executor, *, output: str = "run", **overrides: Any):
+        arguments: dict[str, Any] = {
+            "output_dir": self.root / output,
+            "workloads": self.fixture.workloads(),
+            "provider": self.fixture.provider,
+            "preflight": self.fixture.preflight(),
+        }
+        arguments.update(overrides)
+        return run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            executor,
+            **arguments,
+        )
+
+    def _interrupting_executor(self, signal_type):
+        fixture = self.fixture
+
+        class _Interrupting(_GatewayExecutor):
+            calls = 0
+
+            def execute(self, trial, *, workload, journal=None, attempt=1):
+                type(self).calls += 1
+                if type(self).calls == 3:
+                    raise signal_type()
+                return super().execute(
+                    trial,
+                    workload=workload,
+                    journal=journal,
+                    attempt=attempt,
+                )
+
+        _Interrupting.calls = 0
+        return _Interrupting(fixture)
+
+    def test_keyboard_interrupt_propagates_immediately(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self._run(self._interrupting_executor(KeyboardInterrupt))
+
+    def test_system_exit_propagates_immediately(self) -> None:
+        with self.assertRaises(SystemExit):
+            self._run(self._interrupting_executor(SystemExit))
+
+    def test_an_interrupt_creates_no_failed_attempt_row(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self._run(self._interrupting_executor(KeyboardInterrupt))
+        rows = [
+            json.loads(line)
+            for line in (
+                self.root / "run" / "attempt_ledger.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual("canonical", row["observation_class"])
+            self.assertTrue(row["succeeded"])
+        self.assertEqual(2, len(rows))
+
+    def test_an_interrupt_does_not_consume_the_retry_budget(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self._run(self._interrupting_executor(KeyboardInterrupt))
+        # The interrupted cell is journaled as STARTED but has no attempt.
+        journal = [
+            json.loads(line)
+            for line in (
+                self.root / "run" / "cell_journal.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        interrupted = [
+            row for row in journal
+            if row["state"] == "STARTED"
+        ][-1]["trial_key"]
+        attempts = [
+            json.loads(line)
+            for line in (
+                self.root / "run" / "attempt_ledger.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            0,
+            sum(1 for row in attempts if row["trial_key"] == interrupted),
+        )
+
+    def test_resume_after_an_interrupt_completes_the_oracle(self) -> None:
+        with self.assertRaises(KeyboardInterrupt):
+            self._run(self._interrupting_executor(KeyboardInterrupt))
+        summary = self._run(_GatewayExecutor(self.fixture))
+        self.assertTrue(summary["oracle_complete"])
+        self.assertEqual(8, summary["completed_canonical_count"])
+        self.assertEqual(6, summary["executed_this_invocation"])
+        rows = (
+            self.root / "run" / "canonical_records.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+        keys = [json.loads(line)["trial_key"] for line in rows]
+        self.assertEqual(8, len(keys))
+        self.assertEqual(len(keys), len(set(keys)))
+
+    def test_ordinary_exceptions_are_still_classified(self) -> None:
+        fixture = self.fixture
+
+        class _Failing(_GatewayExecutor):
+            calls = 0
+
+            def execute(self, trial, *, workload, journal=None, attempt=1):
+                type(self).calls += 1
+                if type(self).calls == 1:
+                    raise RuntimeError("transient endpoint blip")
+                return super().execute(
+                    trial,
+                    workload=workload,
+                    journal=journal,
+                    attempt=attempt,
+                )
+
+        _Failing.calls = 0
+        summary = self._run(_Failing(fixture), output="classified")
+        self.assertEqual(1, summary["infrastructure_failure_count"])
+        self.assertTrue(summary["oracle_complete"])
+
+
+
+class CliPreflightAndExitCodeTest(unittest.TestCase):
+    """Standalone preflight probes for real; a partial run exits nonzero."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = VerticalFixture(
+            self.root,
+            _origin_agent(),
+            _local_agent(),
+        )
+        self.registry_path = self.root / "registry.json"
+        _write_json(self.registry_path, _registry_payload())
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _cli(self, argv):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = cli_main(argv)
+        return code, json.loads(stdout.getvalue())
+
+    def _preflight_argv(self):
+        return [
+            "preflight-distributed-pilot",
+            "--preregistration",
+            str(self.fixture.preregistration_path),
+            "--endpoint-registry",
+            str(self.registry_path),
+            "--measurement-manifest",
+            str(self.fixture.measurement_path),
+            "--worker-alias",
+            "vertical-worker",
+            "--compact",
+        ]
+
+    def _health_opener(self, agents, *, unreachable=()):
+        """An opener answering from the in-process fake Data Agents."""
+        by_host = {
+            "alpha.invalid": agents[ORIGIN_ENDPOINT],
+            "beta.invalid": agents[LOCAL_ENDPOINT],
+        }
+
+        def opener(request, timeout=None):
+            host = request.full_url.split("//", 1)[1].split(":", 1)[0]
+            agent = by_host[host]
+            if agent.endpoint_id in unreachable:
+                raise OSError(f"connection refused to {host}")
+            return _HealthResponse(
+                json.dumps(agent.health_document()).encode("utf-8")
+            )
+
+        return opener
+
+    def test_a_healthy_endpoint_produces_an_ok_preflight(self) -> None:
+        opener = self._health_opener(self.fixture.agents)
+        with mock.patch.dict(os.environ, _VERTICAL_ENVIRONMENT), \
+                mock.patch(
+                    "pathfinder.distributed.health._no_redirect_opener",
+                    lambda: _StubOpener(opener),
+                ):
+            code, payload = self._cli(self._preflight_argv())
+        self.assertEqual("ok", payload["status"], payload["failed_checks"])
+        self.assertEqual(0, code)
+        # The probe really ran: health checks are present and passing.
+        health_checks = [
+            check for check in payload["checks"]
+            if check["check_id"].endswith(".health")
+        ]
+        self.assertEqual(2, len(health_checks))
+        for check in health_checks:
+            self.assertTrue(check["passed"], check)
+
+    def test_an_unreachable_endpoint_returns_a_nonzero_exit(self) -> None:
+        opener = self._health_opener(
+            self.fixture.agents,
+            unreachable=(ORIGIN_ENDPOINT,),
+        )
+        with mock.patch.dict(os.environ, _VERTICAL_ENVIRONMENT), \
+                mock.patch(
+                    "pathfinder.distributed.health._no_redirect_opener",
+                    lambda: _StubOpener(opener),
+                ):
+            code, payload = self._cli(self._preflight_argv())
+        self.assertEqual(1, code)
+        self.assertEqual("failed", payload["status"])
+        self.assertIn(
+            f"endpoint[{ORIGIN_ENDPOINT}].health",
+            payload["failed_checks"],
+        )
+
+    def test_live_pilot_placeholder_checks_are_not_weakened(self) -> None:
+        opener = self._health_opener(self.fixture.agents)
+        with mock.patch.dict(os.environ, _VERTICAL_ENVIRONMENT), \
+                mock.patch(
+                    "pathfinder.distributed.health._no_redirect_opener",
+                    lambda: _StubOpener(opener),
+                ):
+            code, payload = self._cli(
+                self._preflight_argv() + ["--mode", "live_pilot"]
+            )
+        # The fixture's rate provenance is a non-scientific fixture string,
+        # which live mode must still reject.
+        self.assertEqual(1, code)
+        self.assertIn(
+            "cost_model.rates_are_measured_not_placeholder",
+            payload["failed_checks"],
+        )
+
+    def test_a_complete_run_exits_zero_and_a_partial_run_does_not(
+        self,
+    ) -> None:
+        from pathfinder.distributed import run_distributed_pilot
+
+        complete = run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            _GatewayExecutor(self.fixture),
+            output_dir=self.root / "complete",
+            workloads=self.fixture.workloads(),
+            provider=self.fixture.provider,
+            preflight=self.fixture.preflight(),
+        )
+        self.assertEqual("COMPLETE", complete["status"])
+        self.assertTrue(complete["oracle_complete"])
+        self.assertEqual(0, _exit_code_for(complete))
+
+        class _AlwaysFails(_GatewayExecutor):
+            def execute(self, trial, *, workload, journal=None, attempt=1):
+                raise RuntimeError("endpoint down")
+
+        partial = run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            _AlwaysFails(self.fixture),
+            output_dir=self.root / "partial",
+            workloads=self.fixture.workloads(),
+            provider=self.fixture.provider,
+            preflight=self.fixture.preflight(),
+            max_attempts=1,
+        )
+        self.assertEqual("PARTIAL", partial["status"])
+        self.assertFalse(partial["oracle_complete"])
+        self.assertNotEqual(0, _exit_code_for(partial))
+
+    def test_an_incomplete_oracle_never_exits_zero(self) -> None:
+        for status, oracle_complete in (
+            ("PARTIAL", False),
+            ("PARTIAL", True),
+            ("COMPLETE", False),
+        ):
+            with self.subTest(status=status, complete=oracle_complete):
+                self.assertNotEqual(
+                    0,
+                    _exit_code_for({
+                        "status": status,
+                        "oracle_complete": oracle_complete,
+                    }),
+                )
+        self.assertEqual(
+            0,
+            _exit_code_for({
+                "status": "COMPLETE",
+                "oracle_complete": True,
+            }),
+        )
+
+
+def _exit_code_for(payload: Mapping[str, Any]) -> int:
+    """The exact rule run-distributed-pilot applies to its summary."""
+    complete = (
+        payload.get("status") == "COMPLETE"
+        and bool(payload.get("oracle_complete"))
+    )
+    return 0 if complete else 1
+
+
+class _HealthResponse:
+    def __init__(self, body: bytes, status: int = 200) -> None:
+        self._body = body
+        self.status = status
+
+    def read(self, amount=None) -> bytes:
+        return self._body if amount is None else self._body[:amount]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class _StubOpener:
+    def __init__(self, opener) -> None:
+        self.open = opener
+        self.handlers = []
+
+
+_VERTICAL_ENVIRONMENT = dict(ENVIRONMENT)
+
+
+
+class CanonicalIdentityValidationTest(unittest.TestCase):
+    """A replayed record must describe the exact frozen cell."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = VerticalFixture(
+            self.root,
+            _origin_agent(),
+            _local_agent(),
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, *, output: str = "run", **overrides: Any):
+        arguments: dict[str, Any] = {
+            "output_dir": self.root / output,
+            "workloads": self.fixture.workloads(),
+            "provider": self.fixture.provider,
+            "preflight": self.fixture.preflight(),
+        }
+        arguments.update(overrides)
+        executor = arguments.pop("executor", None) or _GatewayExecutor(
+            self.fixture
+        )
+        return run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            executor,
+            **arguments,
+        ), executor
+
+    def _mutate_first_record(self, output: str, mutate) -> None:
+        ledger = self.root / output / "canonical_records.jsonl"
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+        edited = mutate(json.loads(lines[0]))
+        ledger.write_text(
+            "\n".join(
+                [json.dumps(edited, sort_keys=True)] + lines[1:]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_every_identity_field_is_compared(self) -> None:
+        from pathfinder.distributed import TRIAL_IDENTITY_FIELDS
+
+        self.assertEqual(
+            {
+                "trial_key",
+                "trial_id",
+                "session_id",
+                "order_index",
+                "stratum_id",
+                "workload_id",
+                "design_id",
+                "is_safe_design",
+                "repetition",
+                "seed",
+            },
+            set(TRIAL_IDENTITY_FIELDS),
+        )
+
+    def test_a_mismatched_identity_field_is_refused(self) -> None:
+        mutations = {
+            "design_id": lambda row: {**row, "design_id": FRAMES_DESIGN},
+            "workload_id": lambda row: {
+                **row,
+                "workload_id": WORKLOAD_IDS[1],
+            },
+            "repetition": lambda row: {**row, "repetition": 1},
+            "trial_id": lambda row: {**row, "trial_id": "not-the-trial"},
+            "session_id": lambda row: {
+                **row,
+                "session_id": "not-the-session",
+            },
+            "order_index": lambda row: {**row, "order_index": 99},
+            "stratum_id": lambda row: {**row, "stratum_id": "temporal"},
+            "is_safe_design": lambda row: {
+                **row,
+                "is_safe_design": not row["is_safe_design"],
+            },
+            "seed": lambda row: {**row, "seed": row["seed"] + 1},
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(field=label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = VerticalFixture(
+                        root,
+                        _origin_agent(),
+                        _local_agent(),
+                    )
+                    run_distributed_pilot(
+                        fixture.preregistration,
+                        fixture.registry,
+                        _GatewayExecutor(fixture),
+                        output_dir=root / "run",
+                        workloads=fixture.workloads(),
+                        provider=fixture.provider,
+                        preflight=fixture.preflight(),
+                    )
+                    ledger = root / "run" / "canonical_records.jsonl"
+                    lines = ledger.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    edited = mutate(json.loads(lines[0]))
+                    ledger.write_text(
+                        "\n".join(
+                            [json.dumps(edited, sort_keys=True)]
+                            + lines[1:]
+                        ) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(CanonicalRecordError) as caught:
+                        run_distributed_pilot(
+                            fixture.preregistration,
+                            fixture.registry,
+                            _GatewayExecutor(fixture),
+                            output_dir=root / "run",
+                            workloads=fixture.workloads(),
+                            provider=fixture.provider,
+                            preflight=fixture.preflight(),
+                        )
+                    message = str(caught.exception)
+                    self.assertIn("does not match the frozen trial", message)
+
+    def test_a_record_from_another_pilot_is_refused(self) -> None:
+        self._run(output="pilot")
+        self._mutate_first_record(
+            "pilot",
+            lambda row: {**row, "experiment_id": "some-other-pilot"},
+        )
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "belongs to pilot",
+        ):
+            self._run(output="pilot")
+
+    def test_a_record_with_a_foreign_schema_is_refused(self) -> None:
+        self._run(output="schema")
+        self._mutate_first_record(
+            "schema",
+            lambda row: {**row, "schema_version": "some.other/v1"},
+        )
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "schema_version",
+        ):
+            self._run(output="schema")
+
+    def test_a_missing_identity_field_is_refused(self) -> None:
+        self._run(output="missing")
+        self._mutate_first_record(
+            "missing",
+            lambda row: {k: v for k, v in row.items() if k != "seed"},
+        )
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "missing identity field seed",
+        ):
+            self._run(output="missing")
+
+    def test_a_swapped_record_pair_is_refused(self) -> None:
+        # Two valid records whose trial_keys are exchanged: each is
+        # individually well formed, and only identity comparison catches it.
+        self._run(output="swap")
+        ledger = self.root / "swap" / "canonical_records.jsonl"
+        rows = [
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+        ]
+        rows[0]["trial_key"], rows[1]["trial_key"] = (
+            rows[1]["trial_key"],
+            rows[0]["trial_key"],
+        )
+        ledger.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        (self.root / "swap" / "attempt_ledger.jsonl").unlink()
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "does not match the frozen trial",
+        ):
+            self._run(output="swap")
+
+    def test_a_bare_key_collection_is_rejected(self) -> None:
+        """Weaker structural-only validation is no longer reachable."""
+        from pathfinder.distributed import load_durable_canonical_records
+
+        self._run(output="bare")
+        ledger = self.root / "bare" / "canonical_records.jsonl"
+        trials = build_distributed_trial_plan(
+            self.fixture.preregistration
+        )
+        keys = [trial.trial_key for trial in trials]
+        for label, collection in (
+            ("list", keys),
+            ("set", set(keys)),
+            ("tuple", tuple(keys)),
+            ("generator", (key for key in keys)),
+        ):
+            with self.subTest(kind=label):
+                with self.assertRaisesRegex(
+                    CanonicalRecordError,
+                    "must map trial_key to the frozen DistributedTrial",
+                ):
+                    load_durable_canonical_records(ledger, collection)
+
+    def test_a_mapping_to_non_trial_values_is_rejected(self) -> None:
+        from pathfinder.distributed import load_durable_canonical_records
+
+        self._run(output="values")
+        ledger = self.root / "values" / "canonical_records.jsonl"
+        trials = build_distributed_trial_plan(
+            self.fixture.preregistration
+        )
+        broken = {
+            trial.trial_key: trial.to_public_dict()
+            for trial in trials
+        }
+        with self.assertRaisesRegex(
+            CanonicalRecordError,
+            "is not a DistributedTrial",
+        ):
+            load_durable_canonical_records(ledger, broken)
+
+    def test_a_proper_trial_mapping_is_accepted(self) -> None:
+        from pathfinder.distributed import load_durable_canonical_records
+
+        self._run(output="proper")
+        ledger = self.root / "proper" / "canonical_records.jsonl"
+        trials = build_distributed_trial_plan(
+            self.fixture.preregistration
+        )
+        records = load_durable_canonical_records(
+            ledger,
+            {trial.trial_key: trial for trial in trials},
+            pilot_id=self.fixture.preregistration.pilot_id,
+        )
+        self.assertEqual(8, len(records))
+        self.assertEqual(
+            {trial.trial_key for trial in trials},
+            set(records),
+        )
+
+    def test_a_valid_crash_window_record_still_replays(self) -> None:
+        """The tightened validator must not break legitimate recovery."""
+        import pathfinder.distributed.execution as execution
+
+        real_record = execution.CellJournal.record
+        state = {"armed": True}
+
+        def crashing_record(self, trial_key, cell_state, **detail):
+            if state["armed"] and cell_state == "CANONICAL_WRITTEN":
+                state["armed"] = False
+                raise _CanonicalBoom("died before journaling")
+            return real_record(self, trial_key, cell_state, **detail)
+
+        with mock.patch.object(
+            execution.CellJournal,
+            "record",
+            crashing_record,
+        ):
+            try:
+                self._run(output="valid", max_attempts=1)
+            except _CanonicalBoom:
+                pass
+
+        crashed_key = json.loads(
+            (
+                self.root / "valid" / "canonical_records.jsonl"
+            ).read_text(encoding="utf-8").splitlines()[0]
+        )["trial_key"]
+
+        summary, executor = self._run(output="valid")
+        self.assertTrue(summary["oracle_complete"])
+        rows = [
+            json.loads(line)
+            for line in (
+                self.root / "valid" / "canonical_records.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        keys = [row["trial_key"] for row in rows]
+        self.assertEqual(8, len(keys))
+        self.assertEqual(1, keys.count(crashed_key))
+        replayed = [
+            row for row in (
+                json.loads(line)
+                for line in (
+                    self.root / "valid" / "attempt_ledger.jsonl"
+                ).read_text(encoding="utf-8").splitlines()
+            )
+            if row.get("replayed_from_canonical_record")
+        ]
+        self.assertEqual([crashed_key], [r["trial_key"] for r in replayed])
+        # Replayed, so no session was opened for that cell.
+        self.assertEqual(7, len(executor.sessions))
+
+
+
+class PlanCommandWorkloadBindingTest(unittest.TestCase):
+    """A written plan is always bound to real workload content."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = VerticalFixture(
+            self.root,
+            _origin_agent(),
+            _local_agent(),
+        )
+        self.manifest = self.root / "workloads.json"
+        _write_json(self.manifest, self.fixture.workloads())
+        self.registry_path = self.root / "registry.json"
+        _write_json(self.registry_path, _registry_payload())
+        # Execution must see the same registry digest the CLI computes from
+        # the file, so the fixture adopts the file-loaded registry and its
+        # measurement manifest is rebound to that digest.
+        self.fixture.registry = load_endpoint_registry(self.registry_path)
+        _write_json(self.fixture.measurement_path, _measurement_payload(
+            self.fixture.preregistration.source_sha256,
+            self.fixture.registry.source_sha256,
+        ))
+        self.fixture.provider = load_measurement_manifest(
+            self.fixture.measurement_path
+        )
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _cli(self, argv):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = cli_main(argv)
+        return code, json.loads(stdout.getvalue())
+
+    def _base(self):
+        return [
+            "plan-distributed-pilot",
+            "--preregistration",
+            str(self.fixture.preregistration_path),
+            "--compact",
+        ]
+
+    def test_preview_only_use_needs_no_manifest(self) -> None:
+        code, payload = self._cli(self._base())
+        self.assertEqual(0, code)
+        self.assertTrue(payload["preview_only"])
+        self.assertFalse(payload["workload_content_bound"])
+        self.assertIsNone(payload["workload_content_sha256"])
+        self.assertEqual(8, payload["planned_trial_count"])
+        # Nothing resumable was written anywhere.
+        self.assertEqual(
+            [],
+            list(self.root.glob("**/distributed_pilot_plan.json")),
+        )
+
+    def test_writing_a_plan_without_a_manifest_is_refused(self) -> None:
+        cases = {
+            "neither": [],
+            "registry only": [
+                "--endpoint-registry", "REGISTRY",
+            ],
+            "manifest only": [
+                "--workload-manifest", "MANIFEST",
+            ],
+        }
+        for label, extra in cases.items():
+            with self.subTest(case=label):
+                target = self.root / f"unbound-{label.replace(' ', '-')}"
+                argv = self._base() + ["--output-dir", str(target)]
+                for item in extra:
+                    argv.append(
+                        str(self.registry_path)
+                        if item == "REGISTRY"
+                        else str(self.manifest)
+                        if item == "MANIFEST"
+                        else item
+                    )
+                code, payload = self._cli(argv)
+                self.assertEqual(2, code)
+                self.assertEqual("error", payload["status"])
+                self.assertIn("--output-dir requires", payload["message"])
+                self.assertFalse(
+                    (target / "distributed_pilot_plan.json").exists(),
+                    "no plan may be written when it cannot be bound",
+                )
+
+    def test_a_written_plan_carries_the_real_content_hash(self) -> None:
+        target = self.root / "bound"
+        code, payload = self._cli(self._base() + [
+            "--workload-manifest", str(self.manifest),
+            "--endpoint-registry", str(self.registry_path),
+            "--output-dir", str(target),
+        ])
+        self.assertEqual(0, code)
+        self.assertFalse(payload["preview_only"])
+        self.assertTrue(payload["workload_content_bound"])
+        written = json.loads(
+            (target / "distributed_pilot_plan.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIsNotNone(written["workload_content_sha256"])
+        self.assertEqual(
+            workload_content_sha256(
+                self.fixture.workloads(),
+                self.fixture.preregistration.workload_ids,
+            ),
+            written["workload_content_sha256"],
+            "the planned hash must equal the one execution computes",
+        )
+
+    def test_a_planned_run_then_executes_in_the_same_directory(
+        self,
+    ) -> None:
+        target = self.root / "shared"
+        code, _ = self._cli(self._base() + [
+            "--workload-manifest", str(self.manifest),
+            "--endpoint-registry", str(self.registry_path),
+            "--output-dir", str(target),
+        ])
+        self.assertEqual(0, code)
+        # The whole point: planning first must not block execution.
+        summary = run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            _GatewayExecutor(self.fixture),
+            output_dir=target,
+            workloads=self.fixture.workloads(),
+            provider=self.fixture.provider,
+            preflight=self.fixture.preflight(),
+        )
+        self.assertTrue(summary["oracle_complete"])
+        self.assertEqual(8, summary["executed_this_invocation"])
+
+    def test_a_plan_bound_to_different_workloads_blocks_execution(
+        self,
+    ) -> None:
+        target = self.root / "mismatch"
+        edited = dict(self.fixture.workloads())
+        first = WORKLOAD_IDS[0]
+        edited[first] = {**edited[first], "question": "A different one?"}
+        other_manifest = self.root / "other.json"
+        _write_json(other_manifest, edited)
+        code, _ = self._cli(self._base() + [
+            "--workload-manifest", str(other_manifest),
+            "--endpoint-registry", str(self.registry_path),
+            "--output-dir", str(target),
+        ])
+        self.assertEqual(0, code)
+        with self.assertRaises(PilotResumeError):
+            run_distributed_pilot(
+                self.fixture.preregistration,
+                self.fixture.registry,
+                _GatewayExecutor(self.fixture),
+                output_dir=target,
+                workloads=self.fixture.workloads(),
+                provider=self.fixture.provider,
+                preflight=self.fixture.preflight(),
+            )
+
+    def test_a_malformed_manifest_is_refused(self) -> None:
+        bad = self.root / "bad.json"
+        _write_json(bad, ["not", "a", "mapping"])
+        code, payload = self._cli(self._base() + [
+            "--workload-manifest", str(bad),
+            "--endpoint-registry", str(self.registry_path),
+            "--output-dir", str(self.root / "bad-out"),
+        ])
+        self.assertEqual(2, code)
+        self.assertIn("workload_id", payload["message"])
 
 
 # --------------------------------------------------------------------------

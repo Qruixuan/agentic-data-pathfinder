@@ -37,7 +37,10 @@ from .measurements import (
     MeasurementProvider,
     build_measured_cost_ledger,
 )
-from .preregistration import DistributedPilotPreregistration
+from .preregistration import (
+    DistributedPilotPreregistration,
+    workload_content_sha256,
+)
 from .registry import EndpointRegistry, EndpointUnreachableError
 from .routing import CrossEndpointArtifactError
 from .runner import (
@@ -82,6 +85,138 @@ _STATE_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 
 class PreflightRequiredError(PilotRunnerError):
     """Raised when execution is attempted without a passing preflight."""
+
+
+class CanonicalRecordError(PilotResumeError):
+    """Raised when the durable canonical ledger cannot be trusted."""
+
+
+#: Immutable identity of a planned cell. A durable canonical record must
+#: agree with its frozen trial on every one of these before it may be
+#: replayed: a record that matches only by trial_key could still describe a
+#: different design, workload, or repetition, and replaying it would silently
+#: substitute one observation for another.
+TRIAL_IDENTITY_FIELDS = (
+    "trial_key",
+    "trial_id",
+    "session_id",
+    "order_index",
+    "stratum_id",
+    "workload_id",
+    "design_id",
+    "is_safe_design",
+    "repetition",
+    "seed",
+)
+
+
+def load_durable_canonical_records(
+    path: str | Path,
+    planned_trials: Mapping[str, DistributedTrial],
+    *,
+    pilot_id: str | None = None,
+    schema_version: str | None = DISTRIBUTED_RECORD_SCHEMA_VERSION,
+) -> dict[str, dict[str, Any]]:
+    """Index the durable canonical ledger, failing closed on any defect.
+
+    Read independently of the cell journal. The canonical append and the
+    journal write are two separate fsyncs, so a crash between them leaves a
+    durable record the journal does not yet mention; trusting the journal
+    here would re-execute that cell and append its record twice.
+
+    ``planned_trials`` maps trial key to the frozen
+    :class:`DistributedTrial` and is required. Every identity field is
+    compared, because a record is about to be accepted *in place of* running
+    that cell -- a mismatch on design, workload, repetition, or session
+    identity means the record describes different work than the plan calls
+    for. A bare key collection is rejected rather than accepted with weaker
+    structural-only checks: silently downgrading validation is exactly how a
+    mismatched record would slip through.
+
+    A duplicate, conflicting, mismatched, unknown, or malformed record is
+    refused rather than reconciled: the invariant that one canonical cell
+    appears at most once is what makes the dataset countable, and a silent
+    repair would hide exactly the corruption worth stopping for.
+    """
+    if not isinstance(planned_trials, Mapping):
+        raise CanonicalRecordError(
+            "planned_trials must map trial_key to the frozen "
+            "DistributedTrial; a bare key collection cannot support "
+            "identity validation"
+        )
+    trials: dict[str, DistributedTrial] = dict(planned_trials)
+    for key, trial in trials.items():
+        if not isinstance(trial, DistributedTrial):
+            raise CanonicalRecordError(
+                f"planned_trials[{key!r}] is not a DistributedTrial"
+            )
+
+    records: dict[str, dict[str, Any]] = {}
+    for index, row in enumerate(_read_jsonl(Path(path))):
+        location = f"{Path(path).name}:{index + 1}"
+        if not isinstance(row, dict):
+            raise CanonicalRecordError(
+                f"{location}: canonical record is not an object"
+            )
+        trial_key = row.get("trial_key")
+        if not isinstance(trial_key, str) or not trial_key.strip():
+            raise CanonicalRecordError(
+                f"{location}: canonical record has no trial_key"
+            )
+        if trial_key not in trials:
+            raise CanonicalRecordError(
+                f"{location}: canonical record names a cell that is not in "
+                f"the frozen plan: {trial_key}"
+            )
+        if schema_version is not None:
+            found = row.get("schema_version")
+            if found != schema_version:
+                raise CanonicalRecordError(
+                    f"{location}: canonical record has schema_version "
+                    f"{found!r}, expected {schema_version!r}"
+                )
+        if pilot_id is not None:
+            found = row.get("experiment_id")
+            if found != pilot_id:
+                raise CanonicalRecordError(
+                    f"{location}: canonical record belongs to pilot "
+                    f"{found!r}, not {pilot_id!r}"
+                )
+        expected = trials[trial_key].to_public_dict()
+        for field in TRIAL_IDENTITY_FIELDS:
+            if field not in row:
+                raise CanonicalRecordError(
+                    f"{location}: canonical record is missing "
+                    f"identity field {field}"
+                )
+            if row[field] != expected[field]:
+                raise CanonicalRecordError(
+                    f"{location}: canonical record {field}="
+                    f"{row[field]!r} does not match the frozen trial's "
+                    f"{expected[field]!r}; refusing to replay a record "
+                    "describing different work"
+                )
+        if not row.get("telemetry_complete"):
+            raise CanonicalRecordError(
+                f"{location}: canonical record claims incomplete telemetry"
+            )
+        if row.get("artifact_delivery_complete") is False:
+            raise CanonicalRecordError(
+                f"{location}: canonical record has an undelivered artifact"
+            )
+        existing = records.get(trial_key)
+        if existing is not None:
+            detail = (
+                "duplicate canonical record"
+                if existing == row
+                else "conflicting canonical records"
+            )
+            raise CanonicalRecordError(
+                f"{location}: {detail} for cell {trial_key}; a canonical "
+                "cell may appear at most once"
+            )
+        records[trial_key] = row
+    return records
 
 
 class CellJournal:
@@ -205,7 +340,7 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def classify_failure(exc: BaseException) -> tuple[str, str]:
+def classify_failure(exc: Exception) -> tuple[str, str]:
     """Map an exception to (observation_class, outcome_type).
 
     A cross-endpoint artifact redemption is a system delivery fault, not an
@@ -352,17 +487,29 @@ class DistributedPilotRun:
         return _read_jsonl(self.canonical_path)
 
 
-def open_distributed_pilot_run(
+def build_frozen_plan_document(
     preregistration: DistributedPilotPreregistration,
     registry: EndpointRegistry,
     *,
-    output_dir: str | Path,
-    max_attempts: int = 3,
-) -> DistributedPilotRun:
-    """Open or resume a run, refusing any change to a frozen input."""
-    output = Path(output_dir).resolve()
-    trials = build_distributed_trial_plan(preregistration)
-    plan = trial_plan_payload(preregistration, trials)
+    workloads: Mapping[str, Mapping[str, Any]] | None = None,
+    trials: Iterable[DistributedTrial] | None = None,
+) -> dict[str, Any]:
+    """Build the exact plan document both planning and execution write.
+
+    Shared so the two paths cannot drift: a plan written by the planning
+    command must compare byte-identical to the one execution recomputes, or
+    the frozen-plan gate would reject the very plan it was handed.
+    """
+    ordered = (
+        list(trials)
+        if trials is not None
+        else list(build_distributed_trial_plan(preregistration))
+    )
+    plan = trial_plan_payload(
+        preregistration,
+        ordered,
+        workloads=workloads,
+    )
     plan = {
         **plan,
         "endpoint_registry_sha256": registry.source_sha256,
@@ -375,6 +522,26 @@ def open_distributed_pilot_run(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    return plan
+
+
+def open_distributed_pilot_run(
+    preregistration: DistributedPilotPreregistration,
+    registry: EndpointRegistry,
+    *,
+    output_dir: str | Path,
+    max_attempts: int = 3,
+    workloads: Mapping[str, Mapping[str, Any]] | None = None,
+) -> DistributedPilotRun:
+    """Open or resume a run, refusing any change to a frozen input."""
+    output = Path(output_dir).resolve()
+    trials = build_distributed_trial_plan(preregistration)
+    plan = build_frozen_plan_document(
+        preregistration,
+        registry,
+        workloads=workloads,
+        trials=trials,
+    )
     ensure_frozen_plan(output / PLAN_DOCUMENT, plan)
 
     state = new_run_state(preregistration, trials, max_attempts=max_attempts)
@@ -438,11 +605,21 @@ def run_distributed_pilot(
                 "the supplied preflight report is for a different pilot"
             )
 
+    missing_workloads = sorted(
+        set(preregistration.workload_ids) - set(workloads)
+    )
+    if missing_workloads:
+        raise PilotRunnerError(
+            "no workload definition for: " + ", ".join(missing_workloads)
+        )
+    # Opened with the definitions so a changed question, object id, or
+    # accepted answer is refused before a single cell executes.
     run = open_distributed_pilot_run(
         preregistration,
         registry,
         output_dir=output_dir,
         max_attempts=max_attempts,
+        workloads=workloads,
     )
     if provider is not None:
         require = getattr(provider, "require_matching_run", None)
@@ -462,16 +639,17 @@ def run_distributed_pilot(
             "no workload definition for: " + ", ".join(missing_workloads)
         )
 
-    # A cell whose canonical record is durable but whose attempt row was
-    # lost to a crash is replayed from disk rather than re-executed.
-    durable_records = {
-        str(row.get("trial_key")): row
-        for row in run.canonical_records()
-    }
+    # Recovered from the ledger itself, never from the journal: a crash
+    # between the canonical fsync and the CANONICAL_WRITTEN journal write
+    # leaves a durable record the journal does not mention, and re-executing
+    # that cell would append its record a second time.
+    durable_records = load_durable_canonical_records(
+        run.canonical_path,
+        {trial.trial_key: trial for trial in run.trials},
+        pilot_id=preregistration.pilot_id,
+    )
     for trial in run.trials:
         if trial.trial_key in run.state.completed:
-            continue
-        if not run.journal.at_least(trial.trial_key, "CANONICAL_WRITTEN"):
             continue
         record = durable_records.get(trial.trial_key)
         if record is None:
@@ -485,6 +663,14 @@ def run_distributed_pilot(
             artifact_selected=bool(record.get("artifact_delivery_required")),
             artifact_delivery_complete=True,
         )
+        if not run.journal.at_least(trial.trial_key, "CANONICAL_WRITTEN"):
+            # The record outlived its journal entry; catch the journal up
+            # so the two agree before the attempt row is written.
+            run.journal.record(
+                trial.trial_key,
+                "CANONICAL_WRITTEN",
+                recovered_from_ledger=True,
+            )
         _append_jsonl(run.attempt_path, {
             "trial_key": trial.trial_key,
             "observation_class": "canonical",
@@ -515,6 +701,11 @@ def run_distributed_pilot(
                 attempt=attempt,
                 session_id=trial.session_id,
             )
+            # KeyboardInterrupt and SystemExit are not caught. An operator
+            # stopping the run must not have that recorded as a failed
+            # attempt, which would consume the cell's retry budget and make
+            # a deliberate stop look like a flaky endpoint. The journal
+            # entry just written is what a later resume reads.
             try:
                 execution = executor.execute(
                     trial,
@@ -522,7 +713,7 @@ def run_distributed_pilot(
                     journal=run.journal,
                     attempt=attempt,
                 )
-            except BaseException as exc:  # noqa: BLE001 - classified below
+            except Exception as exc:  # noqa: BLE001 - classified below
                 observation_class, outcome_type = classify_failure(exc)
                 _append_jsonl(run.attempt_path, {
                     "trial_key": trial.trial_key,
@@ -664,6 +855,13 @@ def run_distributed_pilot(
         "cost_basis": preregistration.cost_basis,
         "measurement_manifest_sha256": (
             getattr(provider, "manifest_sha256", None)
+        ),
+        "workload_content_sha256": workload_content_sha256(
+            workloads,
+            preregistration.workload_ids,
+        ),
+        "workload_id_manifest_sha256": (
+            preregistration.workload_manifest_sha256
         ),
         "worker_lifecycle_managed": False,
         "services_started": False,

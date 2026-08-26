@@ -104,8 +104,43 @@ def _string_array(value: Any, name: str) -> tuple[str, ...]:
 
 
 def manifest_sha256(workload_ids: Iterable[str]) -> str:
-    """Order-independent digest binding a workload set to a run."""
+    """Order-independent digest over workload IDENTIFIERS only.
+
+    This is deliberately *not* a workload-content hash: two runs whose
+    questions or accepted answers differ produce the same value. Use
+    :func:`workload_content_sha256` to bind what a workload actually says.
+    """
     canonical = "\n".join(sorted(workload_ids))
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def workload_content_sha256(
+    workloads: Mapping[str, Mapping[str, Any]],
+    workload_ids: Iterable[str],
+) -> str:
+    """Digest the complete definitions of the planned workloads.
+
+    Only planned ids contribute, so unrelated entries in a larger manifest
+    cannot invalidate a run. Each definition is serialised with sorted keys,
+    which makes the digest independent of key order in equivalent JSON while
+    still changing if any question, object id, or accepted answer changes.
+    """
+    ordered = sorted(set(workload_ids))
+    missing = [
+        workload_id for workload_id in ordered
+        if workload_id not in workloads
+    ]
+    if missing:
+        raise PilotPreregistrationError(
+            "cannot hash workload content; no definition for: "
+            + ", ".join(missing)
+        )
+    canonical = json.dumps(
+        {workload_id: workloads[workload_id] for workload_id in ordered},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
     return sha256(canonical.encode("utf-8")).hexdigest()
 
 

@@ -38,13 +38,27 @@ DISTRIBUTED_PREFLIGHT_SCHEMA_VERSION = (
 #: would corrupt a real measurement remains.
 PREFLIGHT_MODES = ("offline_validation", "live_pilot")
 
-#: Values that mark a field as not yet filled in for a real deployment.
+#: Values that mark a field as not yet filled in for a real deployment, or
+#: that admit on their face that they are not a real measurement. A rate
+#: whose provenance calls itself a fixture is exactly what live_pilot mode
+#: exists to catch, so those words are markers too.
 _PLACEHOLDER_MARKERS = (
     "PLACEHOLDER",
     "TBD",
     "CHANGEME",
+    "CHANGE_ME",
     "REPLACE_ME",
+    "REPLACEME",
     "EXAMPLE",
+    "FIXTURE",
+    "SYNTHETIC",
+    "NON-SCIENTIFIC",
+    "NOT MEASURED",
+    "NOT-MEASURED",
+    "DUMMY",
+    "SAMPLE",
+    "FIXME",
+    "XXX",
 )
 _PLACEHOLDER_GIT_REVISIONS = ("0" * 40, "0" * 7, "unknown", "none")
 

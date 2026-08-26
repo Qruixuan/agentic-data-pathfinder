@@ -22,7 +22,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .preregistration import DistributedPilotPreregistration
+from .preregistration import (
+    DistributedPilotPreregistration,
+    workload_content_sha256,
+)
 
 
 PILOT_PLAN_SCHEMA_VERSION = (
@@ -140,15 +143,31 @@ def build_distributed_trial_plan(
 def trial_plan_payload(
     preregistration: DistributedPilotPreregistration,
     trials: Iterable[DistributedTrial],
+    *,
+    workloads: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The frozen plan document written once and checked on every resume."""
+    """The frozen plan document written once and checked on every resume.
+
+    ``workloads`` supplies the definitions actually used by the plan so their
+    content, not merely their ids, is bound to the run. It is optional only
+    so an id-level plan can still be produced for inspection; a run that
+    executes anything always supplies it.
+    """
     ordered = list(trials)
     payload = {
         "schema_version": PILOT_PLAN_SCHEMA_VERSION,
         "pilot_id": preregistration.pilot_id,
         "preregistration_sha256": preregistration.source_sha256,
-        "workload_manifest_sha256": (
+        "workload_id_manifest_sha256": (
             preregistration.workload_manifest_sha256
+        ),
+        "workload_content_sha256": (
+            None
+            if workloads is None
+            else workload_content_sha256(
+                workloads,
+                preregistration.workload_ids,
+            )
         ),
         "excluded_workload_manifest_sha256": (
             preregistration.excluded_workload_manifest_sha256
@@ -192,7 +211,8 @@ def ensure_frozen_plan(path: str | Path, payload: Mapping[str, Any]) -> None:
         ) from exc
     for field, label in (
         ("preregistration_sha256", "preregistration configuration"),
-        ("workload_manifest_sha256", "workload manifest"),
+        ("workload_id_manifest_sha256", "workload id manifest"),
+        ("workload_content_sha256", "workload definitions"),
         ("excluded_workload_manifest_sha256", "excluded workload manifest"),
         ("plan_sha256", "trial plan"),
     ):
