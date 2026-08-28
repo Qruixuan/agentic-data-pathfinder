@@ -33,7 +33,9 @@ from pathfinder.data_agent_client import (
     DataAgentUnavailableError,
 )
 from pathfinder.distributed import (
+    COMPLETED_OUTCOME_TYPE,
     CanonicalRecordError,
+    load_durable_canonical_records,
     build_distributed_trial_plan,
     load_endpoint_registry,
     workload_content_sha256,
@@ -2674,6 +2676,372 @@ class PlanCommandWorkloadBindingTest(unittest.TestCase):
         ])
         self.assertEqual(2, code)
         self.assertIn("workload_id", payload["message"])
+
+
+
+class CanonicalCompletenessValidationTest(unittest.TestCase):
+    """A record may be replayed only if it explicitly asserts completeness.
+
+    Truthiness is not enough. The replay path records a recovered cell as
+    ``telemetry_complete=True`` and ``artifact_delivery_complete=True``, so a
+    missing, null, or string-typed field accepted as close enough would
+    silently promote an unfinished cell into a complete observation.
+    """
+
+    #: (label, mutation) pairs that must every one be refused.
+    REJECTED = {
+        "telemetry_complete missing": lambda row: {
+            k: v for k, v in row.items() if k != "telemetry_complete"
+        },
+        "telemetry_complete=None": lambda row: {
+            **row, "telemetry_complete": None,
+        },
+        "telemetry_complete='true'": lambda row: {
+            **row, "telemetry_complete": "true",
+        },
+        "telemetry_complete='True'": lambda row: {
+            **row, "telemetry_complete": "True",
+        },
+        "telemetry_complete=1": lambda row: {
+            **row, "telemetry_complete": 1,
+        },
+        "telemetry_complete=False": lambda row: {
+            **row, "telemetry_complete": False,
+        },
+        "telemetry_complete=0": lambda row: {
+            **row, "telemetry_complete": 0,
+        },
+        "artifact_delivery_complete missing": lambda row: {
+            k: v for k, v in row.items()
+            if k != "artifact_delivery_complete"
+        },
+        "artifact_delivery_complete=None": lambda row: {
+            **row, "artifact_delivery_complete": None,
+        },
+        "artifact_delivery_complete='true'": lambda row: {
+            **row, "artifact_delivery_complete": "true",
+        },
+        "artifact_delivery_complete=1": lambda row: {
+            **row, "artifact_delivery_complete": 1,
+        },
+        "artifact_delivery_complete=False": lambda row: {
+            **row, "artifact_delivery_complete": False,
+        },
+        "artifact_delivery_complete=[]": lambda row: {
+            **row, "artifact_delivery_complete": [],
+        },
+        "outcome_type missing": lambda row: {
+            k: v for k, v in row.items() if k != "outcome_type"
+        },
+        "outcome_type=None": lambda row: {**row, "outcome_type": None},
+        "outcome_type='infrastructure_failure'": lambda row: {
+            **row, "outcome_type": "infrastructure_failure",
+        },
+        "outcome_type='artifact_delivery_failure'": lambda row: {
+            **row, "outcome_type": "artifact_delivery_failure",
+        },
+        "outcome_type='telemetry_failure'": lambda row: {
+            **row, "outcome_type": "telemetry_failure",
+        },
+        "outcome_type='COMPLETED'": lambda row: {
+            **row, "outcome_type": "COMPLETED",
+        },
+    }
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.fixture = VerticalFixture(
+            self.root,
+            _origin_agent(),
+            _local_agent(),
+        )
+        self.trials = {
+            trial.trial_key: trial
+            for trial in build_distributed_trial_plan(
+                self.fixture.preregistration
+            )
+        }
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _seed(self, output: str) -> Path:
+        """Run to completion and return the canonical ledger path."""
+        run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            _GatewayExecutor(self.fixture),
+            output_dir=self.root / output,
+            workloads=self.fixture.workloads(),
+            provider=self.fixture.provider,
+            preflight=self.fixture.preflight(),
+        )
+        return self.root / output / "canonical_records.jsonl"
+
+    def _rewrite_first(self, ledger: Path, mutate) -> None:
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+        ledger.write_text(
+            "\n".join(
+                [json.dumps(mutate(json.loads(lines[0])), sort_keys=True)]
+                + lines[1:]
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+    def _load(self, ledger: Path):
+        return load_durable_canonical_records(
+            ledger,
+            self.trials,
+            pilot_id=self.fixture.preregistration.pilot_id,
+        )
+
+    # -- direct loader ---------------------------------------------------
+    def test_the_loader_rejects_every_incomplete_record(self) -> None:
+        ledger = self._seed("loader")
+        pristine = ledger.read_text(encoding="utf-8")
+        for label, mutate in self.REJECTED.items():
+            with self.subTest(case=label):
+                ledger.write_text(pristine, encoding="utf-8")
+                self._rewrite_first(ledger, mutate)
+                with self.assertRaises(CanonicalRecordError) as caught:
+                    self._load(ledger)
+                message = str(caught.exception)
+                field = label.split(" ")[0].split("=")[0]
+                self.assertIn(
+                    field,
+                    message,
+                    "the error must name the offending field",
+                )
+
+    def test_rejection_messages_record_the_observed_value(self) -> None:
+        ledger = self._seed("messages")
+        pristine = ledger.read_text(encoding="utf-8")
+        cases = {
+            "telemetry_complete=1": (
+                lambda row: {**row, "telemetry_complete": 1},
+                ("telemetry_complete=1", "type int"),
+            ),
+            "telemetry_complete='true'": (
+                lambda row: {**row, "telemetry_complete": "true"},
+                ("telemetry_complete='true'", "type str"),
+            ),
+            "artifact_delivery_complete=None": (
+                lambda row: {
+                    **row, "artifact_delivery_complete": None,
+                },
+                ("artifact_delivery_complete=None", "type NoneType"),
+            ),
+            "outcome_type='telemetry_failure'": (
+                lambda row: {
+                    **row, "outcome_type": "telemetry_failure",
+                },
+                ("outcome_type='telemetry_failure'", "'completed'"),
+            ),
+        }
+        for label, (mutate, expected) in cases.items():
+            with self.subTest(case=label):
+                ledger.write_text(pristine, encoding="utf-8")
+                self._rewrite_first(ledger, mutate)
+                with self.assertRaises(CanonicalRecordError) as caught:
+                    self._load(ledger)
+                for fragment in expected:
+                    self.assertIn(fragment, str(caught.exception))
+
+    def test_literal_true_with_a_completed_outcome_is_accepted(
+        self,
+    ) -> None:
+        ledger = self._seed("valid")
+        records = self._load(ledger)
+        self.assertEqual(8, len(records))
+        for record in records.values():
+            self.assertIs(True, record["telemetry_complete"])
+            self.assertIs(True, record["artifact_delivery_complete"])
+            self.assertEqual("completed", record["outcome_type"])
+
+    def test_the_accepted_shape_is_exactly_what_the_runner_writes(
+        self,
+    ) -> None:
+        """Guards against the writer and validator drifting apart."""
+        ledger = self._seed("shape")
+        rows = [
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+        ]
+        for row in rows:
+            self.assertIs(True, row["telemetry_complete"])
+            self.assertIs(True, row["artifact_delivery_complete"])
+            self.assertEqual(COMPLETED_OUTCOME_TYPE, row["outcome_type"])
+
+    # -- full resume path ------------------------------------------------
+    def test_the_resume_path_rejects_every_incomplete_record(self) -> None:
+        for label, mutate in self.REJECTED.items():
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    fixture = VerticalFixture(
+                        root,
+                        _origin_agent(),
+                        _local_agent(),
+                    )
+                    arguments = {
+                        "output_dir": root / "run",
+                        "workloads": fixture.workloads(),
+                        "provider": fixture.provider,
+                        "preflight": fixture.preflight(),
+                    }
+                    run_distributed_pilot(
+                        fixture.preregistration,
+                        fixture.registry,
+                        _GatewayExecutor(fixture),
+                        **arguments,
+                    )
+                    ledger = root / "run" / "canonical_records.jsonl"
+                    lines = ledger.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    ledger.write_text(
+                        "\n".join(
+                            [
+                                json.dumps(
+                                    mutate(json.loads(lines[0])),
+                                    sort_keys=True,
+                                )
+                            ] + lines[1:]
+                        ) + "\n",
+                        encoding="utf-8",
+                    )
+                    # Force the replay path to be consulted.
+                    (root / "run" / "attempt_ledger.jsonl").unlink()
+                    executor = _GatewayExecutor(fixture)
+                    with self.assertRaises(CanonicalRecordError):
+                        run_distributed_pilot(
+                            fixture.preregistration,
+                            fixture.registry,
+                            executor,
+                            **arguments,
+                        )
+                    self.assertEqual(
+                        [],
+                        executor.sessions,
+                        "a rejected ledger must not execute anything",
+                    )
+
+    def test_a_rejected_record_writes_nothing_and_advances_nothing(
+        self,
+    ) -> None:
+        ledger = self._seed("frozen")
+        run_dir = self.root / "frozen"
+        attempts = run_dir / "attempt_ledger.jsonl"
+        journal = run_dir / "cell_journal.jsonl"
+        self._rewrite_first(
+            ledger,
+            lambda row: {
+                k: v for k, v in row.items()
+                if k != "artifact_delivery_complete"
+            },
+        )
+        before = {
+            path.name: path.read_bytes()
+            for path in (ledger, attempts, journal)
+        }
+        executor = _GatewayExecutor(self.fixture)
+        with self.assertRaises(CanonicalRecordError):
+            run_distributed_pilot(
+                self.fixture.preregistration,
+                self.fixture.registry,
+                executor,
+                output_dir=run_dir,
+                workloads=self.fixture.workloads(),
+                provider=self.fixture.provider,
+                preflight=self.fixture.preflight(),
+            )
+        self.assertEqual([], executor.sessions)
+        for path in (ledger, attempts, journal):
+            self.assertEqual(
+                before[path.name],
+                path.read_bytes(),
+                f"{path.name} must be untouched by a rejected resume",
+            )
+
+    def test_a_failed_outcome_record_is_never_promoted(self) -> None:
+        """The reported bug: a delivery failure replayed as an observation."""
+        ledger = self._seed("promote")
+        self._rewrite_first(ledger, lambda row: {
+            **row,
+            "outcome_type": "artifact_delivery_failure",
+            "artifact_delivery_complete": False,
+            "task_success": None,
+        })
+        (self.root / "promote" / "attempt_ledger.jsonl").unlink()
+        with self.assertRaises(CanonicalRecordError):
+            run_distributed_pilot(
+                self.fixture.preregistration,
+                self.fixture.registry,
+                _GatewayExecutor(self.fixture),
+                output_dir=self.root / "promote",
+                workloads=self.fixture.workloads(),
+                provider=self.fixture.provider,
+                preflight=self.fixture.preflight(),
+            )
+
+    def test_a_valid_crash_window_record_still_replays(self) -> None:
+        """The tightened checks must not break legitimate recovery."""
+        import pathfinder.distributed.execution as execution
+
+        real_record = execution.CellJournal.record
+        state = {"armed": True}
+
+        def crashing_record(self, trial_key, cell_state, **detail):
+            if state["armed"] and cell_state == "CANONICAL_WRITTEN":
+                state["armed"] = False
+                raise _CanonicalBoom("died before journaling")
+            return real_record(self, trial_key, cell_state, **detail)
+
+        arguments = {
+            "output_dir": self.root / "window",
+            "workloads": self.fixture.workloads(),
+            "provider": self.fixture.provider,
+            "preflight": self.fixture.preflight(),
+        }
+        with mock.patch.object(
+            execution.CellJournal,
+            "record",
+            crashing_record,
+        ):
+            try:
+                run_distributed_pilot(
+                    self.fixture.preregistration,
+                    self.fixture.registry,
+                    _GatewayExecutor(self.fixture),
+                    max_attempts=1,
+                    **arguments,
+                )
+            except _CanonicalBoom:
+                pass
+
+        crashed_key = json.loads(
+            (
+                self.root / "window" / "canonical_records.jsonl"
+            ).read_text(encoding="utf-8").splitlines()[0]
+        )["trial_key"]
+        executor = _GatewayExecutor(self.fixture)
+        summary = run_distributed_pilot(
+            self.fixture.preregistration,
+            self.fixture.registry,
+            executor,
+            **arguments,
+        )
+        self.assertTrue(summary["oracle_complete"])
+        keys = [
+            json.loads(line)["trial_key"]
+            for line in (
+                self.root / "window" / "canonical_records.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(8, len(keys))
+        self.assertEqual(1, keys.count(crashed_key))
+        self.assertEqual(7, len(executor.sessions))
 
 
 # --------------------------------------------------------------------------

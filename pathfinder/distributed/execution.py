@@ -82,6 +82,11 @@ CELL_STATES = (
 )
 _STATE_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 
+#: The only outcome a canonical record may carry to be recoverable. A
+#: delivery, telemetry, or infrastructure failure is an attempt, not an
+#: observation, and must never be replayed as one.
+COMPLETED_OUTCOME_TYPE = "completed"
+
 
 class PreflightRequiredError(PilotRunnerError):
     """Raised when execution is attempted without a passing preflight."""
@@ -196,13 +201,40 @@ def load_durable_canonical_records(
                     f"{expected[field]!r}; refusing to replay a record "
                     "describing different work"
                 )
-        if not row.get("telemetry_complete"):
+        # Identity comparison alone does not make a record admissible: it
+        # must also assert completeness in the exact form this pipeline
+        # writes. Truthiness is not enough here. A replayed record is
+        # recorded downstream as telemetry_complete=True and
+        # artifact_delivery_complete=True, so a missing, null, or
+        # string-typed field accepted as "close enough" would silently
+        # promote an unfinished or corrupted cell into a complete
+        # scientific observation.
+        for field in ("telemetry_complete", "artifact_delivery_complete"):
+            if field not in row:
+                raise CanonicalRecordError(
+                    f"{location}: canonical record is missing {field}; "
+                    "only a record that explicitly asserts completeness may "
+                    "be replayed"
+                )
+            value = row[field]
+            if value is not True:
+                raise CanonicalRecordError(
+                    f"{location}: canonical record {field}={value!r} "
+                    f"(type {type(value).__name__}) is not the literal True; "
+                    "refusing to replay a record that does not assert "
+                    "completeness"
+                )
+        if "outcome_type" not in row:
             raise CanonicalRecordError(
-                f"{location}: canonical record claims incomplete telemetry"
+                f"{location}: canonical record is missing outcome_type"
             )
-        if row.get("artifact_delivery_complete") is False:
+        outcome_type = row["outcome_type"]
+        if outcome_type != COMPLETED_OUTCOME_TYPE:
             raise CanonicalRecordError(
-                f"{location}: canonical record has an undelivered artifact"
+                f"{location}: canonical record outcome_type="
+                f"{outcome_type!r} is not "
+                f"{COMPLETED_OUTCOME_TYPE!r}; only a completed observation "
+                "may be recovered"
             )
         existing = records.get(trial_key)
         if existing is not None:
