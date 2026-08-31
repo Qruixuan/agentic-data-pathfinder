@@ -24,6 +24,21 @@ The staged experiment and acceptance criteria for moving from the completed
 FlowMesh smoke tests to full Performative Physical Design validation are in
 [PPD_VALIDATION_PROTOCOL.md](PPD_VALIDATION_PROTOCOL.md).
 
+The proposed public dataset and benchmark is specified in
+[PATHFINDERBENCH_PROPOSAL.md](PATHFINDERBENCH_PROPOSAL.md). It defines one PPD
+benchmark whose primary live end-to-end mode is accompanied by a portable
+offline trace-replay and reproducibility mode. It also defines the workload and
+observation contracts and treats the current 16-workload corpus as a
+development seed rather than a public test set.
+
+The first, smaller deliverable is the offline
+[workload evaluation package](WORKLOAD_EVALUATION.md): audit a frozen distributed
+pilot and reproduce task scores, five-component costs, actual access routes,
+payload-byte accounting, and workload-paired comparisons without any private
+service. It includes a deterministic synthetic format example and hand-calculated
+regression expectations. This is an evaluation-script release for the existing
+workload, not a new public dataset, leaderboard, or confirmation of PPD claims.
+
 The minimum infrastructure for a *distributed* pilot, in which origin and
 local representations live on different Data Agent nodes, is in
 `pathfinder/distributed/` and documented in

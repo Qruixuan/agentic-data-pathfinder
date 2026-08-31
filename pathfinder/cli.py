@@ -38,6 +38,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
+    evaluation = subcommands.add_parser(
+        "evaluate-distributed-pilot",
+        help="audit and summarize a complete frozen workload pilot offline",
+    )
+    for flag in ("run-dir", "preregistration", "endpoint-registry",
+                 "workload-manifest", "measurement-manifest", "output-dir"):
+        evaluation.add_argument("--" + flag, type=Path, required=True)
+    example = subcommands.add_parser(
+        "create-workload-evaluation-example",
+        help="create a deterministic synthetic format example, never a live run",
+    )
+    example.add_argument("--output-dir", type=Path, required=True)
+
     validate = subcommands.add_parser(
         "validate-config",
         help="validate the experiment contract",
@@ -803,6 +816,28 @@ def _print_payload(payload: object, *, compact: bool) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "evaluate-distributed-pilot":
+            from .evaluation import evaluate_distributed_pilot
+
+            result = evaluate_distributed_pilot(
+                args.run_dir, preregistration=args.preregistration,
+                endpoint_registry=args.endpoint_registry,
+                workload_manifest=args.workload_manifest,
+                measurement_manifest=args.measurement_manifest,
+                output_dir=args.output_dir,
+            )
+            print(json.dumps({key: result[key] for key in (
+                "status", "pilot_id", "input_origin", "planned_trials",
+                "canonical_records", "independent_workloads", "attempt_records",
+                "attempt_classes", "failure_classes", "paired_aggregates",
+                "eligible_for_scientific_claims",
+            )}, indent=2))
+            return 0
+        if args.command == "create-workload-evaluation-example":
+            from .evaluation.example import create_evaluation_example
+
+            print(json.dumps(create_evaluation_example(args.output_dir), indent=2))
+            return 0
         if args.command == "serve-data-agent":
             from .data_agent_server import (
                 DataAgentServerSettings,

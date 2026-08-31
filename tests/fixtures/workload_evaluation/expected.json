@@ -1,0 +1,20 @@
+{
+  "description": "Hand-calculated synthetic arithmetic, not real experiment results. Six safe sessions and six candidate sessions across three objects.",
+  "planned_trials": 12,
+  "independent_workloads": 3,
+  "attempt_records": 13,
+  "attempt_classes": {"canonical": 12, "infrastructure": 1},
+  "safe_successes": 6,
+  "candidate_successes": 5,
+  "safe_mean_total_cost": 2.1953125,
+  "candidate_mean_total_cost": 1.19921875,
+  "mean_success_delta": -0.16666666666666666,
+  "mean_total_cost_delta": -0.99609375,
+  "safe_cross_node_bytes": 200.0,
+  "candidate_cross_node_bytes": 33.333333333333336,
+  "per_workload_total_cost_delta": {
+    "example-causal": 0.25,
+    "example-descriptive": -1.640625,
+    "example-temporal": -1.59765625
+  }
+}
