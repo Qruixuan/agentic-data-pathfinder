@@ -38,6 +38,9 @@ payload-byte accounting, and workload-paired comparisons without any private
 service. It includes a deterministic synthetic format example and hand-calculated
 regression expectations. This is an evaluation-script release for the existing
 workload, not a new public dataset, leaderboard, or confirmation of PPD claims.
+The first two-node run and its byte-identical offline reproduction on a second
+machine are summarized in
+[DISTRIBUTED_CONFORMANCE_REPRODUCIBILITY_RESULTS.md](DISTRIBUTED_CONFORMANCE_REPRODUCIBILITY_RESULTS.md).
 
 The minimum infrastructure for a *distributed* pilot, in which origin and
 local representations live on different Data Agent nodes, is in
