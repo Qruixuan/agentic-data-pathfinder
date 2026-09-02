@@ -130,6 +130,18 @@ Before running Pathfinder:
 The complete representation manifest must be hashed before the first cohort
 execution.
 
+If local preparation is interrupted after complete per-object files have been
+written, `pathfinder.video_prep --resume-from <checkpoint>` may reuse only an
+operator-frozen checkpoint containing `INTERRUPTION.json` and a complete
+`INTERRUPTED_SHA256SUMS`. Recovery verifies every checkpoint hash, the source
+video hashes, model, prompt, sampling contract, and representation structure
+before making an inference request. It calls the model only for missing
+objects, leaves the checkpoint unchanged, and records the recovery in the
+final generation manifest. Historical protocol-attempt counts that were not
+persisted before interruption remain explicitly null; they are never guessed.
+Run the same command with `--audit-resume-only` first to report the reusable
+and missing objects without loading an API key or making an inference request.
+
 ## Gate 4: physical deployment and measured cost contract
 
 The endpoint registry must identify the origin node, execution node, every

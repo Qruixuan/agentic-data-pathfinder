@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib import metadata
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
@@ -35,6 +35,14 @@ FORMAL_VIDEO_IDS = (
 DEFAULT_FRAME_COUNT = 16
 DEFAULT_JPEG_MAX_DIMENSION = 768
 DEFAULT_PROTOCOL_MAX_ATTEMPTS = 3
+INTERRUPTION_SCHEMA_VERSION = (
+    "pathfinder.interrupted-representation-prep/v0.1"
+)
+RECOVERY_SCHEMA_VERSION = (
+    "pathfinder.video-representation-recovery/v1alpha1"
+)
+INTERRUPTION_MANIFEST_NAME = "INTERRUPTION.json"
+INTERRUPTION_CHECKSUMS_NAME = "INTERRUPTED_SHA256SUMS"
 
 _PROTOCOL_REPAIR_PROMPT = """Your previous response did not satisfy the required
 JSON schema. Return the complete response again as exactly one valid JSON
@@ -98,6 +106,15 @@ class SampledImage:
     width: int
     height: int
     jpeg_bytes: bytes
+
+
+@dataclass(frozen=True)
+class AuditedRecoveryCheckpoint:
+    checkpoint_name: str
+    interruption_manifest_sha256: str
+    checksum_manifest_sha256: str
+    file_hashes: Mapping[str, str]
+    entries: Mapping[str, Mapping[str, Any]]
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -626,6 +643,468 @@ def load_selection_video_ids(path: Path) -> tuple[str, ...]:
     return _normalize_video_ids(video_ids)
 
 
+def _load_json_mapping(path: Path, name: str) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise VideoPreparationError(f"cannot read {name}: {path}") from exc
+    if not isinstance(payload, Mapping):
+        raise VideoPreparationError(f"{name} must be a JSON object")
+    return payload
+
+
+def _verify_interrupted_checksums(root: Path) -> dict[str, str]:
+    checksum_path = root / INTERRUPTION_CHECKSUMS_NAME
+    try:
+        lines = checksum_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise VideoPreparationError(
+            f"cannot read interrupted checksum manifest: {checksum_path}"
+        ) from exc
+    if not lines:
+        raise VideoPreparationError("interrupted checksum manifest is empty")
+
+    recorded: dict[str, str] = {}
+    for line in lines:
+        if "  " not in line:
+            raise VideoPreparationError(
+                "interrupted checksum entry is malformed"
+            )
+        expected_hash, relative_text = line.split("  ", 1)
+        if len(expected_hash) != 64 or any(
+            character not in "0123456789abcdef"
+            for character in expected_hash
+        ):
+            raise VideoPreparationError(
+                "interrupted checksum entry has an invalid SHA-256"
+            )
+        relative = PurePosixPath(relative_text)
+        if (
+            not relative_text
+            or "\\" in relative_text
+            or relative.is_absolute()
+            or relative.as_posix() != relative_text
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise VideoPreparationError(
+                "interrupted checksum entry has an unsafe path"
+            )
+        if relative_text == INTERRUPTION_CHECKSUMS_NAME:
+            raise VideoPreparationError(
+                "interrupted checksum manifest must not hash itself"
+            )
+        if relative_text in recorded:
+            raise VideoPreparationError(
+                f"duplicate interrupted checksum path: {relative_text}"
+            )
+        recorded[relative_text] = expected_hash
+
+    discovered: dict[str, Path] = {}
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise VideoPreparationError(
+                f"interrupted checkpoint contains a symbolic link: {path.name}"
+            )
+        if not path.is_file() or path == checksum_path:
+            continue
+        relative_text = path.relative_to(root).as_posix()
+        discovered[relative_text] = path
+
+    if set(recorded) != set(discovered):
+        missing = sorted(set(discovered) - set(recorded))
+        unexpected = sorted(set(recorded) - set(discovered))
+        raise VideoPreparationError(
+            "interrupted checkpoint checksum coverage is incomplete; "
+            f"unrecorded={missing}, missing_files={unexpected}"
+        )
+
+    for relative_text, expected_hash in recorded.items():
+        if _sha256_file(discovered[relative_text]) != expected_hash:
+            raise VideoPreparationError(
+                "interrupted checkpoint checksum mismatch: "
+                f"{relative_text}"
+            )
+    return recorded
+
+
+def _validate_recovered_frame_payload(
+    *,
+    payload: Mapping[str, Any],
+    object_id: str,
+    video_id: str,
+    source: Path,
+    model: str,
+    frame_count: int,
+    jpeg_max_dimension: int,
+) -> None:
+    if payload.get("schema_version") != FRAME_SCHEMA_VERSION:
+        raise VideoPreparationError(
+            f"recovered frame schema is invalid: {object_id}"
+        )
+    if payload.get("object_id") != object_id:
+        raise VideoPreparationError(
+            f"recovered frame object ID is invalid: {object_id}"
+        )
+    if payload.get("source_video_id") != video_id:
+        raise VideoPreparationError(
+            f"recovered frame video ID is invalid: {object_id}"
+        )
+    if payload.get("source_video_sha256") != _sha256_file(source):
+        raise VideoPreparationError(
+            f"recovered frame source hash is invalid: {object_id}"
+        )
+
+    duration = payload.get("source_duration_seconds")
+    if (
+        isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+        or not math.isfinite(float(duration))
+        or float(duration) <= 0
+    ):
+        raise VideoPreparationError(
+            f"recovered frame duration is invalid: {object_id}"
+        )
+
+    sampling = payload.get("sampling")
+    if (
+        not isinstance(sampling, Mapping)
+        or set(sampling) != {
+            "method",
+            "frame_count",
+            "jpeg_max_dimension",
+        }
+        or sampling.get("method") != "uniform-midpoint"
+        or type(sampling.get("frame_count")) is not int
+        or sampling.get("frame_count") != frame_count
+        or type(sampling.get("jpeg_max_dimension")) is not int
+        or sampling.get("jpeg_max_dimension") != jpeg_max_dimension
+    ):
+        raise VideoPreparationError(
+            f"recovered frame sampling contract is invalid: {object_id}"
+        )
+
+    generator = payload.get("generator")
+    if (
+        not isinstance(generator, Mapping)
+        or set(generator) != {"model", "temperature", "prompt_sha256"}
+        or generator.get("model") != model
+        or type(generator.get("temperature")) is not int
+        or generator.get("temperature") != 0
+        or generator.get("prompt_sha256")
+        != _sha256_bytes(FRAME_PROMPT.encode("utf-8"))
+    ):
+        raise VideoPreparationError(
+            f"recovered frame generator contract is invalid: {object_id}"
+        )
+
+    frames = payload.get("frames")
+    if not isinstance(frames, list) or len(frames) != frame_count:
+        raise VideoPreparationError(
+            f"recovered frame count is invalid: {object_id}"
+        )
+    for index, frame in enumerate(frames):
+        if (
+            not isinstance(frame, Mapping)
+            or type(frame.get("frame_index")) is not int
+            or frame.get("frame_index") != index
+        ):
+            raise VideoPreparationError(
+                f"recovered frame ordering is invalid: {object_id}"
+            )
+        timestamp = frame.get("timestamp_seconds")
+        width = frame.get("width")
+        height = frame.get("height")
+        description = frame.get("description")
+        visible_text = frame.get("visible_text")
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or not math.isfinite(float(timestamp))
+            or float(timestamp) < 0
+            or float(timestamp) > float(duration) + 0.001
+        ):
+            raise VideoPreparationError(
+                f"recovered frame timestamp is invalid: {object_id}"
+            )
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or isinstance(height, bool)
+            or not isinstance(height, int)
+            or width <= 0
+            or height <= 0
+            or max(width, height) > jpeg_max_dimension
+        ):
+            raise VideoPreparationError(
+                f"recovered frame dimensions are invalid: {object_id}"
+            )
+        if not isinstance(description, str) or not description.strip():
+            raise VideoPreparationError(
+                f"recovered frame description is invalid: {object_id}"
+            )
+        if visible_text is not None and (
+            not isinstance(visible_text, str) or not visible_text.strip()
+        ):
+            raise VideoPreparationError(
+                f"recovered visible text is invalid: {object_id}"
+            )
+
+
+def _validate_recovered_digest(text: str, object_id: str) -> None:
+    lines = text.splitlines()
+    if (
+        not text.endswith("\n")
+        or len(lines) < 6
+        or lines[0] != "PATHFINDER QUESTION-INDEPENDENT MULTIMODAL DIGEST"
+        or lines[1] != f"Object: {object_id}"
+        or lines[2] != "Timeline:"
+        or "Summary:" not in lines[3:]
+    ):
+        raise VideoPreparationError(
+            f"recovered digest structure is invalid: {object_id}"
+        )
+    summary_index = lines.index("Summary:", 3)
+    if (
+        summary_index == 3
+        or any(not line.startswith("- [") for line in lines[3:summary_index])
+        or not any(line.strip() for line in lines[summary_index + 1 :])
+    ):
+        raise VideoPreparationError(
+            f"recovered digest content is invalid: {object_id}"
+        )
+
+
+def _load_audited_recovery_checkpoint(
+    *,
+    root: Path,
+    video_directory: Path,
+    ordered_video_ids: Sequence[str],
+    model: str,
+    frame_count: int,
+    jpeg_max_dimension: int,
+) -> AuditedRecoveryCheckpoint:
+    if not root.is_dir() or root.is_symlink():
+        raise VideoPreparationError(
+            f"interrupted checkpoint is not a regular directory: {root}"
+        )
+    file_hashes = _verify_interrupted_checksums(root)
+    interruption_path = root / INTERRUPTION_MANIFEST_NAME
+    interruption = _load_json_mapping(
+        interruption_path,
+        "interruption manifest",
+    )
+    if interruption.get("schema_version") != INTERRUPTION_SCHEMA_VERSION:
+        raise VideoPreparationError("unsupported interruption schema_version")
+    if interruption.get("status") != "INTERRUPTED":
+        raise VideoPreparationError("interruption status must be INTERRUPTED")
+    if interruption.get("model") != model:
+        raise VideoPreparationError(
+            "interruption model does not match the requested model"
+        )
+    if (
+        type(interruption.get("expected_object_count")) is not int
+        or interruption.get("expected_object_count")
+        != len(ordered_video_ids)
+    ):
+        raise VideoPreparationError(
+            "interruption expected object count does not match the selection"
+        )
+    if interruption.get("final_output_created") is not False:
+        raise VideoPreparationError(
+            "interruption manifest must explicitly record no final output"
+        )
+    if interruption.get("incomplete_object_directories") != []:
+        raise VideoPreparationError(
+            "interruption checkpoint contains incomplete object directories"
+        )
+    if interruption.get("protocol_attempts_for_recovered_objects") != (
+        "not persisted before interruption"
+    ):
+        raise VideoPreparationError(
+            "interruption manifest must disclose missing protocol attempts"
+        )
+
+    expected_objects = {
+        f"nextqa-val-{video_id}": video_id
+        for video_id in ordered_video_ids
+    }
+    object_directories = {
+        path.name: path
+        for path in root.iterdir()
+        if path.is_dir()
+    }
+    unexpected_objects = sorted(set(object_directories) - set(expected_objects))
+    if unexpected_objects:
+        raise VideoPreparationError(
+            "interruption checkpoint has unexpected objects: "
+            f"{unexpected_objects}"
+        )
+    if not object_directories:
+        raise VideoPreparationError("interruption checkpoint has no objects")
+    if (
+        type(interruption.get("complete_object_count")) is not int
+        or interruption.get("complete_object_count")
+        != len(object_directories)
+    ):
+        raise VideoPreparationError(
+            "interruption complete object count does not match the checkpoint"
+        )
+
+    allowed_top_level_files = {
+        INTERRUPTION_MANIFEST_NAME,
+        INTERRUPTION_CHECKSUMS_NAME,
+    }
+    unexpected_top_level = sorted(
+        path.name
+        for path in root.iterdir()
+        if path.is_file() and path.name not in allowed_top_level_files
+    )
+    if unexpected_top_level:
+        raise VideoPreparationError(
+            "interruption checkpoint has unexpected top-level files: "
+            f"{unexpected_top_level}"
+        )
+
+    entries: dict[str, Mapping[str, Any]] = {}
+    for object_id, object_directory in object_directories.items():
+        video_id = expected_objects[object_id]
+        source = video_directory / f"{video_id}.mp4"
+        expected_files = {"sampled_frames.json", "multimodal_digest.txt"}
+        actual_files = {
+            path.name
+            for path in object_directory.iterdir()
+            if path.is_file()
+        }
+        if actual_files != expected_files or any(
+            path.is_dir() for path in object_directory.iterdir()
+        ):
+            raise VideoPreparationError(
+                f"recovered object files are invalid: {object_id}"
+            )
+
+        frames_path = object_directory / "sampled_frames.json"
+        digest_path = object_directory / "multimodal_digest.txt"
+        frame_payload = _load_json_mapping(
+            frames_path,
+            f"recovered frames for {object_id}",
+        )
+        _validate_recovered_frame_payload(
+            payload=frame_payload,
+            object_id=object_id,
+            video_id=video_id,
+            source=source,
+            model=model,
+            frame_count=frame_count,
+            jpeg_max_dimension=jpeg_max_dimension,
+        )
+        try:
+            digest_text = digest_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise VideoPreparationError(
+                f"cannot read recovered digest: {object_id}"
+            ) from exc
+        _validate_recovered_digest(digest_text, object_id)
+
+        frame_bytes = frames_path.read_bytes()
+        digest_bytes = digest_path.read_bytes()
+        entries[object_id] = {
+            "object_id": object_id,
+            "source_video": {
+                "filename": source.name,
+                "size_bytes": source.stat().st_size,
+                "sha256": _sha256_file(source),
+            },
+            "protocol_attempts": {
+                "frame_descriptions": None,
+                "multimodal_digest": None,
+            },
+            "recovery": {
+                "kind": "audited-interrupted-checkpoint",
+                "historical_protocol_attempts_recorded": False,
+            },
+            "representations": {
+                "sampled_frames": {
+                    "path": f"{object_id}/sampled_frames.json",
+                    "size_bytes": len(frame_bytes),
+                    "sha256": _sha256_bytes(frame_bytes),
+                },
+                "multimodal_digest": {
+                    "path": f"{object_id}/multimodal_digest.txt",
+                    "size_bytes": len(digest_bytes),
+                    "sha256": _sha256_bytes(digest_bytes),
+                },
+            },
+        }
+
+    return AuditedRecoveryCheckpoint(
+        checkpoint_name=root.name,
+        interruption_manifest_sha256=_sha256_file(interruption_path),
+        checksum_manifest_sha256=_sha256_file(
+            root / INTERRUPTION_CHECKSUMS_NAME
+        ),
+        file_hashes=file_hashes,
+        entries=entries,
+    )
+
+
+def audit_recovery_checkpoint(
+    *,
+    root: Path,
+    video_directory: Path,
+    model: str,
+    frame_count: int,
+    jpeg_max_dimension: int,
+    video_ids: Sequence[str],
+) -> dict[str, Any]:
+    ordered_video_ids = _normalize_video_ids(video_ids)
+    paths = {path.stem: path for path in video_directory.glob("*.mp4")}
+    expected = set(ordered_video_ids)
+    if set(paths) != expected:
+        missing = sorted(expected - set(paths))
+        unexpected = sorted(set(paths) - expected)
+        raise VideoPreparationError(
+            "video directory does not match the frozen video IDs; "
+            f"missing={missing}, unexpected={unexpected}"
+        )
+    if not isinstance(model, str) or not model.strip():
+        raise VideoPreparationError("LLM model is required")
+    checkpoint = _load_audited_recovery_checkpoint(
+        root=root,
+        video_directory=video_directory,
+        ordered_video_ids=ordered_video_ids,
+        model=model.strip(),
+        frame_count=frame_count,
+        jpeg_max_dimension=jpeg_max_dimension,
+    )
+    recovered = set(checkpoint.entries)
+    ordered_objects = [
+        f"nextqa-val-{video_id}" for video_id in ordered_video_ids
+    ]
+    return {
+        "status": "recovery_audit_ok",
+        "checkpoint_name": checkpoint.checkpoint_name,
+        "model": model.strip(),
+        "expected_object_count": len(ordered_objects),
+        "recovered_object_count": len(recovered),
+        "missing_object_count": len(ordered_objects) - len(recovered),
+        "recovered_object_ids": [
+            object_id for object_id in ordered_objects if object_id in recovered
+        ],
+        "missing_object_ids": [
+            object_id
+            for object_id in ordered_objects
+            if object_id not in recovered
+        ],
+        "interruption_manifest_sha256": (
+            checkpoint.interruption_manifest_sha256
+        ),
+        "checksum_manifest_sha256": checkpoint.checksum_manifest_sha256,
+        "historical_protocol_attempts_recorded": False,
+        "inference_requests_made": False,
+        "credentials_recorded": False,
+    }
+
+
 def prepare_representations(
     *,
     video_directory: Path,
@@ -636,6 +1115,7 @@ def prepare_representations(
     base_seed: int = 7301,
     video_ids: Sequence[str] = FORMAL_VIDEO_IDS,
     protocol_max_attempts: int = DEFAULT_PROTOCOL_MAX_ATTEMPTS,
+    resume_from: Path | None = None,
 ) -> dict[str, Any]:
     ordered_video_ids = _normalize_video_ids(video_ids)
     paths = {path.stem: path for path in video_directory.glob("*.mp4")}
@@ -651,6 +1131,19 @@ def prepare_representations(
         raise VideoPreparationError(
             f"output directory already exists: {output_directory}"
         )
+    recovery = (
+        _load_audited_recovery_checkpoint(
+            root=resume_from,
+            video_directory=video_directory,
+            ordered_video_ids=ordered_video_ids,
+            model=client.model,
+            frame_count=frame_count,
+            jpeg_max_dimension=jpeg_max_dimension,
+        )
+        if resume_from is not None
+        else None
+    )
+    recovered_entries = recovery.entries if recovery is not None else {}
     output_directory.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(
         tempfile.mkdtemp(
@@ -663,6 +1156,15 @@ def prepare_representations(
         for position, video_id in enumerate(ordered_video_ids):
             source = paths[video_id]
             object_id = f"nextqa-val-{video_id}"
+            if object_id in recovered_entries:
+                assert resume_from is not None
+                shutil.copytree(
+                    resume_from / object_id,
+                    staging / object_id,
+                )
+                generated.append(dict(recovered_entries[object_id]))
+                print(f"recovered {object_id}", flush=True)
+                continue
             print(f"sampling {object_id}", flush=True)
             images, duration = sample_video(
                 source,
@@ -762,6 +1264,24 @@ def prepare_representations(
             )
             print(f"prepared {object_id}", flush=True)
 
+        if recovery is not None:
+            current_hashes = _verify_interrupted_checksums(resume_from)
+            current_interruption_sha256 = _sha256_file(
+                resume_from / INTERRUPTION_MANIFEST_NAME
+            )
+            current_checksum_sha256 = _sha256_file(
+                resume_from / INTERRUPTION_CHECKSUMS_NAME
+            )
+            if (
+                current_hashes != recovery.file_hashes
+                or current_interruption_sha256
+                != recovery.interruption_manifest_sha256
+                or current_checksum_sha256 != recovery.checksum_manifest_sha256
+            ):
+                raise VideoPreparationError(
+                    "interrupted checkpoint changed during recovery"
+                )
+
         manifest = {
             "schema_version": PREP_SCHEMA_VERSION,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -788,6 +1308,25 @@ def prepare_representations(
             "objects": generated,
             "credentials_recorded": False,
         }
+        if recovery is not None:
+            manifest["recovery"] = {
+                "schema_version": RECOVERY_SCHEMA_VERSION,
+                "mode": "audited-interrupted-checkpoint",
+                "checkpoint_name": recovery.checkpoint_name,
+                "interruption_manifest_sha256": (
+                    recovery.interruption_manifest_sha256
+                ),
+                "checksum_manifest_sha256": (
+                    recovery.checksum_manifest_sha256
+                ),
+                "recovered_object_count": len(recovered_entries),
+                "newly_generated_object_count": (
+                    len(ordered_video_ids) - len(recovered_entries)
+                ),
+                "historical_protocol_attempts_recorded": False,
+                "checkpoint_integrity_reverified_before_finalization": True,
+                "source_checkpoint_mutated": False,
+            }
         _write_atomic(
             staging / "generation-manifest.json",
             _json_bytes(manifest),
@@ -887,6 +1426,22 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--resume-from",
+        type=Path,
+        help=(
+            "reuse strictly validated objects from an audited interrupted "
+            "checkpoint and call the LLM only for missing objects"
+        ),
+    )
+    parser.add_argument(
+        "--audit-resume-only",
+        action="store_true",
+        help=(
+            "validate the interrupted checkpoint and report reusable and "
+            "missing objects without making an inference request"
+        ),
+    )
+    parser.add_argument(
         "--probe-only",
         action="store_true",
         help="validate one image request without writing representations",
@@ -906,6 +1461,29 @@ def main(argv: Iterable[str] | None = None) -> int:
             video_ids = _normalize_video_ids(args.video_ids)
         else:
             video_ids = FORMAL_VIDEO_IDS
+        if args.audit_resume_only:
+            if args.resume_from is None:
+                raise VideoPreparationError(
+                    "--audit-resume-only requires --resume-from"
+                )
+            if args.probe_only:
+                raise VideoPreparationError(
+                    "--audit-resume-only cannot be combined with --probe-only"
+                )
+            print(
+                json.dumps(
+                    audit_recovery_checkpoint(
+                        root=args.resume_from.resolve(),
+                        video_directory=args.video_dir.resolve(),
+                        model=args.model,
+                        frame_count=args.frame_count,
+                        jpeg_max_dimension=args.jpeg_max_dimension,
+                        video_ids=video_ids,
+                    ),
+                    indent=2,
+                )
+            )
+            return 0
         client = OpenAICompatibleVisionClient(
             base_url=args.base_url,
             api_key=api_key,
@@ -936,6 +1514,11 @@ def main(argv: Iterable[str] | None = None) -> int:
             base_seed=args.base_seed,
             video_ids=video_ids,
             protocol_max_attempts=args.protocol_max_attempts,
+            resume_from=(
+                args.resume_from.resolve()
+                if args.resume_from is not None
+                else None
+            ),
         )
     except VideoPreparationError as exc:
         print(json.dumps({"status": "error", "message": str(exc)}))

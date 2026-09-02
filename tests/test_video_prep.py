@@ -1,25 +1,33 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pathfinder.video_prep import (
     DIGEST_PROMPT,
+    FRAME_SCHEMA_VERSION,
     FORMAL_VIDEO_IDS,
     FRAME_PROMPT,
     PreparationProtocolError,
     SampledImage,
     VideoPreparationError,
     _decode_json_layers,
+    _digest_text,
     _extract_json_document,
+    _json_bytes,
     _normalize_base_url,
     _normalize_video_ids,
     _sha256_bytes,
+    _sha256_file,
     _validated_json_chat,
     _validate_digest,
     _validate_frame_descriptions,
+    audit_recovery_checkpoint,
     load_selection_video_ids,
+    prepare_representations,
 )
 
 
@@ -27,9 +35,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class _ScriptedVisionClient:
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(
+        self,
+        responses: list[str],
+        *,
+        model: str = "test-model",
+    ) -> None:
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
+        self.model = model
+        self.base_url = "https://api.example.invalid/v1"
 
     def chat(
         self,
@@ -270,6 +285,245 @@ class VideoPreparationParsingTest(unittest.TestCase):
                 },
                 duration_seconds=4,
             )
+
+
+class AuditedVideoPreparationRecoveryTest(unittest.TestCase):
+    model = "qwen-test-versioned"
+    video_ids = ("111", "222")
+
+    def _create_checkpoint(
+        self,
+        root: Path,
+        video_directory: Path,
+    ) -> Path:
+        checkpoint = root / "interrupted-checkpoint"
+        object_id = "nextqa-val-111"
+        object_directory = checkpoint / object_id
+        object_directory.mkdir(parents=True)
+        source = video_directory / "111.mp4"
+        frame_payload = {
+            "schema_version": FRAME_SCHEMA_VERSION,
+            "object_id": object_id,
+            "source_video_id": "111",
+            "source_video_sha256": _sha256_file(source),
+            "source_duration_seconds": 1.0,
+            "sampling": {
+                "method": "uniform-midpoint",
+                "frame_count": 1,
+                "jpeg_max_dimension": 64,
+            },
+            "generator": {
+                "model": self.model,
+                "temperature": 0,
+                "prompt_sha256": _sha256_bytes(
+                    FRAME_PROMPT.encode("utf-8")
+                ),
+            },
+            "frames": [
+                {
+                    "frame_index": 0,
+                    "timestamp_seconds": 0.5,
+                    "width": 64,
+                    "height": 48,
+                    "description": "A test frame.",
+                    "visible_text": None,
+                }
+            ],
+        }
+        (object_directory / "sampled_frames.json").write_bytes(
+            _json_bytes(frame_payload)
+        )
+        (object_directory / "multimodal_digest.txt").write_text(
+            _digest_text(
+                object_id,
+                {
+                    "events": [
+                        {
+                            "start_seconds": 0.5,
+                            "end_seconds": None,
+                            "description": "A test event.",
+                        }
+                    ],
+                    "summary": "A test summary.",
+                },
+            ),
+            encoding="utf-8",
+        )
+        interruption = {
+            "schema_version": (
+                "pathfinder.interrupted-representation-prep/v0.1"
+            ),
+            "status": "INTERRUPTED",
+            "model": self.model,
+            "expected_object_count": 2,
+            "complete_object_count": 1,
+            "incomplete_object_directories": [],
+            "final_output_created": False,
+            "protocol_attempts_for_recovered_objects": (
+                "not persisted before interruption"
+            ),
+        }
+        (checkpoint / "INTERRUPTION.json").write_bytes(
+            _json_bytes(interruption)
+        )
+        files = sorted(
+            path
+            for path in checkpoint.rglob("*")
+            if path.is_file()
+        )
+        checksum_lines = [
+            f"{_sha256_file(path)}  {path.relative_to(checkpoint).as_posix()}"
+            for path in files
+        ]
+        (checkpoint / "INTERRUPTED_SHA256SUMS").write_text(
+            "\n".join(checksum_lines) + "\n",
+            encoding="utf-8",
+        )
+        return checkpoint
+
+    def _prepare_fixture(self, root: Path) -> tuple[Path, Path]:
+        video_directory = root / "videos"
+        video_directory.mkdir()
+        for video_id in self.video_ids:
+            (video_directory / f"{video_id}.mp4").write_bytes(
+                f"video-{video_id}".encode("ascii")
+            )
+        checkpoint = self._create_checkpoint(root, video_directory)
+        return video_directory, checkpoint
+
+    def test_reuses_validated_object_and_calls_model_only_for_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video_directory, checkpoint = self._prepare_fixture(root)
+            output = root / "output"
+            checkpoint_before = {
+                path.relative_to(checkpoint).as_posix(): path.read_bytes()
+                for path in checkpoint.rglob("*")
+                if path.is_file()
+            }
+            client = _ScriptedVisionClient(
+                [
+                    json.dumps(
+                        {
+                            "frames": [
+                                {
+                                    "frame_index": 0,
+                                    "description": "A new frame.",
+                                    "visible_text": None,
+                                }
+                            ]
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "events": [
+                                {
+                                    "start_seconds": 0.5,
+                                    "end_seconds": None,
+                                    "description": "A new event.",
+                                }
+                            ],
+                            "summary": "A new summary.",
+                        }
+                    ),
+                ],
+                model=self.model,
+            )
+            audit = audit_recovery_checkpoint(
+                root=checkpoint,
+                video_directory=video_directory,
+                model=self.model,
+                frame_count=1,
+                jpeg_max_dimension=64,
+                video_ids=self.video_ids,
+            )
+            self.assertEqual("recovery_audit_ok", audit["status"])
+            self.assertEqual(1, audit["recovered_object_count"])
+            self.assertEqual(1, audit["missing_object_count"])
+            self.assertFalse(audit["inference_requests_made"])
+            sampled = [
+                SampledImage(
+                    frame_index=0,
+                    timestamp_seconds=0.5,
+                    width=64,
+                    height=48,
+                    jpeg_bytes=b"jpeg",
+                )
+            ]
+
+            with patch(
+                "pathfinder.video_prep.sample_video",
+                return_value=(sampled, 1.0),
+            ):
+                manifest = prepare_representations(
+                    video_directory=video_directory,
+                    output_directory=output,
+                    client=client,  # type: ignore[arg-type]
+                    frame_count=1,
+                    jpeg_max_dimension=64,
+                    video_ids=self.video_ids,
+                    resume_from=checkpoint,
+                )
+
+            self.assertEqual(2, len(client.calls))
+            self.assertEqual(
+                ["nextqa-val-111", "nextqa-val-222"],
+                [entry["object_id"] for entry in manifest["objects"]],
+            )
+            recovered = manifest["objects"][0]
+            self.assertIsNone(
+                recovered["protocol_attempts"]["frame_descriptions"]
+            )
+            self.assertFalse(
+                recovered["recovery"][
+                    "historical_protocol_attempts_recorded"
+                ]
+            )
+            self.assertEqual(1, manifest["recovery"]["recovered_object_count"])
+            self.assertEqual(
+                1,
+                manifest["recovery"]["newly_generated_object_count"],
+            )
+            self.assertTrue((output / "generation-manifest.json").is_file())
+            checkpoint_after = {
+                path.relative_to(checkpoint).as_posix(): path.read_bytes()
+                for path in checkpoint.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(checkpoint_before, checkpoint_after)
+
+    def test_checksum_tampering_fails_before_any_model_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            video_directory, checkpoint = self._prepare_fixture(root)
+            output = root / "output"
+            digest = (
+                checkpoint
+                / "nextqa-val-111"
+                / "multimodal_digest.txt"
+            )
+            digest.write_text(
+                digest.read_text(encoding="utf-8") + "tampered\n",
+                encoding="utf-8",
+            )
+            client = _ScriptedVisionClient([], model=self.model)
+
+            with self.assertRaisesRegex(
+                VideoPreparationError,
+                "checksum mismatch",
+            ):
+                prepare_representations(
+                    video_directory=video_directory,
+                    output_directory=output,
+                    client=client,  # type: ignore[arg-type]
+                    frame_count=1,
+                    jpeg_max_dimension=64,
+                    video_ids=self.video_ids,
+                    resume_from=checkpoint,
+                )
+
+            self.assertEqual([], client.calls)
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
