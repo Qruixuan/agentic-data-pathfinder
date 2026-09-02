@@ -1,6 +1,6 @@
 {
   "schema_version": "pathfinder.data-agent-endpoint-registry/v1alpha1",
-  "registry_id": "pathfinderbench-restricted-pilot-v0.1-36-endpoints-v1",
+  "registry_id": "pathfinderbench-restricted-pilot-v0.1-36-endpoints-v2",
   "execution_node_id": "pathfinder-execution-luyao3",
   "note": "The registry contains environment-variable names only. URLs and tokens are supplied at runtime and must not enter the frozen pilot package.",
   "endpoints": [
@@ -48,13 +48,23 @@
     },
     {
       "design_id": "D_local_frames",
-      "representation_id": "*",
+      "representation_id": "sampled_frames",
       "endpoint_id": "local_materialized"
     },
     {
       "design_id": "D_local_digest",
-      "representation_id": "*",
+      "representation_id": "multimodal_digest",
       "endpoint_id": "local_materialized"
+    },
+    {
+      "design_id": "D_local_frames",
+      "representation_id": "multimodal_digest",
+      "endpoint_id": "origin_remote"
+    },
+    {
+      "design_id": "D_local_digest",
+      "representation_id": "sampled_frames",
+      "endpoint_id": "origin_remote"
     }
   ]
 }

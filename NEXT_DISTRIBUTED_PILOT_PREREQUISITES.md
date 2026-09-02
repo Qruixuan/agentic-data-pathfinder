@@ -149,6 +149,15 @@ Data Agent endpoint, and the exact placement rule for each design and
 representation. URLs and tokens remain environment variables and must never
 enter the frozen package.
 
+The restricted pilot uses mixed placement, not a design-wide wildcard for
+candidate designs. `D_local_frames/sampled_frames` and
+`D_local_digest/multimodal_digest` route to the execution-node Data Agent;
+the other representation in each candidate design remains routed to the
+origin Data Agent. System-path locations and Data Agent plan-binding locations
+must use the endpoint registry labels `origin-remote` and
+`local-materialized` exactly. Audit this full design-by-representation matrix
+before starting either service.
+
 The measurement manifest must bind the same pilot, preregistration, endpoint
 registry, and execution node. Every storage, materialization, transition,
 network, and elapsed-time conversion rate needs a deployment-specific value

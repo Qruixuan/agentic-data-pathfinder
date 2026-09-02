@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pathfinder.config import load_config
 from pathfinder.cli import main
 from pathfinder.distributed import (
     ACCEPTED_SUBSTRING_SCORING_RULE,
@@ -253,6 +254,42 @@ class DistributedScoringTest(unittest.TestCase):
             "35ecbfd3de167d15b696d81a7b7440936c249eaee61790301b752cbe5fbcc32d",
             prereg.representation_manifest_sha256,
         )
+
+    def test_next_pilot_system_and_endpoint_routes_match_exactly(self) -> None:
+        system = load_config(
+            ROOT
+            / "configs"
+            / "pathfinderbench_restricted_pilot_v0_1_system.json"
+        )
+        registry = load_endpoint_registry(
+            ROOT
+            / "configs"
+            / "pathfinderbench_restricted_pilot_v0_1_endpoints.json"
+        )
+        expected = {
+            ("D_origin_remote", "sampled_frames"): "origin_remote",
+            ("D_origin_remote", "multimodal_digest"): "origin_remote",
+            ("D_local_frames", "sampled_frames"): "local_materialized",
+            ("D_local_frames", "multimodal_digest"): "origin_remote",
+            ("D_local_digest", "sampled_frames"): "origin_remote",
+            ("D_local_digest", "multimodal_digest"): "local_materialized",
+        }
+        for (design_id, representation_id), endpoint_id in expected.items():
+            with self.subTest(
+                design_id=design_id,
+                representation_id=representation_id,
+            ):
+                route = registry.route(
+                    design_id=design_id,
+                    representation_id=representation_id,
+                )
+                self.assertEqual(endpoint_id, route.endpoint_id)
+                self.assertEqual(
+                    registry.endpoint(endpoint_id).location,
+                    system.designs[design_id].paths[
+                        representation_id
+                    ].location,
+                )
 
     def test_exact_preregistration_requires_all_benchmark_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
