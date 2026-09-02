@@ -1,0 +1,61 @@
+{
+  "schema_version": "pathfinder.benchmark-scoring/v0.1",
+  "scoring_id": "pathfinderbench-v0.1-option-id-exact-match",
+  "status": "draft-requires-advisor-approval-before-cohort-freeze",
+  "primary_task_rule": {
+    "id": "multiple-choice-option-id-exact-match-v1",
+    "answer_option_format": "ordered array of {option_id, text} objects",
+    "allowed_option_id_pattern": "[A-Z][A-Z0-9_-]{0,15}",
+    "response_protocol": "Return exactly one option ID and no other text.",
+    "normalization": "strip-leading-and-trailing-whitespace-only",
+    "case_sensitive": true,
+    "partial_credit": false,
+    "invalid_or_verbose_response": "incorrect",
+    "missing_response": "incorrect",
+    "compatibility_rule_is_primary": false,
+    "compatibility_rule": "accepted-answer-substring-match"
+  },
+  "aggregation": {
+    "independent_unit": "source-video-object",
+    "primary_task_metric": "mean-exact-match-accuracy-over-independent-workloads",
+    "report_overall": true,
+    "report_by_stratum": true,
+    "strata": [
+      "causal",
+      "descriptive",
+      "temporal"
+    ],
+    "repetitions_are_averaged_within_workload": true,
+    "repetitions_increase_independent_sample_size": false,
+    "candidate_minus_safe_is_workload_paired": true
+  },
+  "reporting": {
+    "single_leaderboard_score_enabled": false,
+    "reason": "The restricted pilot reports the raw task-resource vector. Utility-profile weights are deferred until separately approved and frozen.",
+    "required_metrics": [
+      "task_accuracy",
+      "completion_rate",
+      "infrastructure_failure_rate",
+      "telemetry_failure_rate",
+      "artifact_failure_rate",
+      "representation_selection_distribution",
+      "felt_latency_ms",
+      "cross_node_payload_bytes",
+      "service_cost",
+      "network_cost",
+      "storage_cost",
+      "amortized_materialization_cost",
+      "transition_cost",
+      "total_cost"
+    ]
+  },
+  "pilot_thresholds": {
+    "delta_success_margin": 0.05,
+    "minimum_cost_saving": 0.25,
+    "alpha": 0.05,
+    "provenance": "pilot-engineering-threshold-fixed-before-new-pilot-outcomes",
+    "scientifically_justified": false,
+    "note": "These are engineering admission values for the restricted pilot, not confirmatory operating points."
+  },
+  "freeze_rule": "Copy this contract into the immutable pilot snapshot and bind its SHA-256 before any selected-cohort Pathfinder outcome is read."
+}

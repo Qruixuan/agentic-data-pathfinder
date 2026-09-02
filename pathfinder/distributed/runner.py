@@ -180,6 +180,18 @@ def trial_plan_payload(
         "independent_unit": "workload-object-cluster",
         "trials": [trial.to_public_dict() for trial in ordered],
     }
+    if preregistration.scoring_contract_sha256 is not None:
+        payload["benchmark_bindings"] = {
+            "selection_protocol_sha256": (
+                preregistration.selection_protocol_sha256
+            ),
+            "scoring_contract_sha256": (
+                preregistration.scoring_contract_sha256
+            ),
+            "representation_manifest_sha256": (
+                preregistration.representation_manifest_sha256
+            ),
+        }
     payload["plan_sha256"] = sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"

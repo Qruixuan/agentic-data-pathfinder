@@ -50,6 +50,26 @@ def _parser() -> argparse.ArgumentParser:
         help="create a deterministic synthetic format example, never a live run",
     )
     example.add_argument("--output-dir", type=Path, required=True)
+    example.add_argument(
+        "--success-scoring-rule",
+        choices=(
+            "accepted-answer-substring-match",
+            "multiple-choice-option-id-exact-match-v1",
+        ),
+        default="accepted-answer-substring-match",
+    )
+
+    cohort = subcommands.add_parser(
+        "prepare-benchmark-cohort",
+        help=(
+            "construct an outcome-blind exact-match workload cohort from "
+            "a pinned NExT-QA annotation CSV"
+        ),
+    )
+    cohort.add_argument("--selection-config", type=Path, required=True)
+    cohort.add_argument("--annotation-csv", type=Path, required=True)
+    cohort.add_argument("--output-dir", type=Path, required=True)
+    cohort.add_argument("--compact", action="store_true")
 
     validate = subcommands.add_parser(
         "validate-config",
@@ -836,8 +856,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "create-workload-evaluation-example":
             from .evaluation.example import create_evaluation_example
 
-            print(json.dumps(create_evaluation_example(args.output_dir), indent=2))
+            print(json.dumps(create_evaluation_example(
+                args.output_dir,
+                success_scoring_rule=args.success_scoring_rule,
+            ), indent=2))
             return 0
+        if args.command == "prepare-benchmark-cohort":
+            from .benchmark_cohort import prepare_benchmark_cohort
+
+            payload = prepare_benchmark_cohort(
+                selection_config=args.selection_config,
+                annotation_csv=args.annotation_csv,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
         if args.command == "serve-data-agent":
             from .data_agent_server import (
                 DataAgentServerSettings,
@@ -1024,6 +1056,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_measurement_manifest,
                 preflight_distributed_pilot,
                 run_distributed_pilot,
+                validate_workload_manifest,
             )
             from .distributed.routing import (
                 build_routed_gateway_backend,
@@ -1049,6 +1082,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ConfigError(
                     "the workload manifest must map workload_id -> workload"
                 )
+            validate_workload_manifest(
+                workloads,
+                preregistration.workload_ids,
+                preregistration.success_scoring_rule,
+            )
             config = load_config(args.config)
 
             backend, _ = build_routed_gateway_backend(
@@ -1108,7 +1146,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 client = SdkFlowMeshClient(settings)
                 try:
                     executor = FlowMeshDistributedSessionExecutor(
-                        FlowMeshAgentAdapter(client, gateway, settings)
+                        FlowMeshAgentAdapter(client, gateway, settings),
+                        success_scoring_rule=(
+                            preregistration.success_scoring_rule
+                        ),
                     )
                     payload = run_distributed_pilot(
                         preregistration,

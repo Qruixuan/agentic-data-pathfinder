@@ -19,6 +19,11 @@ from ..distributed.measurements import load_measurement_manifest
 from ..distributed.preregistration import load_distributed_pilot_preregistration
 from ..distributed.registry import load_endpoint_registry
 from ..distributed.runner import PILOT_RUN_STATE_SCHEMA_VERSION, build_distributed_trial_plan
+from ..distributed.scoring import (
+    ACCEPTED_SUBSTRING_SCORING_RULE,
+    MULTIPLE_CHOICE_EXACT_SCORING_RULE,
+    SUCCESS_SCORING_RULES,
+)
 from .distributed import EvaluationError
 
 
@@ -32,8 +37,16 @@ def _jsonl(path: Path, rows: list[dict]) -> None:
                     encoding="utf-8", newline="\n")
 
 
-def create_evaluation_example(output_dir: str | Path) -> dict:
+def create_evaluation_example(
+    output_dir: str | Path,
+    *,
+    success_scoring_rule: str = ACCEPTED_SUBSTRING_SCORING_RULE,
+) -> dict:
     """Write a new, clearly synthetic input snapshot; refuse all overwrites."""
+    if success_scoring_rule not in SUCCESS_SCORING_RULES:
+        raise EvaluationError(
+            f"unsupported success_scoring_rule: {success_scoring_rule}"
+        )
     target = Path(output_dir).resolve()
     if target.exists():
         raise EvaluationError("example output directory already exists")
@@ -43,7 +56,7 @@ def create_evaluation_example(output_dir: str | Path) -> dict:
         config, run = staging / "config", staging / "run"
         config.mkdir(parents=True)
         run.mkdir()
-        _create(config, run)
+        _create(config, run, success_scoring_rule=success_scoring_rule)
         (staging / "SYNTHETIC_EXAMPLE.txt").write_text(
             "Invented format and arithmetic example only. Not empirical data.\n"
             "Three fictional objects; twelve successful executions, one failed\n"
@@ -59,7 +72,12 @@ def create_evaluation_example(output_dir: str | Path) -> dict:
             "eligible_for_scientific_claims": False}
 
 
-def _create(config: Path, run: Path) -> None:
+def _create(
+    config: Path,
+    run: Path,
+    *,
+    success_scoring_rule: str,
+) -> None:
     pilot_id = "synthetic-workload-evaluation-v1"
     safe, frames, digest = "D_origin_remote", "D_local_frames", "D_local_digest"
     strata = {name: {"candidate_design_id": digest if name == "temporal" else frames,
@@ -78,7 +96,18 @@ def _create(config: Path, run: Path) -> None:
         "safe_design_id": safe, "design_ids": [safe, frames, digest, "D_local_pair"],
         "excluded_design_ids": ["D_local_pair"], "strata": strata,
         "excluded_workload_ids": [], "repetitions": 2,
-        "success_scoring_rule": "accepted-answer-substring-match",
+        "success_scoring_rule": success_scoring_rule,
+        **(
+            {
+                "benchmark_bindings": {
+                    "selection_protocol_sha256": "1" * 64,
+                    "scoring_contract_sha256": "2" * 64,
+                    "representation_manifest_sha256": "3" * 64,
+                }
+            }
+            if success_scoring_rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE
+            else {}
+        ),
         "total_cost_contract": {
             "cost_basis": "total_cost",
             "equation": "total_cost = service + network + storage + amortized_materialization + transition",
@@ -148,12 +177,28 @@ def _create(config: Path, run: Path) -> None:
         "execution_node_id": registry.execution_node_id, "measurements": entries,
     })
     provider = load_measurement_manifest(config / "measurements.json")
-    workloads = {
-        f"example-{name}": {"object_id": f"fictional-object-{name}",
-                            "question": "What color is the fictional object?",
-                            "accepted_answer_substrings": ["blue"]}
-        for name in strata
-    }
+    if success_scoring_rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE:
+        workloads = {
+            f"example-{name}": {
+                "object_id": f"fictional-object-{name}",
+                "question": "What color is the fictional object?",
+                "answer_options": [
+                    {"option_id": "A", "text": "red"},
+                    {"option_id": "B", "text": "blue"},
+                ],
+                "correct_answer_id": "B",
+            }
+            for name in strata
+        }
+    else:
+        workloads = {
+            f"example-{name}": {
+                "object_id": f"fictional-object-{name}",
+                "question": "What color is the fictional object?",
+                "accepted_answer_substrings": ["blue"],
+            }
+            for name in strata
+        }
     _write(config / "workloads.json", workloads)
     trials = build_distributed_trial_plan(prereg)
     plan = build_frozen_plan_document(
@@ -187,8 +232,22 @@ def _create(config: Path, run: Path) -> None:
         }
         if artifact:
             event["artifact_handle_sha256"] = sha256(trial.trial_key.encode()).hexdigest()
+        correct_answer = (
+            "B"
+            if success_scoring_rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE
+            else "blue"
+        )
+        incorrect_answer = (
+            "A"
+            if success_scoring_rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE
+            else "red"
+        )
         execution = TrialExecution(
-            final_answer="red" if artifact and is_local and trial.repetition == 1 else "blue",
+            final_answer=(
+                incorrect_answer
+                if artifact and is_local and trial.repetition == 1
+                else correct_answer
+            ),
             access_events=(event,), status="DONE",
             workflow_id=f"synthetic-workflow-{trial.order_index}",
             task_id=f"synthetic-task-{trial.order_index}",

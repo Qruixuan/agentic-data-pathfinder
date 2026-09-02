@@ -44,6 +44,15 @@ python -m pathfinder evaluate-distributed-pilot \
   --output-dir outputs/workload-evaluation-report-v1
 ```
 
+To exercise the proposed benchmark scorer rather than the legacy
+compatibility rule, add:
+
+```bash
+python -m pathfinder create-workload-evaluation-example \
+  --success-scoring-rule multiple-choice-option-id-exact-match-v1 \
+  --output-dir outputs/workload-evaluation-exact-example-v1
+```
+
 The base installation has no runtime dependencies. Neither optional `flowmesh`
 nor `data-prep` dependencies are required. No environment file is sourced.
 After installation, evaluation works without network access. The command blocks
@@ -147,10 +156,13 @@ The final runtime summary must agree with the audited counts and with the
 measurement manifest's hash: a later measurement/provenance substitution cannot
 pass merely because it happens to produce the same numeric costs.
 
-Task scores reproduce the existing frozen accepted-substring matcher. The
-evaluator verifies the stored score against the answer and labels; it does not
-silently introduce an exact-match, option-letter, or LLM-based grader. Missing
-scoring labels produce an unevaluable task, not an automatic success/failure.
+Task scores always reproduce the rule frozen in the preregistration. Existing
+development snapshots use the accepted-substring compatibility matcher;
+missing labels under that legacy rule produce an unevaluable task rather than
+an automatic success or failure. New benchmark snapshots may declare
+`multiple-choice-option-id-exact-match-v1`; the evaluator then verifies the
+stored score against the ordered options and correct option ID without
+extracting an answer from prose. It never substitutes an LLM-based grader.
 
 For each workload, average each design's complete repetition block first, then
 subtract safe from candidate. Aggregate those differences with equal weight

@@ -30,6 +30,10 @@ benchmark whose primary live end-to-end mode is accompanied by a portable
 offline trace-replay and reproducibility mode. It also defines the workload and
 observation contracts and treats the current 16-workload corpus as a
 development seed rather than a public test set.
+The concrete admission gates for the next 36-workload restricted pilot are in
+[NEXT_DISTRIBUTED_PILOT_PREREQUISITES.md](NEXT_DISTRIBUTED_PILOT_PREREQUISITES.md),
+including the proposed exact-match scoring contract, outcome-blind selection
+protocol, representation and cost bindings, and smoke/formal separation.
 
 The first, smaller deliverable is the offline
 [workload evaluation package](WORKLOAD_EVALUATION.md): audit a frozen distributed

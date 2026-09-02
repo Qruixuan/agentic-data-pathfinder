@@ -1,0 +1,129 @@
+{
+  "schema_version": "pathfinder.distributed-pilot-preregistration/v1alpha1",
+  "pilot_id": "pathfinderbench-restricted-pilot-v0.1-36-REPLACE",
+  "source_git_revision": "0000000000000000000000000000000000000000",
+  "posthoc": false,
+  "confirmatory": false,
+  "eligible_for_scientific_claims": false,
+  "thresholds": {
+    "delta_success_margin": 0.05,
+    "minimum_cost_saving": 0.25,
+    "alpha": 0.05,
+    "provenance": "pilot-engineering-threshold-fixed-before-new-pilot-outcomes",
+    "note": "Draft engineering values. Obtain advisor approval before replacing TEMPLATE inputs and freezing the cohort."
+  },
+  "safe_design_id": "D_origin_remote",
+  "design_ids": [
+    "D_origin_remote",
+    "D_local_frames",
+    "D_local_digest",
+    "D_local_pair"
+  ],
+  "excluded_design_ids": [
+    "D_local_pair"
+  ],
+  "strata": {
+    "causal": {
+      "candidate_design_id": "D_local_frames",
+      "workload_ids": [
+        "causal-prospective-REPLACE-01",
+        "causal-prospective-REPLACE-02",
+        "causal-prospective-REPLACE-03",
+        "causal-prospective-REPLACE-04",
+        "causal-prospective-REPLACE-05",
+        "causal-prospective-REPLACE-06",
+        "causal-prospective-REPLACE-07",
+        "causal-prospective-REPLACE-08",
+        "causal-prospective-REPLACE-09",
+        "causal-prospective-REPLACE-10",
+        "causal-prospective-REPLACE-11",
+        "causal-prospective-REPLACE-12",
+        "causal-prospective-REPLACE-13",
+        "causal-prospective-REPLACE-14"
+      ]
+    },
+    "descriptive": {
+      "candidate_design_id": "D_local_frames",
+      "workload_ids": [
+        "descriptive-prospective-REPLACE-01",
+        "descriptive-prospective-REPLACE-02",
+        "descriptive-prospective-REPLACE-03",
+        "descriptive-prospective-REPLACE-04",
+        "descriptive-prospective-REPLACE-05",
+        "descriptive-prospective-REPLACE-06",
+        "descriptive-prospective-REPLACE-07",
+        "descriptive-prospective-REPLACE-08"
+      ]
+    },
+    "temporal": {
+      "candidate_design_id": "D_local_digest",
+      "workload_ids": [
+        "temporal-prospective-REPLACE-01",
+        "temporal-prospective-REPLACE-02",
+        "temporal-prospective-REPLACE-03",
+        "temporal-prospective-REPLACE-04",
+        "temporal-prospective-REPLACE-05",
+        "temporal-prospective-REPLACE-06",
+        "temporal-prospective-REPLACE-07",
+        "temporal-prospective-REPLACE-08",
+        "temporal-prospective-REPLACE-09",
+        "temporal-prospective-REPLACE-10",
+        "temporal-prospective-REPLACE-11",
+        "temporal-prospective-REPLACE-12",
+        "temporal-prospective-REPLACE-13",
+        "temporal-prospective-REPLACE-14"
+      ]
+    }
+  },
+  "excluded_workload_ids": [
+    "temporal-nextqa-val-2834146886-q8",
+    "temporal-nextqa-val-3441428429-q10",
+    "temporal-nextqa-val-2976913210-q6",
+    "causal-nextqa-val-4882821564-q1",
+    "causal-nextqa-val-4260763967-q4",
+    "causal-nextqa-val-9088819598-q1",
+    "descriptive-nextqa-val-8547321641-q7",
+    "descriptive-nextqa-val-4130504920-q4",
+    "temporal-nextqa-val-6356067859-q6",
+    "temporal-nextqa-val-5296635780-q7",
+    "temporal-nextqa-val-5735711594-q5",
+    "causal-nextqa-val-8132842161-q2",
+    "causal-nextqa-val-3462517143-q2",
+    "causal-nextqa-val-5026660202-q8",
+    "descriptive-nextqa-val-4942054721-q7",
+    "descriptive-nextqa-val-5840177726-q3"
+  ],
+  "repetitions": 2,
+  "success_scoring_rule": "multiple-choice-option-id-exact-match-v1",
+  "benchmark_bindings": {
+    "selection_protocol_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "scoring_contract_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "representation_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "total_cost_contract": {
+    "cost_basis": "total_cost",
+    "equation": "total_cost = service + network + storage + amortized_materialization + transition",
+    "cost_model": {
+      "schema_version": "pathfinder.total-cost-model/v1alpha1",
+      "cost_model_id": "pathfinderbench-restricted-pilot-REPLACE",
+      "accounting_unit": "pilot-cost-unit",
+      "rate_provenance": "PLACEHOLDER. Replace with measured deployment-specific values and provenance before live admission.",
+      "materialization_amortization_horizon_sessions": 144,
+      "artifact_transfer_accounted_in": "network_cost",
+      "conversion_rates": {
+        "network_cost_per_gib": 0.0,
+        "storage_cost_per_gib_hour": 0.0,
+        "materialization_cost_per_gib": 0.0,
+        "transition_cost_per_gib": 0.0,
+        "elapsed_time_cost_per_second": 0.0
+      }
+    }
+  },
+  "fallback_rule": {
+    "design_id": "D_origin_remote",
+    "applies_to_every_non_safe_result": true
+  },
+  "run_declaration": {
+    "immutable_after_first_observation": true
+  }
+}

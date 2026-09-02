@@ -1,0 +1,94 @@
+{
+  "schema_version": "pathfinder.benchmark-cohort-selection/v0.1",
+  "selection_id": "pathfinderbench-restricted-pilot-v0.1-36",
+  "status": "draft-protocol-cohort-not-yet-selected",
+  "source": {
+    "dataset": "NExT-QA",
+    "split": "val",
+    "repository": "https://github.com/doc-doc/NExT-QA",
+    "repository_commit": "2432e9724f88ed9f40010e2989f104570a91de4e",
+    "annotation_path": "dataset/nextqa/val.csv",
+    "annotation_sha256": "43198bdef8436b8d64a9b75d846b0987c10cbf94ebf4be325c4a4e54634d66b8"
+  },
+  "independent_unit": "source-video",
+  "one_primary_question_per_video": true,
+  "target_workload_count": 36,
+  "quota": [
+    {
+      "stratum_id": "causal",
+      "accepted_upstream_types": [
+        "CW",
+        "CH"
+      ],
+      "count": 14
+    },
+    {
+      "stratum_id": "temporal",
+      "accepted_upstream_types": [
+        "TN",
+        "TC"
+      ],
+      "count": 14
+    },
+    {
+      "stratum_id": "descriptive",
+      "accepted_upstream_types": [
+        "DC",
+        "DO"
+      ],
+      "count": 8
+    }
+  ],
+  "selection_rule": {
+    "ordering": "official-val-csv-row-order",
+    "procedure": "After applying the exclusion list, scan rows in official order within each declared stratum. Select the first row whose source video has not previously been selected until that stratum quota is filled.",
+    "tie_break": "earlier-official-row-wins",
+    "outcome_blind": true,
+    "forbidden_selection_inputs": [
+      "Pathfinder answer correctness",
+      "representation selected by the Agent",
+      "Pathfinder latency or cost",
+      "AWM or OED result",
+      "manual preference after viewing Pathfinder outcomes"
+    ]
+  },
+  "excluded_video_ids": [
+    "2834146886",
+    "3441428429",
+    "2976913210",
+    "4882821564",
+    "4260763967",
+    "9088819598",
+    "8547321641",
+    "4130504920",
+    "6356067859",
+    "5296635780",
+    "5735711594",
+    "8132842161",
+    "3462517143",
+    "5026660202",
+    "4942054721",
+    "5840177726"
+  ],
+  "scoring_contract": "configs/pathfinderbench_v0_1_scoring.json",
+  "required_output_fields": [
+    "workload_id",
+    "object_id",
+    "source_video_id",
+    "source_row_id",
+    "stratum_id",
+    "task_class_id",
+    "question",
+    "answer_options",
+    "correct_answer_id",
+    "split",
+    "selection_rule_id"
+  ],
+  "post_selection_requirements": [
+    "Verify exactly 36 unique source videos and no excluded-video overlap.",
+    "Assign deterministic option IDs A through E in official option order.",
+    "Hash the complete workload definitions, not only their IDs.",
+    "Prepare and hash sampled_frames and multimodal_digest for every object.",
+    "Do not execute the selected cohort until the preregistration, endpoints, measurements, code revision, and image digest are frozen."
+  ]
+}

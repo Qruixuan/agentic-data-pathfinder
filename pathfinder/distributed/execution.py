@@ -27,7 +27,6 @@ from typing import Any, Iterable, Mapping, Protocol
 from ..integrations.flowmesh.contracts import FlowMeshAgentRunRequest
 from ..integrations.flowmesh.gateway import TelemetryIncompleteError
 from ..integrations.flowmesh.pilot import (
-    _evaluate_answer,
     _safe_error_message,
     _sanitized_access_event,
     artifact_delivery_failures,
@@ -43,6 +42,13 @@ from .preregistration import (
 )
 from .registry import EndpointRegistry, EndpointUnreachableError
 from .routing import CrossEndpointArtifactError
+from .scoring import (
+    ACCEPTED_SUBSTRING_SCORING_RULE,
+    evaluate_workload_answer,
+    load_workload_scoring_contract,
+    render_workload_question,
+    validate_workload_manifest,
+)
 from .runner import (
     DistributedTrial,
     ObservationOutcome,
@@ -419,6 +425,11 @@ def build_canonical_record(
     network_transport_for: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build one Reduced-Oracle-compatible record with its cost ledger."""
+    scoring = load_workload_scoring_contract(
+        workload,
+        preregistration.success_scoring_rule,
+        name=f"workloads[{trial.workload_id!r}]",
+    )
     events = [
         _sanitized_access_event(dict(event))
         for event in execution.access_events
@@ -435,9 +446,7 @@ def build_canonical_record(
         **trial.to_public_dict(),
         "object_id": workload.get("object_id"),
         "question": workload.get("question"),
-        "accepted_answer_substrings": list(
-            workload.get("accepted_answer_substrings", [])
-        ),
+        **scoring.record_fields(),
         "task_class_id": workload.get("task_class_id", "video_qa"),
         "quote_profile_id": workload.get("quote_profile_id", "as_designed"),
         "latency_multiplier": workload.get("latency_multiplier", 1),
@@ -456,9 +465,9 @@ def build_canonical_record(
         "task_success": (
             None
             if delivery_failures
-            else _evaluate_answer(
+            else evaluate_workload_answer(
                 execution.final_answer or "",
-                tuple(workload.get("accepted_answer_substrings", ())),
+                scoring,
             )
         ),
         "access_event_count": len(events),
@@ -532,6 +541,12 @@ def build_frozen_plan_document(
     command must compare byte-identical to the one execution recomputes, or
     the frozen-plan gate would reject the very plan it was handed.
     """
+    if workloads is not None:
+        validate_workload_manifest(
+            workloads,
+            preregistration.workload_ids,
+            preregistration.success_scoring_rule,
+        )
     ordered = (
         list(trials)
         if trials is not None
@@ -967,9 +982,11 @@ class FlowMeshDistributedSessionExecutor:
         adapter: Any,
         *,
         default_task_class_id: str = "video_qa",
+        success_scoring_rule: str = ACCEPTED_SUBSTRING_SCORING_RULE,
     ) -> None:
         self.adapter = adapter
         self.default_task_class_id = default_task_class_id
+        self.success_scoring_rule = success_scoring_rule
         self.recovered_session_ids: list[str] = []
         self.submitted_session_ids: list[str] = []
 
@@ -1003,8 +1020,13 @@ class FlowMeshDistributedSessionExecutor:
         attempt: int = 1,
     ) -> FlowMeshAgentRunRequest:
         """Bind the plan cell to a deterministic FlowMesh session id."""
+        scoring = load_workload_scoring_contract(
+            workload,
+            self.success_scoring_rule,
+            name=f"workloads[{trial.workload_id!r}]",
+        )
         return FlowMeshAgentRunRequest(
-            question=str(workload["question"]),
+            question=render_workload_question(workload, scoring),
             design_id=trial.design_id,
             task_class_id=str(
                 workload.get("task_class_id", self.default_task_class_id)

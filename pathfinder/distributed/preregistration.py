@@ -26,6 +26,10 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .cost import CostModel, load_cost_model
+from .scoring import (
+    MULTIPLE_CHOICE_EXACT_SCORING_RULE,
+    SUCCESS_SCORING_RULES,
+)
 
 
 PILOT_PREREGISTRATION_SCHEMA_VERSION = (
@@ -35,9 +39,6 @@ PILOT_PREREGISTRATION_SCHEMA_VERSION = (
 #: points. Only this provenance is accepted.
 PILOT_THRESHOLD_PROVENANCE = (
     "pilot-engineering-threshold-fixed-before-new-pilot-outcomes"
-)
-SUCCESS_SCORING_RULES = (
-    "accepted-answer-substring-match",
 )
 COST_BASES = ("service_cost", "total_cost")
 FALLBACK_DESIGN_ID = "D_origin_remote"
@@ -86,6 +87,17 @@ def _finite_number(value: Any, name: str) -> float:
     if not math.isfinite(result):
         raise PilotPreregistrationError(f"{name} must be finite")
     return result
+
+
+def _sha256_digest(value: Any, name: str) -> str:
+    digest = _string(value, name)
+    if len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise PilotPreregistrationError(
+            f"{name} must be a lowercase hexadecimal SHA-256 digest"
+        )
+    return digest
 
 
 def _string_array(value: Any, name: str) -> tuple[str, ...]:
@@ -177,6 +189,9 @@ class DistributedPilotPreregistration:
     excluded_workload_manifest_sha256: str
     repetitions: int
     success_scoring_rule: str
+    selection_protocol_sha256: str | None
+    scoring_contract_sha256: str | None
+    representation_manifest_sha256: str | None
     cost_basis: str
     cost_model: CostModel
     fallback_design_id: str
@@ -218,7 +233,7 @@ class DistributedPilotPreregistration:
         )
 
     def to_public_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "pilot_id": self.pilot_id,
             "source_sha256": self.source_sha256,
@@ -277,6 +292,17 @@ class DistributedPilotPreregistration:
             "independent_unit": "workload-object-cluster",
             "repetitions_increase_independent_units": False,
         }
+        if self.scoring_contract_sha256 is not None:
+            payload["benchmark_bindings"] = {
+                "selection_protocol_sha256": (
+                    self.selection_protocol_sha256
+                ),
+                "scoring_contract_sha256": self.scoring_contract_sha256,
+                "representation_manifest_sha256": (
+                    self.representation_manifest_sha256
+                ),
+            }
+        return payload
 
 
 def load_distributed_pilot_preregistration(
@@ -506,6 +532,37 @@ def load_distributed_pilot_preregistration(
         raise PilotPreregistrationError(
             "unsupported success_scoring_rule: " + success_scoring_rule
         )
+    raw_bindings = root.get("benchmark_bindings")
+    if (
+        success_scoring_rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE
+        and raw_bindings is None
+    ):
+        raise PilotPreregistrationError(
+            "benchmark_bindings is required for the exact-match benchmark "
+            "rule"
+        )
+    bindings = (
+        {}
+        if raw_bindings is None
+        else _mapping(raw_bindings, "benchmark_bindings")
+    )
+    binding_values: dict[str, str | None] = {}
+    for field in (
+        "selection_protocol_sha256",
+        "scoring_contract_sha256",
+        "representation_manifest_sha256",
+    ):
+        value = bindings.get(field)
+        if raw_bindings is not None and value is None:
+            raise PilotPreregistrationError(
+                f"benchmark_bindings.{field} is required when "
+                "benchmark_bindings is declared"
+            )
+        binding_values[field] = (
+            None
+            if value is None
+            else _sha256_digest(value, f"benchmark_bindings.{field}")
+        )
     cost_contract = _mapping(
         _require(root, "total_cost_contract", "total_cost_contract"),
         "total_cost_contract",
@@ -605,6 +662,13 @@ def load_distributed_pilot_preregistration(
             "repetitions",
         ),
         success_scoring_rule=success_scoring_rule,
+        selection_protocol_sha256=(
+            binding_values["selection_protocol_sha256"]
+        ),
+        scoring_contract_sha256=binding_values["scoring_contract_sha256"],
+        representation_manifest_sha256=(
+            binding_values["representation_manifest_sha256"]
+        ),
         cost_basis=cost_basis,
         cost_model=cost_model,
         fallback_design_id=fallback_design_id,

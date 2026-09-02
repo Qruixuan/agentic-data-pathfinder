@@ -226,6 +226,15 @@ too permissive to define the public leaderboard. Open-ended answers may be
 released as a secondary task only with a frozen grader, grader version, and
 known uncertainty.
 
+Implementation status: the distributed runner and offline evaluator support
+`multiple-choice-option-id-exact-match-v1`. It renders ordered option IDs,
+requires the Agent to return only one ID, strips outer whitespace only, and
+treats case changes, punctuation, brackets, or explanatory prose as
+incorrect. New exact-match preregistrations must bind the selection protocol,
+scoring contract, and representation manifest by SHA-256. The current
+two-node conformance snapshot remains on the legacy compatibility rule and is
+not retroactively rescored.
+
 The complete workload definitions, not merely their IDs, are bound into the
 frozen plan through a canonical content hash.
 

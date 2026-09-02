@@ -32,8 +32,15 @@ from ..distributed.measurements import (
 from ..distributed.preregistration import load_distributed_pilot_preregistration
 from ..distributed.registry import load_endpoint_registry
 from ..distributed.runner import PILOT_RUN_STATE_SCHEMA_VERSION, build_distributed_trial_plan
+from ..distributed.scoring import (
+    ACCEPTED_SUBSTRING_SCORING_RULE,
+    WorkloadScoringError,
+    evaluate_workload_answer,
+    load_workload_scoring_contract,
+    validate_workload_manifest,
+)
 from ..integrations.flowmesh.pilot import (
-    _evaluate_answer, _sanitized_access_event, artifact_delivery_failures,
+    _sanitized_access_event, artifact_delivery_failures,
 )
 
 
@@ -211,7 +218,8 @@ def _audit_summary(rows: list[dict], prereg: Any, plan: dict, provider: Any,
 
 
 def _audit_record(record: dict, trial: Any, workload: dict, registry: Any,
-                  provider: Any, model: Any, attempt: int) -> dict:
+                  provider: Any, model: Any, attempt: int,
+                  scoring_rule: str) -> dict:
     key = trial.trial_key
     for field, expected in trial.to_public_dict().items():
         _require(type(record[field]) is type(expected),
@@ -219,17 +227,29 @@ def _audit_record(record: dict, trial: Any, workload: dict, registry: Any,
     for field in ("object_id", "question"):
         _require(record.get(field) == workload.get(field),
                  f"{key}: {field} differs from frozen workload")
-    answers = workload.get("accepted_answer_substrings", [])
-    _require(isinstance(answers, list)
-             and all(isinstance(value, str) and value.strip() for value in answers),
-             f"{key}: invalid accepted_answer_substrings")
-    _require(record.get("accepted_answer_substrings") == answers,
-             f"{key}: scoring labels differ from frozen workload")
+    try:
+        scoring = load_workload_scoring_contract(
+            workload, scoring_rule, name=f"workloads[{trial.workload_id!r}]"
+        )
+    except WorkloadScoringError as exc:
+        raise EvaluationError(str(exc)) from exc
+    for field, expected in scoring.record_fields().items():
+        if (
+            field == "success_scoring_rule"
+            and scoring_rule == ACCEPTED_SUBSTRING_SCORING_RULE
+            and field not in record
+        ):
+            # Frozen development records predate the per-row rule field.
+            continue
+        _require(record.get(field) == expected,
+                 f"{key}: scoring field {field} differs from frozen workload")
     _require(record.get("final_answer") is None
              or isinstance(record["final_answer"], str), f"{key}: invalid answer")
-    expected_score = _evaluate_answer(record.get("final_answer") or "", tuple(answers))
+    expected_score = evaluate_workload_answer(
+        record.get("final_answer") or "", scoring
+    )
     _require("task_success" in record and record["task_success"] is expected_score,
-             f"{key}: task_success disagrees with frozen substring scorer")
+             f"{key}: task_success disagrees with frozen {scoring_rule} scorer")
     for field, default in (("task_class_id", "video_qa"),
                            ("quote_profile_id", "as_designed"),
                            ("latency_multiplier", 1)):
@@ -506,6 +526,14 @@ def evaluate_distributed_pilot(
     provider = load_measurement_manifest(files["measurements.json"])
     workloads = payloads["workloads.json"]
     _require(isinstance(workloads, dict), "workloads must map IDs to definitions")
+    try:
+        validate_workload_manifest(
+            workloads,
+            prereg.workload_ids,
+            prereg.success_scoring_rule,
+        )
+    except WorkloadScoringError as exc:
+        raise EvaluationError(str(exc)) from exc
     objects = []
     for key in prereg.workload_ids:
         workload = workloads.get(key)
@@ -536,7 +564,8 @@ def evaluate_distributed_pilot(
     _audit_summary(payloads[RUN_SUMMARY], prereg, expected_plan, provider, attempts)
     items = [_audit_record(records[trial.trial_key], trial, workloads[trial.workload_id],
                            registry, provider, prereg.cost_model,
-                           by_cell[trial.trial_key][-1]["attempt"]) for trial in trials]
+                           by_cell[trial.trial_key][-1]["attempt"],
+                           prereg.success_scoring_rule) for trial in trials]
     groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for item in items:
         row = item["record"]
@@ -549,7 +578,13 @@ def evaluate_distributed_pilot(
     limitations = [
         "Development/pilot evidence only; this evaluator does not establish generalization, "
         "statistical significance, or SAFE_TO_COMMIT.",
-        "Task scores reproduce the frozen accepted-substring rule, not a new exact-match grader.",
+        (
+            "Task scores reproduce the frozen accepted-substring compatibility rule; "
+            "it is not a public-leaderboard exact-match grader."
+            if prereg.success_scoring_rule == ACCEPTED_SUBSTRING_SCORING_RULE
+            else "Task scores apply the frozen option-ID exact-match rule without "
+                 "extracting an answer from prose."
+        ),
         "Service cost is Data-Agent-reported accounting, not independently verified physical cost. "
         "Ledger provenance and rates are preserved; configured values are not made measured by evaluation.",
         "Felt latency is per access, not full Agent runtime. Controlled delays remain included; "

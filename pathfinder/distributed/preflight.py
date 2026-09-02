@@ -23,6 +23,7 @@ def os_environ() -> Mapping[str, str]:
 from ..integrations.flowmesh.redaction import redact_secrets
 from .cost import CostModel
 from .preregistration import DistributedPilotPreregistration
+from .scoring import MULTIPLE_CHOICE_EXACT_SCORING_RULE
 from .registry import (
     DataAgentEndpoint,
     EndpointRegistry,
@@ -492,6 +493,38 @@ def preflight_distributed_pilot(
         "workload and exclusion manifest digests are computed and bound "
         "to the plan",
     ))
+    if (
+        preregistration.success_scoring_rule
+        == MULTIPLE_CHOICE_EXACT_SCORING_RULE
+    ):
+        bindings = {
+            "selection_protocol_sha256": (
+                preregistration.selection_protocol_sha256
+            ),
+            "scoring_contract_sha256": (
+                preregistration.scoring_contract_sha256
+            ),
+            "representation_manifest_sha256": (
+                preregistration.representation_manifest_sha256
+            ),
+        }
+        placeholder_bindings = sorted(
+            field
+            for field, digest in bindings.items()
+            if digest is None or set(digest) == {"0"}
+        )
+        checks.append(_check(
+            "manifest.benchmark_contracts_bound",
+            not placeholder_bindings,
+            (
+                "selection, scoring, and representation contracts are "
+                "bound by SHA-256"
+                if not placeholder_bindings
+                else "placeholder benchmark binding(s): "
+                     + ", ".join(placeholder_bindings)
+            ),
+            advisory=not live,
+        ))
     checks.append(_check(
         "manifest.measurement_manifest_bound",
         measurement_manifest_sha256 is not None,
