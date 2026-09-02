@@ -1,0 +1,60 @@
+{
+  "schema_version": "pathfinder.data-agent-endpoint-registry/v1alpha1",
+  "registry_id": "pathfinderbench-restricted-pilot-v0.1-36-endpoints-v1",
+  "execution_node_id": "pathfinder-execution-luyao3",
+  "note": "The registry contains environment-variable names only. URLs and tokens are supplied at runtime and must not enter the frozen pilot package.",
+  "endpoints": [
+    {
+      "endpoint_id": "origin_remote",
+      "node_id": "pathfinder-origin-luyao2",
+      "location": "origin-remote",
+      "description": "Origin Data Agent on luyao2 holding both frozen representations for all 36 objects.",
+      "base_url_env": "PATHFINDER_DATA_AGENT_ORIGIN_URL",
+      "token_env": "PATHFINDER_DATA_AGENT_ORIGIN_TOKEN",
+      "timeout_seconds": 30.0,
+      "max_retries": 1,
+      "telemetry_capabilities": [
+        "access_telemetry",
+        "transfer_bytes",
+        "quiescence_wait"
+      ],
+      "network_transport": "remote",
+      "health_requires_auth": false
+    },
+    {
+      "endpoint_id": "local_materialized",
+      "node_id": "pathfinder-execution-luyao3",
+      "location": "local-materialized",
+      "description": "Execution-node Data Agent on luyao3 holding only the prespecified candidate representation for each workload.",
+      "base_url_env": "PATHFINDER_DATA_AGENT_LOCAL_URL",
+      "token_env": "PATHFINDER_DATA_AGENT_LOCAL_TOKEN",
+      "timeout_seconds": 30.0,
+      "max_retries": 1,
+      "telemetry_capabilities": [
+        "access_telemetry",
+        "transfer_bytes",
+        "quiescence_wait"
+      ],
+      "network_transport": "local",
+      "network_zero_justification": "The Data Agent and FlowMesh execution worker run on luyao3, so representation bytes do not leave the execution host.",
+      "health_requires_auth": false
+    }
+  ],
+  "placement": [
+    {
+      "design_id": "D_origin_remote",
+      "representation_id": "*",
+      "endpoint_id": "origin_remote"
+    },
+    {
+      "design_id": "D_local_frames",
+      "representation_id": "*",
+      "endpoint_id": "local_materialized"
+    },
+    {
+      "design_id": "D_local_digest",
+      "representation_id": "*",
+      "endpoint_id": "local_materialized"
+    }
+  ]
+}

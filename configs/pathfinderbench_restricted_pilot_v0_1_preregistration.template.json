@@ -26,52 +26,52 @@
     "causal": {
       "candidate_design_id": "D_local_frames",
       "workload_ids": [
-        "causal-prospective-REPLACE-01",
-        "causal-prospective-REPLACE-02",
-        "causal-prospective-REPLACE-03",
-        "causal-prospective-REPLACE-04",
-        "causal-prospective-REPLACE-05",
-        "causal-prospective-REPLACE-06",
-        "causal-prospective-REPLACE-07",
-        "causal-prospective-REPLACE-08",
-        "causal-prospective-REPLACE-09",
-        "causal-prospective-REPLACE-10",
-        "causal-prospective-REPLACE-11",
-        "causal-prospective-REPLACE-12",
-        "causal-prospective-REPLACE-13",
-        "causal-prospective-REPLACE-14"
+        "causal-nextqa-val-2435100235-q7",
+        "causal-nextqa-val-2614918961-q1",
+        "causal-nextqa-val-2793260225-q6",
+        "causal-nextqa-val-3158022797-q2",
+        "causal-nextqa-val-3171006258-q0",
+        "causal-nextqa-val-4010069381-q6",
+        "causal-nextqa-val-5333075105-q10",
+        "causal-nextqa-val-5833145209-q5",
+        "causal-nextqa-val-5987365500-q1",
+        "causal-nextqa-val-6201488511-q5",
+        "causal-nextqa-val-6329077812-q2",
+        "causal-nextqa-val-6582763207-q2",
+        "causal-nextqa-val-7508439506-q1",
+        "causal-nextqa-val-9873067604-q4"
       ]
     },
     "descriptive": {
       "candidate_design_id": "D_local_frames",
       "workload_ids": [
-        "descriptive-prospective-REPLACE-01",
-        "descriptive-prospective-REPLACE-02",
-        "descriptive-prospective-REPLACE-03",
-        "descriptive-prospective-REPLACE-04",
-        "descriptive-prospective-REPLACE-05",
-        "descriptive-prospective-REPLACE-06",
-        "descriptive-prospective-REPLACE-07",
-        "descriptive-prospective-REPLACE-08"
+        "descriptive-nextqa-val-2461993294-q5",
+        "descriptive-nextqa-val-2735019707-q6",
+        "descriptive-nextqa-val-3206694342-q3",
+        "descriptive-nextqa-val-3550839192-q5",
+        "descriptive-nextqa-val-4798585428-q6",
+        "descriptive-nextqa-val-4984417707-q8",
+        "descriptive-nextqa-val-6895608152-q5",
+        "descriptive-nextqa-val-9213637099-q6"
       ]
     },
     "temporal": {
       "candidate_design_id": "D_local_digest",
       "workload_ids": [
-        "temporal-prospective-REPLACE-01",
-        "temporal-prospective-REPLACE-02",
-        "temporal-prospective-REPLACE-03",
-        "temporal-prospective-REPLACE-04",
-        "temporal-prospective-REPLACE-05",
-        "temporal-prospective-REPLACE-06",
-        "temporal-prospective-REPLACE-07",
-        "temporal-prospective-REPLACE-08",
-        "temporal-prospective-REPLACE-09",
-        "temporal-prospective-REPLACE-10",
-        "temporal-prospective-REPLACE-11",
-        "temporal-prospective-REPLACE-12",
-        "temporal-prospective-REPLACE-13",
-        "temporal-prospective-REPLACE-14"
+        "temporal-nextqa-val-3429509208-q3",
+        "temporal-nextqa-val-3477387686-q2",
+        "temporal-nextqa-val-3851961428-q11",
+        "temporal-nextqa-val-3943634344-q4",
+        "temporal-nextqa-val-4094488636-q4",
+        "temporal-nextqa-val-4584426085-q1",
+        "temporal-nextqa-val-5256928210-q1",
+        "temporal-nextqa-val-5679866364-q1",
+        "temporal-nextqa-val-6018490041-q6",
+        "temporal-nextqa-val-6136926089-q8",
+        "temporal-nextqa-val-6793786769-q5",
+        "temporal-nextqa-val-7416295940-q7",
+        "temporal-nextqa-val-7533369046-q6",
+        "temporal-nextqa-val-8740703217-q1"
       ]
     }
   },
@@ -96,9 +96,9 @@
   "repetitions": 2,
   "success_scoring_rule": "multiple-choice-option-id-exact-match-v1",
   "benchmark_bindings": {
-    "selection_protocol_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "scoring_contract_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-    "representation_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    "selection_protocol_sha256": "aa6f1c14ee7bce126260008b62d79f9397410b65abfa2dd04bc12f986c13d5b8",
+    "scoring_contract_sha256": "2d731a4b50f7421b8fa3fbd6d9e92d0892ec2a11e5b287e2244648f3148d17eb",
+    "representation_manifest_sha256": "35ecbfd3de167d15b696d81a7b7440936c249eaee61790301b752cbe5fbcc32d"
   },
   "total_cost_contract": {
     "cost_basis": "total_cost",

@@ -241,7 +241,18 @@ class DistributedScoringTest(unittest.TestCase):
         self.assertEqual(36, prereg.independent_workload_count)
         self.assertEqual(2, prereg.repetitions)
         self.assertEqual(144, prereg.planned_trial_count)
-        self.assertEqual("0" * 64, prereg.scoring_contract_sha256)
+        self.assertEqual(
+            "aa6f1c14ee7bce126260008b62d79f9397410b65abfa2dd04bc12f986c13d5b8",
+            prereg.selection_protocol_sha256,
+        )
+        self.assertEqual(
+            "2d731a4b50f7421b8fa3fbd6d9e92d0892ec2a11e5b287e2244648f3148d17eb",
+            prereg.scoring_contract_sha256,
+        )
+        self.assertEqual(
+            "35ecbfd3de167d15b696d81a7b7440936c249eaee61790301b752cbe5fbcc32d",
+            prereg.representation_manifest_sha256,
+        )
 
     def test_exact_preregistration_requires_all_benchmark_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -265,14 +276,18 @@ class DistributedScoringTest(unittest.TestCase):
             ):
                 load_distributed_pilot_preregistration(path)
 
-    def test_template_bindings_warn_offline_and_block_a_live_pilot(self) -> None:
+    def test_frozen_bindings_pass_while_deployment_placeholders_block_live(
+        self,
+    ) -> None:
         prereg = load_distributed_pilot_preregistration(
             ROOT
             / "configs"
             / "pathfinderbench_restricted_pilot_v0_1_preregistration.template.json"
         )
         registry = load_endpoint_registry(
-            ROOT / "configs" / "distributed_endpoints_example.json"
+            ROOT
+            / "configs"
+            / "pathfinderbench_restricted_pilot_v0_1_endpoints.json"
         )
         arguments = {
             "environment": {
@@ -293,9 +308,17 @@ class DistributedScoringTest(unittest.TestCase):
             prereg, registry, mode="live_pilot", **arguments
         )
         check = "manifest.benchmark_contracts_bound"
-        self.assertIn(check, offline["advisory_warnings"])
+        self.assertNotIn(check, offline["advisory_warnings"])
         self.assertNotIn(check, offline["failed_checks"])
-        self.assertIn(check, live["failed_checks"])
+        self.assertNotIn(check, live["failed_checks"])
+        self.assertIn(
+            "cost_model.rates_are_measured_not_placeholder",
+            live["failed_checks"],
+        )
+        self.assertIn(
+            "identity.source_git_revision_is_real",
+            live["failed_checks"],
+        )
 
 
 if __name__ == "__main__":
