@@ -1,0 +1,44 @@
+{
+  "schema_version": "pathfinder.distributed-policy-awm-audit/v1alpha1",
+  "audit_id": "pathfinderbench-restricted-pilot-v0.1-distributed-policy-awm-posthoc-v1",
+  "posthoc": true,
+  "eligible_for_scientific_claims": false,
+  "executed_policy_id": "executed_restricted_policy",
+  "policies": [
+    {
+      "policy_id": "executed_restricted_policy",
+      "provenance": "executed-preregistered-restricted-policy",
+      "note": "Reproduces the executed restricted policy: D_local_frames for causal and descriptive workloads and D_local_digest for temporal workloads. These are physical designs; the recorded access route remains authoritative for the representation actually selected.",
+      "assignment_by_stratum": {
+        "causal": "candidate",
+        "descriptive": "candidate",
+        "temporal": "candidate"
+      }
+    },
+    {
+      "policy_id": "temporal_origin_fallback",
+      "provenance": "posthoc-selected-after-inspecting-pilot-outcomes",
+      "note": "Diagnostic policy selected after inspecting this pilot: retain D_local_frames for causal and descriptive workloads but fall back to the safe D_origin_remote design for temporal workloads. It requires a fresh preregistered holdout.",
+      "assignment_by_stratum": {
+        "causal": "candidate",
+        "descriptive": "candidate",
+        "temporal": "safe"
+      }
+    }
+  ],
+  "confidence": {
+    "family_adjustment": "bonferroni",
+    "bound_method": "workload-cluster-one-sided-bounded-mean-kl",
+    "minimum_independent_workloads": 36
+  },
+  "supports": {
+    "success_difference": {
+      "lower": -1.0,
+      "upper": 1.0
+    },
+    "cost_saving": {
+      "lower": -2.0,
+      "upper": 2.0
+    }
+  }
+}

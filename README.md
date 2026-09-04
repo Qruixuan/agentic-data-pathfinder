@@ -45,6 +45,12 @@ workload, not a new public dataset, leaderboard, or confirmation of PPD claims.
 The first two-node run and its byte-identical offline reproduction on a second
 machine are summarized in
 [DISTRIBUTED_CONFORMANCE_REPRODUCIBILITY_RESULTS.md](DISTRIBUTED_CONFORMANCE_REPRODUCIBILITY_RESULTS.md).
+The offline bridge from a frozen distributed evaluation to a policy-level AWM
+safety diagnostic is documented in
+[DISTRIBUTED_POLICY_AWM.md](DISTRIBUTED_POLICY_AWM.md). It compares only the
+safe/candidate outcome pairs that were actually observed, refuses to fabricate
+a complete design Oracle, and keeps outcome-informed fallback policies
+explicitly post-hoc and ineligible for scientific claims.
 
 The minimum infrastructure for a *distributed* pilot, in which origin and
 local representations live on different Data Agent nodes, is in

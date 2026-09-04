@@ -45,6 +45,20 @@ def _parser() -> argparse.ArgumentParser:
     for flag in ("run-dir", "preregistration", "endpoint-registry",
                  "workload-manifest", "measurement-manifest", "output-dir"):
         evaluation.add_argument("--" + flag, type=Path, required=True)
+    policy_awm = subcommands.add_parser(
+        "audit-distributed-policy-awm",
+        help=(
+            "audit observed safe/candidate distributed policies offline "
+            "without inventing a complete design Oracle"
+        ),
+    )
+    for flag in (
+        "evaluation-dir",
+        "preregistration",
+        "audit-config",
+        "output-dir",
+    ):
+        policy_awm.add_argument("--" + flag, type=Path, required=True)
     example = subcommands.add_parser(
         "create-workload-evaluation-example",
         help="create a deterministic synthetic format example, never a live run",
@@ -939,6 +953,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "canonical_records", "independent_workloads", "attempt_records",
                 "attempt_classes", "failure_classes", "paired_aggregates",
                 "eligible_for_scientific_claims",
+            )}, indent=2))
+            return 0
+        if args.command == "audit-distributed-policy-awm":
+            from .awm import audit_distributed_policy_awm
+
+            result = audit_distributed_policy_awm(
+                args.evaluation_dir,
+                preregistration=args.preregistration,
+                audit_config=args.audit_config,
+                output_dir=args.output_dir,
+            )
+            print(json.dumps({key: result[key] for key in (
+                "status",
+                "audit_id",
+                "pilot_id",
+                "independent_workloads",
+                "complete_design_oracle",
+                "policy_summaries",
+                "posthoc",
+                "eligible_for_scientific_claims",
+                "recommended_next_step",
             )}, indent=2))
             return 0
         if args.command == "create-workload-evaluation-example":

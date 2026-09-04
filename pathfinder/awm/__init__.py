@@ -52,6 +52,16 @@ from .dataset import (
     TrialObservation,
     load_oracle_dataset,
 )
+from .distributed_policy import (
+    DISTRIBUTED_POLICY_AUDIT_CONFIG_SCHEMA_VERSION,
+    DISTRIBUTED_POLICY_AUDIT_EVALUATION_SCHEMA_VERSION,
+    POLICY_ASSIGNMENTS,
+    POLICY_PROVENANCES,
+    DistributedPolicyAuditConfig,
+    DistributedPolicyDefinition,
+    audit_distributed_policy_awm,
+    load_distributed_policy_audit_config,
+)
 from .evaluation import evaluate_awm, holdout_truth
 from .heterogeneity import (
     HETEROGENEITY_CONFIG_SCHEMA_VERSION,
@@ -105,6 +115,10 @@ __all__ = [
     "CONTROL_BOUND_METHOD",
     "DesignBounds",
     "DesignSample",
+    "DistributedPolicyAuditConfig",
+    "DistributedPolicyDefinition",
+    "DISTRIBUTED_POLICY_AUDIT_CONFIG_SCHEMA_VERSION",
+    "DISTRIBUTED_POLICY_AUDIT_EVALUATION_SCHEMA_VERSION",
     "EmpiricalBernsteinEstimate",
     "ESTIMAND_TARGETS",
     "evaluate_awm",
@@ -116,6 +130,7 @@ __all__ = [
     "holdout_truth",
     "Interval",
     "load_awm_config",
+    "load_distributed_policy_audit_config",
     "load_calibration_config",
     "load_oracle_dataset",
     "load_workload_heterogeneity_audit_config",
@@ -123,6 +138,8 @@ __all__ = [
     "one_sided_bounded_mean_bounds",
     "PairedGainCertificate",
     "PairedGainPowerAnalysis",
+    "POLICY_ASSIGNMENTS",
+    "POLICY_PROVENANCES",
     "run_certificate_monte_carlo",
     "SAFETY_CERTIFICATE_CONFIG_SCHEMA_VERSION",
     "SAFETY_CERTIFICATE_EVALUATION_SCHEMA_VERSION",
@@ -131,4 +148,5 @@ __all__ = [
     "TrialObservation",
     "WorkloadHeterogeneityAuditConfig",
     "WorkloadSafetyCertificateConfig",
+    "audit_distributed_policy_awm",
 ]
