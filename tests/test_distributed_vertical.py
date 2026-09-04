@@ -2012,6 +2012,18 @@ class CliPreflightAndExitCodeTest(unittest.TestCase):
         )
         self.registry_path = self.root / "registry.json"
         _write_json(self.registry_path, _registry_payload())
+        # The CLI loads the registry from this file, so the fixture and its
+        # measurement manifest must agree on that file's digest. Preflight
+        # now binds the manifest before probing anything, which surfaces a
+        # mismatch here rather than deep inside a run.
+        self.fixture.registry = load_endpoint_registry(self.registry_path)
+        _write_json(self.fixture.measurement_path, _measurement_payload(
+            self.fixture.preregistration.source_sha256,
+            self.fixture.registry.source_sha256,
+        ))
+        self.fixture.provider = load_measurement_manifest(
+            self.fixture.measurement_path
+        )
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -2091,6 +2103,16 @@ class CliPreflightAndExitCodeTest(unittest.TestCase):
             )
         ]
         _write_json(self.registry_path, payload)
+        # Rewriting the registry changes its digest, so the measurement
+        # manifest must be rebound to it before preflight checks the pair.
+        self.fixture.registry = load_endpoint_registry(self.registry_path)
+        _write_json(self.fixture.measurement_path, _measurement_payload(
+            self.fixture.preregistration.source_sha256,
+            self.fixture.registry.source_sha256,
+        ))
+        self.fixture.provider = load_measurement_manifest(
+            self.fixture.measurement_path
+        )
         opener = self._health_opener(self.fixture.agents)
         with mock.patch.dict(os.environ, _VERTICAL_ENVIRONMENT), \
                 mock.patch(

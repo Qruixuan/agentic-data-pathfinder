@@ -13,6 +13,8 @@ from typing import Any
 from pathfinder.cli import main as cli_main
 from pathfinder.distributed import (
     CHANGE_CLASSIFICATIONS,
+    require_matching_measurement_manifest,
+    require_outside_input_freeze,
     file_sha256,
     EXECUTION_AMENDMENT_SCHEMA_VERSION,
     ExecutionAmendmentError,
@@ -125,6 +127,13 @@ class _AmendmentFixture:
         )
         self.plan_path = root / "frozen_plan.json"
         _write_json(self.plan_path, self.plan)
+        # A stand-in immutable freeze; amendments must not be written inside.
+        self.freeze_dir = root / "input-freeze"
+        (self.freeze_dir / "config").mkdir(parents=True, exist_ok=True)
+        _write_json(
+            self.freeze_dir / "config" / "frozen-input.json",
+            {"frozen": True},
+        )
 
     def resolver(
         self,
@@ -146,7 +155,12 @@ class _AmendmentFixture:
             revision,
             CHANGED_PATHS,
             blobs=blobs,
-            relative_paths={str(self.system_config): self.system_repo_path},
+            relative_paths={
+                # Both the temp copy (unit paths) and the tracked file
+                # (CLI paths) resolve to the same repository-relative path.
+                str(self.system_config): self.system_repo_path,
+                str(self.tracked_system_config): self.system_repo_path,
+            },
         )
 
     def build(self, **overrides: Any) -> dict[str, Any]:
@@ -356,13 +370,16 @@ class AmendmentGateTest(unittest.TestCase):
             provenance["execution_git_revision"],
         )
 
-    def test_a_superfluous_amendment_is_noted_not_credited(self) -> None:
-        provenance = self.f.require(
-            resolver=self.f.resolver(PROTOCOL_REVISION),
-            amendment_path=self.valid_path,
-        )
-        self.assertFalse(provenance["execution_amendment_required"])
-        self.assertIn("not required", provenance["execution_amendment_note"])
+    def test_an_unnecessary_amendment_is_rejected_not_ignored(self) -> None:
+        """Ignoring it would let an unvalidated document ride along."""
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "none is required",
+        ):
+            self.f.require(
+                resolver=self.f.resolver(PROTOCOL_REVISION),
+                amendment_path=self.valid_path,
+            )
 
     def test_mismatched_revisions_fail_without_an_amendment(self) -> None:
         with self.assertRaisesRegex(
@@ -796,12 +813,19 @@ class PreflightAmendmentPolicyTest(unittest.TestCase):
 
         return opener
 
-    def _cli(self, argv):
+    def _cli(self, argv, *, resolver=None):
         import os
         from unittest import mock
 
+        # Injected, never inferred from HEAD: otherwise every commit that
+        # moves HEAD breaks these assertions.
+        injected = resolver if resolver is not None else self.f.resolver()
         stdout = io.StringIO()
         with mock.patch.dict(os.environ, self._environment), \
+                mock.patch(
+                    "pathfinder.distributed.default_revision_resolver",
+                    lambda *a, **k: injected,
+                ), \
                 mock.patch(
                     "pathfinder.distributed.health._no_redirect_opener",
                     lambda: self._stub(self._opener()),
@@ -906,15 +930,15 @@ class PreflightAmendmentPolicyTest(unittest.TestCase):
         payload = json.loads(
             self.f.fixture.preregistration_path.read_text(encoding="utf-8")
         )
-        from pathfinder.distributed import GitRevisionResolver
-
-        payload["source_git_revision"] = GitRevisionResolver(
-            Path(__file__).resolve().parents[1]
-        ).current_revision()
+        payload["source_git_revision"] = PROTOCOL_REVISION
         _write_json(self.f.fixture.preregistration_path, payload)
+        resolver = self.f.resolver(PROTOCOL_REVISION)
         for mode in ("offline_validation", "live_pilot"):
             with self.subTest(mode=mode):
-                code, result = self._cli(self._argv(mode))
+                code, result = self._cli(
+                    self._argv(mode),
+                    resolver=resolver,
+                )
                 self.assertNotIn(self.CHECK_ID, result["failed_checks"])
                 self.assertNotIn(
                     self.CHECK_ID,
@@ -955,6 +979,279 @@ class PreflightAmendmentPolicyTest(unittest.TestCase):
 
 
 
+class DirtyExecutionTreeTest(unittest.TestCase):
+    """A clean tree is required at execution, not merely at creation."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.f = _AmendmentFixture(self.root)
+        self.valid_path = self.f.write(self.f.build())
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _dirty(self, revision: str = EXECUTION_REVISION):
+        class _Dirty(StaticRevisionResolver):
+            def is_clean(self) -> bool:
+                return False
+
+        base = self.f.resolver(revision)
+        return _Dirty(
+            base.revision,
+            base.paths,
+            blobs=base.blobs,
+            relative_paths=base.relative_paths,
+        )
+
+    def test_an_amended_execution_is_refused_on_a_dirty_tree(self) -> None:
+        # The amendment was created against a clean revision and is valid;
+        # the tree then became dirty, so HEAD no longer describes the code.
+        self.f.require(amendment_path=self.valid_path)
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "uncommitted changes",
+        ):
+            self.f.require(
+                amendment_path=self.valid_path,
+                resolver=self._dirty(),
+            )
+
+    def test_a_matching_revision_is_also_refused_on_a_dirty_tree(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "uncommitted changes",
+        ):
+            self.f.require(resolver=self._dirty(PROTOCOL_REVISION))
+
+    def test_rejection_precedes_any_executor_or_run_directory_write(
+        self,
+    ) -> None:
+        run_dir = self.root / "run"
+        with self.assertRaises(ExecutionAmendmentError):
+            self.f.require(
+                amendment_path=self.valid_path,
+                resolver=self._dirty(),
+            )
+        self.assertFalse(
+            run_dir.exists(),
+            "no run directory may be created by a refused gate",
+        )
+        # And the runner never reaches the executor, because the gate is
+        # evaluated before it is constructed.
+        with self.assertRaises(ExecutionAmendmentError):
+            self.f.require(
+                amendment_path=self.valid_path,
+                resolver=self._dirty(),
+            )
+
+
+class ChangedPathRevalidationTest(unittest.TestCase):
+    """The amendment's claims about what changed are recomputed, not trusted."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.f = _AmendmentFixture(Path(self._tmp.name))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_tampered_changed_path_list_is_refused(self) -> None:
+        cases = {
+            "extra entry": list(CHANGED_PATHS) + ["pathfinder/awm/model.py"],
+            "missing entry": [],
+            "different entry": ["pathfinder/oed/controller.py"],
+            "reordered": list(reversed(
+                list(CHANGED_PATHS) + ["a/b.py"]
+            )),
+        }
+        for label, paths in cases.items():
+            with self.subTest(case=label):
+                tampered = self.f.write(
+                    {**self.f.build(), "changed_paths": paths},
+                    f"paths-{abs(hash(label))}.json",
+                )
+                with self.assertRaisesRegex(
+                    ExecutionAmendmentError,
+                    "changed paths that do not match",
+                ):
+                    self.f.require(amendment_path=tampered)
+
+    def test_a_tampered_system_config_path_is_refused(self) -> None:
+        tampered = self.f.write(
+            {
+                **self.f.build(),
+                "system_config_repo_path": "configs/some_other_system.json",
+            },
+            "syspath.json",
+        )
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "but this run supplies",
+        ):
+            self.f.require(amendment_path=tampered)
+
+    def test_a_valid_amendment_records_revalidation(self) -> None:
+        provenance = self.f.require(
+            amendment_path=self.f.write(self.f.build()),
+        )
+        self.assertTrue(provenance["changed_paths_revalidated"])
+        self.assertEqual(
+            list(CHANGED_PATHS),
+            provenance["amendment_changed_paths"],
+        )
+
+
+class InputFreezeContainmentTest(unittest.TestCase):
+    """An amendment may never be written inside the freeze it describes."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.f = _AmendmentFixture(self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _freeze_digest(self) -> dict[str, str]:
+        return {
+            str(path.relative_to(self.f.freeze_dir)): file_sha256(path)
+            for path in sorted(self.f.freeze_dir.rglob("*"))
+            if path.is_file()
+        }
+
+    def test_output_directly_in_the_freeze_is_refused(self) -> None:
+        before = self._freeze_digest()
+        target = self.f.freeze_dir / "amendment.json"
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "inside the immutable input freeze",
+        ):
+            require_outside_input_freeze(target, self.f.freeze_dir)
+        self.assertFalse(target.exists())
+        self.assertEqual(before, self._freeze_digest())
+
+    def test_output_nested_in_the_freeze_is_refused(self) -> None:
+        before = self._freeze_digest()
+        target = (
+            self.f.freeze_dir / "config" / "amendments" / "a.json"
+        )
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "inside the immutable input freeze",
+        ):
+            require_outside_input_freeze(target, self.f.freeze_dir)
+        self.assertFalse(target.parent.exists())
+        self.assertEqual(before, self._freeze_digest())
+
+    def test_the_freeze_directory_itself_is_refused(self) -> None:
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "inside the immutable input freeze",
+        ):
+            require_outside_input_freeze(
+                self.f.freeze_dir,
+                self.f.freeze_dir,
+            )
+
+    def test_output_outside_the_freeze_is_accepted(self) -> None:
+        require_outside_input_freeze(
+            self.root / "amendments" / "a.json",
+            self.f.freeze_dir,
+        )
+
+    def test_a_missing_freeze_directory_is_refused(self) -> None:
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "does not exist",
+        ):
+            require_outside_input_freeze(
+                self.root / "a.json",
+                self.root / "absent-freeze",
+            )
+
+    def test_creation_refuses_and_leaves_the_freeze_byte_identical(
+        self,
+    ) -> None:
+        before = self._freeze_digest()
+        target = self.f.freeze_dir / "config" / "amendment.json"
+        with self.assertRaisesRegex(
+            ExecutionAmendmentError,
+            "inside the immutable input freeze",
+        ):
+            self.f.build(
+                input_freeze_dir=self.f.freeze_dir,
+                output_path=target,
+            )
+        self.assertFalse(target.exists())
+        self.assertEqual(before, self._freeze_digest())
+
+
+class MeasurementBindingTest(unittest.TestCase):
+    """A foreign manifest must fail before any side effect."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.f = _AmendmentFixture(self.root)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _foreign(self, **changes: Any):
+        from pathfinder.distributed import load_measurement_manifest
+        from tests.test_distributed_vertical import _measurement_payload
+
+        payload = _measurement_payload(
+            self.f.preregistration.source_sha256,
+            self.f.registry.source_sha256,
+        )
+        payload.update(changes)
+        path = self.root / f"foreign-{abs(hash(str(changes)))}.json"
+        _write_json(path, payload)
+        return load_measurement_manifest(path)
+
+    def test_a_matching_manifest_is_accepted(self) -> None:
+        require_matching_measurement_manifest(
+            self.f.provider,
+            self.f.preregistration,
+            self.f.registry,
+        )
+
+    def test_a_foreign_manifest_is_refused(self) -> None:
+        cases = {
+            "pilot_id": {"pilot_id": "another-pilot"},
+            "preregistration": {"preregistration_sha256": "a" * 64},
+            "endpoint_registry": {"endpoint_registry_sha256": "b" * 64},
+            "execution_node": {"execution_node_id": "some-other-node"},
+        }
+        for label, changes in cases.items():
+            with self.subTest(field=label):
+                with self.assertRaises(Exception) as caught:
+                    require_matching_measurement_manifest(
+                        self._foreign(**changes),
+                        self.f.preregistration,
+                        self.f.registry,
+                    )
+                self.assertIn(
+                    "different frozen run",
+                    str(caught.exception),
+                )
+
+    def test_creation_refuses_a_foreign_manifest(self) -> None:
+        target = self.root / "amendments" / "a.json"
+        with self.assertRaises(Exception):
+            self.f.build(
+                provider=self._foreign(pilot_id="another-pilot"),
+                input_freeze_dir=self.f.freeze_dir,
+                output_path=target,
+            )
+        self.assertFalse(target.exists())
+
+
+
 class AmendmentCliTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -964,10 +1261,17 @@ class AmendmentCliTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _cli(self, argv):
+    def _cli(self, argv, *, resolver=None):
+        from unittest import mock
+
+        injected = resolver if resolver is not None else self.f.resolver()
         stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
-            code = cli_main(argv)
+        with mock.patch(
+            "pathfinder.distributed.default_revision_resolver",
+            lambda *a, **k: injected,
+        ):
+            with contextlib.redirect_stdout(stdout):
+                code = cli_main(argv)
         return code, json.loads(stdout.getvalue())
 
     def _argv(self, output: Path) -> list[str]:
@@ -985,6 +1289,8 @@ class AmendmentCliTest(unittest.TestCase):
             str(self.f.system_config),
             "--frozen-plan",
             str(self.f.plan_path),
+            "--input-freeze-dir",
+            str(self.f.freeze_dir),
             "--amendment-id",
             "cli-amendment",
             "--reason",
@@ -1010,25 +1316,35 @@ class AmendmentCliTest(unittest.TestCase):
             "a refused create must not touch the existing file",
         )
 
-    def test_the_create_command_refuses_a_dirty_tree(self) -> None:
-        # The real repository resolver is used here; this suite runs with a
-        # working tree that may legitimately be clean or dirty, so accept
-        # either a dirty-tree refusal or a successful creation, but never a
-        # silently wrong revision.
+    def test_the_create_command_writes_a_valid_amendment(self) -> None:
         target = self.root / "created.json"
         code, payload = self._cli(self._argv(target))
-        if code == 0:
-            self.assertEqual(
-                EXECUTION_AMENDMENT_SCHEMA_VERSION,
-                payload["schema_version"],
-            )
-            self.assertTrue(target.is_file())
-            self.assertEqual(40, len(payload["execution_git_revision"]))
-            self.assertFalse(payload["credentials_recorded"])
-        else:
-            self.assertEqual(2, code)
-            self.assertIn("uncommitted changes", payload["message"])
-            self.assertFalse(target.exists())
+        self.assertEqual(0, code, payload)
+        self.assertEqual(
+            EXECUTION_AMENDMENT_SCHEMA_VERSION,
+            payload["schema_version"],
+        )
+        self.assertTrue(target.is_file())
+        self.assertEqual(EXECUTION_REVISION, payload["execution_git_revision"])
+        self.assertFalse(payload["credentials_recorded"])
+
+    def test_the_create_command_refuses_a_dirty_tree(self) -> None:
+        class _Dirty(StaticRevisionResolver):
+            def is_clean(self) -> bool:
+                return False
+
+        base = self.f.resolver()
+        dirty = _Dirty(
+            base.revision,
+            base.paths,
+            blobs=base.blobs,
+            relative_paths=base.relative_paths,
+        )
+        target = self.root / "dirty.json"
+        code, payload = self._cli(self._argv(target), resolver=dirty)
+        self.assertEqual(2, code)
+        self.assertIn("uncommitted changes", payload["message"])
+        self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

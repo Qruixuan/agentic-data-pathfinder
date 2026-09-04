@@ -190,6 +190,18 @@ class StaticRevisionResolver:
         return (self.blobs or {}).get((revision, repo_relative_path))
 
 
+def default_revision_resolver(
+    repository: str | Path | None = None,
+) -> RevisionResolver:
+    """The resolver production uses.
+
+    Indirected through the package namespace so a caller -- in practice a
+    test -- can substitute a deterministic resolver instead of depending on
+    whichever commit happens to be checked out.
+    """
+    return GitRevisionResolver(Path(repository or Path.cwd()))
+
+
 @dataclass(frozen=True)
 class ExecutionAmendment:
     """One loaded, structurally valid amendment document."""
@@ -272,6 +284,30 @@ def canonical_plan_sha256(plan: Mapping[str, Any]) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def require_outside_input_freeze(
+    output_path: str | Path,
+    input_freeze_dir: str | Path,
+) -> None:
+    """Refuse to write an amendment inside the immutable input freeze.
+
+    An amendment recorded inside the freeze it describes would change the
+    freeze's own digest set, which is exactly the immutability the freeze
+    exists to provide. Checked before anything is created or written.
+    """
+    freeze = Path(input_freeze_dir).resolve()
+    if not freeze.is_dir():
+        raise ExecutionAmendmentError(
+            f"the declared input freeze directory does not exist: {freeze}"
+        )
+    target = Path(output_path).resolve()
+    if target == freeze or freeze in target.parents:
+        raise ExecutionAmendmentError(
+            f"refusing to write the execution amendment inside the "
+            f"immutable input freeze ({freeze}); an amendment must live "
+            "outside the inputs it describes"
+        )
 
 
 def load_execution_amendment(path: str | Path) -> ExecutionAmendment:
@@ -426,6 +462,29 @@ def _expected_bound_inputs(
     }
 
 
+def require_matching_measurement_manifest(
+    provider: Any,
+    preregistration: DistributedPilotPreregistration,
+    registry: EndpointRegistry,
+) -> None:
+    """Bind the measurement manifest to this pilot before anything happens.
+
+    A structurally valid manifest measured for a different pilot, a
+    different preregistration, or a different node would otherwise be
+    detected only deep inside the run, after a backend and FlowMesh client
+    already existed and the run directory had been written to.
+    """
+    require = getattr(provider, "require_matching_run", None)
+    if not callable(require):
+        return
+    require(
+        pilot_id=preregistration.pilot_id,
+        preregistration_sha256=preregistration.source_sha256,
+        endpoint_registry_sha256=registry.source_sha256,
+        execution_node_id=registry.execution_node_id,
+    )
+
+
 def verify_plan_equivalence(
     recomputed_plan: Mapping[str, Any],
     frozen_plan: Mapping[str, Any],
@@ -464,8 +523,19 @@ def build_execution_amendment(
     recomputed_plan: Mapping[str, Any],
     resolver: RevisionResolver,
     change_classification: str = "orchestration-only",
+    input_freeze_dir: str | Path | None = None,
+    output_path: str | Path | None = None,
+    provider: Any = None,
 ) -> dict[str, Any]:
     """Create an amendment, refusing unless the plan recomputes identically."""
+    if input_freeze_dir is not None and output_path is not None:
+        require_outside_input_freeze(output_path, input_freeze_dir)
+    if provider is not None:
+        require_matching_measurement_manifest(
+            provider,
+            preregistration,
+            registry,
+        )
     if change_classification not in CHANGE_CLASSIFICATIONS:
         raise ExecutionAmendmentError(
             f"unsupported change_classification: {change_classification}"
@@ -591,6 +661,17 @@ def require_execution_compatibility(
     is opened when the executing revision differs from the preregistered
     protocol revision without valid amendment evidence.
     """
+    # A clean tree is required whether or not an amendment is in play. A
+    # user could otherwise create an amendment at a clean revision, edit
+    # tracked files, and execute while HEAD still reports the authorised
+    # commit -- the recorded revision would name code that is not running.
+    is_clean = getattr(resolver, "is_clean", None)
+    if callable(is_clean) and not is_clean():
+        raise ExecutionAmendmentError(
+            "the working tree has uncommitted changes, so the resolved "
+            "revision does not describe the code that would execute. "
+            "Refusing to run; commit or stash first."
+        )
     protocol_revision = preregistration.source_git_revision
     execution_revision = resolver.current_revision()
     provenance: dict[str, Any] = {
@@ -611,11 +692,15 @@ def require_execution_compatibility(
 
     if execution_revision == protocol_revision:
         if amendment_path is not None:
-            # Not an error, but say so: an amendment that changes nothing
-            # should not look like it authorised something.
-            provenance["execution_amendment_note"] = (
-                "an amendment was supplied but is not required; the "
-                "execution revision equals the protocol revision"
+            # Refused rather than ignored. Silently accepting an
+            # unvalidated document would let a stale or foreign amendment
+            # ride along in the run record as though it had been checked.
+            raise ExecutionAmendmentError(
+                "an execution amendment was supplied but none is required: "
+                f"the execution revision equals the preregistered protocol "
+                f"revision ({protocol_revision}). Remove "
+                "--execution-amendment, or run at a revision that actually "
+                "needs one."
             )
         return provenance
 
@@ -645,6 +730,31 @@ def require_execution_compatibility(
             "the amendment authorises execution revision "
             f"{amendment.execution_git_revision}, but this process is "
             f"running {execution_revision}"
+        )
+    # Recomputed from git rather than trusted: the amendment's own list is
+    # a claim about which files differ, and a claim is what needs checking.
+    actual_changed_paths = tuple(
+        resolver.changed_paths(protocol_revision, execution_revision)
+    )
+    if actual_changed_paths != amendment.changed_paths:
+        raise ExecutionAmendmentError(
+            "the amendment lists changed paths that do not match this "
+            "revision pair. Amendment: "
+            + (", ".join(amendment.changed_paths) or "(none)")
+            + "; actual: "
+            + (", ".join(actual_changed_paths) or "(none)")
+        )
+    relativise = getattr(resolver, "repo_relative_path", None)
+    actual_system_repo_path = (
+        relativise(system_config_path)
+        if callable(relativise)
+        else Path(system_config_path).name
+    )
+    if actual_system_repo_path != amendment.system_config_repo_path:
+        raise ExecutionAmendmentError(
+            "the amendment describes system configuration "
+            f"{amendment.system_config_repo_path!r} but this run supplies "
+            f"{actual_system_repo_path!r}"
         )
     if frozen_plan_path is None:
         raise ExecutionAmendmentError(
@@ -715,6 +825,7 @@ def require_execution_compatibility(
         "amendment_evidence_class": "auditable-compatibility-evidence",
         "amendment_reason": amendment.reason,
         "amendment_changed_paths": list(amendment.changed_paths),
+        "changed_paths_revalidated": True,
         "amendment_is_not_authenticity_or_approval": True,
         "system_config_repo_path": amendment.system_config_repo_path,
         "system_config_unchanged_since_protocol_revision": True,

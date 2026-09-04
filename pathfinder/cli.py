@@ -656,6 +656,15 @@ def _parser() -> argparse.ArgumentParser:
     amendment.add_argument("--workload-manifest", type=Path, required=True)
     amendment.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     amendment.add_argument("--frozen-plan", type=Path, required=True)
+    amendment.add_argument(
+        "--input-freeze-dir",
+        type=Path,
+        required=True,
+        help=(
+            "the immutable input freeze; the amendment must be written "
+            "outside it"
+        ),
+    )
     amendment.add_argument("--amendment-id", required=True)
     amendment.add_argument(
         "--reason",
@@ -1128,15 +1137,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _print_payload(payload, compact=args.compact)
         if args.command == "create-distributed-execution-amendment":
             from .distributed import (
-                GitRevisionResolver,
                 build_execution_amendment,
                 build_frozen_plan_document,
+                default_revision_resolver,
                 load_distributed_pilot_preregistration,
                 load_endpoint_registry,
                 load_measurement_manifest,
+                require_outside_input_freeze,
             )
 
             target = Path(args.output)
+            # Checked before anything is created or written.
+            require_outside_input_freeze(target, args.input_freeze_dir)
             if target.exists():
                 raise ConfigError(
                     f"refusing to overwrite an existing amendment: {target}"
@@ -1167,8 +1179,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     registry,
                     workloads=workloads,
                 ),
-                resolver=GitRevisionResolver(Path.cwd()),
+                resolver=default_revision_resolver(),
                 change_classification=args.change_classification,
+                input_freeze_dir=args.input_freeze_dir,
+                output_path=target,
+                provider=provider,
             )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(
@@ -1190,14 +1205,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run-distributed-pilot":
             from .distributed import (
                 FlowMeshDistributedSessionExecutor,
-                GitRevisionResolver,
                 HttpDataAgentHealthProbe,
                 build_frozen_plan_document,
+                default_revision_resolver,
                 load_distributed_pilot_preregistration,
                 load_endpoint_registry,
                 load_measurement_manifest,
                 preflight_distributed_pilot,
                 require_execution_compatibility,
+                require_matching_measurement_manifest,
                 run_distributed_pilot,
                 validate_workload_manifest,
             )
@@ -1232,6 +1248,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             config = load_config(args.config)
 
+            # Bound before a backend, client, or run directory exists: a
+            # foreign manifest must not be detected only after the run has
+            # already written state.
+            require_matching_measurement_manifest(
+                provider,
+                preregistration,
+                registry,
+            )
+
             # Resolved before any client, gateway, or session exists: a
             # revision mismatch must stop the run before FlowMesh is touched.
             frozen_plan_path = args.frozen_plan or (
@@ -1240,7 +1265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             execution_provenance = require_execution_compatibility(
                 preregistration,
                 registry,
-                resolver=GitRevisionResolver(Path.cwd()),
+                resolver=default_revision_resolver(),
                 measurement_manifest_sha256=provider.manifest_sha256,
                 workloads=workloads,
                 system_config_path=args.config,
@@ -1348,13 +1373,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "preflight-distributed-pilot":
             from .distributed import (
                 ExecutionAmendmentError,
-                GitRevisionResolver,
                 HttpDataAgentHealthProbe,
                 build_frozen_plan_document,
+                default_revision_resolver,
                 load_distributed_pilot_preregistration,
                 load_endpoint_registry,
                 preflight_distributed_pilot,
                 require_execution_compatibility,
+                require_matching_measurement_manifest,
             )
 
             pin = None
@@ -1363,12 +1389,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.worker_alias:
                 pin = {"kind": "worker_alias", "value": args.worker_alias}
             manifest_sha256 = None
+            measurement_provider = None
             if args.measurement_manifest is not None:
                 from .distributed import load_measurement_manifest
 
-                manifest_sha256 = load_measurement_manifest(
+                measurement_provider = load_measurement_manifest(
                     args.measurement_manifest
-                ).manifest_sha256
+                )
+                manifest_sha256 = measurement_provider.manifest_sha256
             # Loaded once and shared: the probe must resolve endpoints from
             # the same registry the preflight is checking, and without a
             # probe every endpoint health check fails by construction.
@@ -1381,6 +1409,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             preregistration = load_distributed_pilot_preregistration(
                 args.preregistration
             )
+            if measurement_provider is not None:
+                # Before any Data Agent is probed.
+                require_matching_measurement_manifest(
+                    measurement_provider,
+                    preregistration,
+                    registry,
+                )
             amendment_workloads = None
             if args.workload_manifest is not None:
                 amendment_workloads = json.loads(
@@ -1394,7 +1429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 amendment_provenance = require_execution_compatibility(
                     preregistration,
                     registry,
-                    resolver=GitRevisionResolver(Path.cwd()),
+                    resolver=default_revision_resolver(),
                     measurement_manifest_sha256=manifest_sha256 or "",
                     workloads=amendment_workloads or {},
                     system_config_path=args.config,
