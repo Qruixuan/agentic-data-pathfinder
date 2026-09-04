@@ -204,8 +204,11 @@ excluded smoke session into the prospective cohort ledger.
 2. Load the preregistration and build the frozen plan with
    `plan-distributed-pilot`. This validates exact-match workload labels before
    any FlowMesh submission.
-3. Run `preflight-distributed-pilot --mode live_pilot` with the endpoint and
-   measurement manifests.
+3. Run `preflight-distributed-pilot --mode live_pilot` with the system
+   configuration, endpoint registry, and measurement manifest. Supplying
+   `--config` makes the preflight expand every required
+   design-by-representation route instead of assuming a design-wide `*`
+   route.
 4. Run one separate excluded smoke workload and inspect worker receipt,
    routes, telemetry completeness, and artifact delivery.
 5. Start or resume the 144-session formal run. Never delete or edit its

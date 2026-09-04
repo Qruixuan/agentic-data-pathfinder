@@ -552,6 +552,15 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
     )
     pilot_preflight.add_argument(
+        "--config",
+        type=Path,
+        help=(
+            "system configuration whose representation IDs define the "
+            "complete routing matrix; required when candidate designs use "
+            "exact per-representation routes instead of a wildcard"
+        ),
+    )
+    pilot_preflight.add_argument(
         "--worker-alias",
         help="worker alias to check syntactically (no Root query)",
     )
@@ -1101,6 +1110,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     preregistration,
                     registry,
                     probe=probe,
+                    representation_ids=tuple(config.representations),
                     worker_pin=(
                         {"kind": "worker_id", "value": args.worker_id}
                         if args.worker_id
@@ -1198,10 +1208,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             # the same registry the preflight is checking, and without a
             # probe every endpoint health check fails by construction.
             registry = load_endpoint_registry(args.endpoint_registry)
+            representation_ids = (
+                tuple(load_config(args.config).representations)
+                if args.config is not None
+                else ()
+            )
             payload = preflight_distributed_pilot(
                 load_distributed_pilot_preregistration(args.preregistration),
                 registry,
                 probe=HttpDataAgentHealthProbe(registry),
+                representation_ids=representation_ids,
                 worker_pin=pin,
                 mode=args.mode,
                 measurement_manifest_sha256=manifest_sha256,

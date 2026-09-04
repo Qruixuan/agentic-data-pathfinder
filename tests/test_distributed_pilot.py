@@ -1462,6 +1462,71 @@ class PreflightTest(unittest.TestCase):
             report["failed_checks"],
         )
 
+    def test_exact_routes_expand_the_representation_matrix(self) -> None:
+        payload = _registry_payload()
+        payload["placement"] = [
+            {
+                "design_id": design_id,
+                "representation_id": representation_id,
+                "endpoint_id": endpoint_id,
+            }
+            for design_id, representation_id, endpoint_id in (
+                (SAFE, "sampled_frames", "origin_remote"),
+                (SAFE, "multimodal_digest", "origin_remote"),
+                (FRAMES, "sampled_frames", "local_materialized"),
+                (FRAMES, "multimodal_digest", "origin_remote"),
+                (DIGEST, "sampled_frames", "origin_remote"),
+                (DIGEST, "multimodal_digest", "local_materialized"),
+            )
+        ]
+        registry = build_endpoint_registry(payload, source_sha256="0" * 64)
+        report = preflight_distributed_pilot(
+            self.prereg,
+            registry,
+            probe=_FakeProbe(),
+            representation_ids=("sampled_frames", "multimodal_digest"),
+            worker_pin=self.pin,
+            environment=TEST_ENVIRONMENT,
+        )
+        self.assertEqual("ok", report["status"], report["failed_checks"])
+        self.assertEqual(6, len(report["routes"]))
+        self.assertEqual(
+            {"origin_remote", "local_materialized"},
+            {route["endpoint_id"] for route in report["routes"]},
+        )
+
+    def test_exact_route_matrix_fails_when_one_cell_is_missing(self) -> None:
+        payload = _registry_payload()
+        payload["placement"] = [
+            {
+                "design_id": design_id,
+                "representation_id": representation_id,
+                "endpoint_id": endpoint_id,
+            }
+            for design_id, representation_id, endpoint_id in (
+                (SAFE, "sampled_frames", "origin_remote"),
+                (SAFE, "multimodal_digest", "origin_remote"),
+                (FRAMES, "sampled_frames", "local_materialized"),
+                # D_local_frames/multimodal_digest is intentionally absent.
+                (DIGEST, "sampled_frames", "origin_remote"),
+                (DIGEST, "multimodal_digest", "local_materialized"),
+            )
+        ]
+        registry = build_endpoint_registry(payload, source_sha256="0" * 64)
+        report = preflight_distributed_pilot(
+            self.prereg,
+            registry,
+            probe=_FakeProbe(),
+            representation_ids=("sampled_frames", "multimodal_digest"),
+            worker_pin=self.pin,
+            environment=TEST_ENVIRONMENT,
+        )
+        self.assertEqual("failed", report["status"])
+        self.assertIn(
+            "routing[D_local_frames/multimodal_digest]",
+            report["failed_checks"],
+        )
+
     def test_an_unset_endpoint_url_fails(self) -> None:
         report = self._run(environment={})
         self.assertEqual("failed", report["status"])

@@ -2073,6 +2073,51 @@ class CliPreflightAndExitCodeTest(unittest.TestCase):
         for check in health_checks:
             self.assertTrue(check["passed"], check)
 
+    def test_cli_config_expands_exact_representation_routes(self) -> None:
+        payload = _registry_payload()
+        payload["placement"] = [
+            {
+                "design_id": design_id,
+                "representation_id": representation_id,
+                "endpoint_id": endpoint_id,
+            }
+            for design_id, representation_id, endpoint_id in (
+                (SAFE_DESIGN, "sampled_frames", ORIGIN_ENDPOINT),
+                (SAFE_DESIGN, "multimodal_digest", ORIGIN_ENDPOINT),
+                (FRAMES_DESIGN, "sampled_frames", LOCAL_ENDPOINT),
+                (FRAMES_DESIGN, "multimodal_digest", ORIGIN_ENDPOINT),
+                (DIGEST_DESIGN, "sampled_frames", ORIGIN_ENDPOINT),
+                (DIGEST_DESIGN, "multimodal_digest", LOCAL_ENDPOINT),
+            )
+        ]
+        _write_json(self.registry_path, payload)
+        opener = self._health_opener(self.fixture.agents)
+        with mock.patch.dict(os.environ, _VERTICAL_ENVIRONMENT), \
+                mock.patch(
+                    "pathfinder.distributed.health._no_redirect_opener",
+                    lambda: _StubOpener(opener),
+                ):
+            code, report = self._cli(
+                self._preflight_argv()
+                + [
+                    "--config",
+                    str(
+                        ROOT
+                        / "configs"
+                        / "pathfinderbench_restricted_pilot_v0_1_system.json"
+                    ),
+                ]
+            )
+        self.assertEqual("ok", report["status"], report["failed_checks"])
+        self.assertEqual(0, code)
+        # This fixture preregisters one candidate design, so two system
+        # representations expand safe + candidate into four exact routes.
+        self.assertEqual(4, len(report["routes"]))
+        self.assertEqual(
+            {ORIGIN_ENDPOINT, LOCAL_ENDPOINT},
+            {route["endpoint_id"] for route in report["routes"]},
+        )
+
     def test_an_unreachable_endpoint_returns_a_nonzero_exit(self) -> None:
         opener = self._health_opener(
             self.fixture.agents,
