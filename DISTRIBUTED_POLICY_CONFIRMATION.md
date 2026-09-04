@@ -220,3 +220,213 @@ implicitly — fails the frozen model check.
 
 None of that is evidence. It is a description of the experiment that would
 produce evidence.
+
+---
+
+# The weighted certificate evaluator
+
+The plan above is a contract. This section describes the evaluator that
+enforces it once a fresh run exists.
+
+## The weighted estimand
+
+The target is a stratified average of per-stratum policy effects under the
+frozen integer quotas:
+
+```
+overall_success_lower = Σ_s  w_s × success_lower_s
+overall_success_upper = Σ_s  w_s × success_upper_s
+overall_cost_lower    = Σ_s  w_s × cost_lower_s
+overall_cost_upper    = Σ_s  w_s × cost_upper_s
+
+w_causal = 14/36   w_descriptive = 8/36   w_temporal = 14/36
+```
+
+Each tail is summed separately. That is what makes the result simultaneous:
+the per-stratum bounds hold jointly under the family adjustment, so any fixed
+weighted combination of them holds too.
+
+Every interval comes from the existing one-sided bounded-mean KL core in
+`pathfinder.awm.certificate`. No second confidence-bound algorithm exists.
+
+## Why collection allocation may differ from target weights
+
+Weights define *what* is estimated; allocation decides *how precisely*.
+Oversampling `causal` tenfold shrinks its interval and leaves the target
+untouched, because aggregation uses `w_s`, not the sample's proportions.
+Using empirical proportions would silently redefine the estimand every time
+collection came out uneven — which is exactly what oversampling makes happen.
+
+## Structural zeros
+
+Where the policy applies the safe design the effect is identically zero. Such
+a stratum contributes `point = lower = upper = 0` exactly, keeps its full
+weight in the aggregation, requires no candidate record, and **consumes no
+alpha**. Spending family budget on a quantity that cannot vary would widen
+every other stratum's interval for nothing.
+
+A paired record for such a workload is refused: comparing the safe design
+against itself is not an observation.
+
+## Family adjustment
+
+```
+family_size    = |active strata| × |gates| × |tails| = 2 × 2 × 2 = 8
+adjusted_alpha = alpha / family_size = 0.05 / 8 = 0.00625
+```
+
+Structural-safe strata appear in no family component. The certificate records
+the unadjusted alpha, family size, adjusted alpha, the full per-stratum /
+gate / tail allocation, and which strata consumed none.
+
+## Decision rules
+
+```
+success non-inferiority:  overall_success_lower >= -delta_success_margin
+cost improvement:         overall_cost_lower    >= minimum_cost_saving
+```
+
+- `SAFE_TO_COMMIT` — both lower-bound gates pass and every frozen requirement
+  is satisfied.
+- `UNSAFE` — an upper bound establishes violation of at least one gate.
+- `INSUFFICIENT_EVIDENCE` — otherwise.
+
+Every state other than `SAFE_TO_COMMIT` applies `D_origin_remote`.
+
+## Why point-threshold passage is insufficient
+
+The certificate reports both, separately. A point estimate on the passing side
+of a threshold says where the estimate landed; the certificate says what the
+interval can rule out. The pilot passed both point thresholds and still
+returned `INSUFFICIENT_EVIDENCE` — that is the normal case, not an anomaly.
+
+## Why the old post-hoc evidence is rejected
+
+The 36-workload pilot selected the policy. The evaluator refuses any evidence
+whose `pilot_id` equals the plan's recorded selection pilot, refuses reuse of
+its workload and object IDs, and requires the collected active workloads to
+equal the plan's frozen fresh cohort exactly.
+
+## Claim eligibility is not promoted automatically
+
+Statistical state and claim eligibility are separate. A `SAFE_TO_COMMIT`
+certificate on a fresh holdout is a valid *engineering* result. It becomes a
+scientific claim only if the frozen plan's threshold and sampling provenance
+independently meet those requirements, and the evaluator never promotes
+`eligible_for_scientific_claims` on its own.
+
+Recorded digests establish **consistency and reproducibility, not
+authenticity**. Nothing is signed.
+
+## CLI
+
+```bash
+PYTHONPATH=. python -m pathfinder certify-distributed-policy-confirmation \
+  --plan-dir           "$CONFIRMATION_PLAN_DIR" \
+  --evidence-dir       "$FRESH_EVALUATION_DIR" \
+  --execution-evidence "$EXECUTION_EVIDENCE_JSON" \
+  --output-dir         "$CERTIFICATE_DIR"
+```
+
+The execution-evidence manifest
+(`pathfinder.distributed-execution-evidence/v1alpha1`) is the smallest
+portable binding of a run to its plan and runtime model:
+
+```json
+{
+  "schema_version": "pathfinder.distributed-execution-evidence/v1alpha1",
+  "execution_model_id": "qwen3.8-27b",
+  "confirmation_plan_sha256": "<sha256 of confirmation_plan.json>",
+  "evaluation_sha256": "<sha256 of evaluation.json>",
+  "pilot_id": "<fresh confirmation pilot id>",
+  "run_id": "<run identifier>",
+  "evaluation_id": "<evaluation identifier>"
+}
+```
+
+It exists because the distributed evaluation format records what happened but
+cannot by itself prove which runtime model produced it.
+
+## OED projections use the same core
+
+The planner now calls the identical weighted aggregation core, feeding it the
+pilot's point estimates repeated across projected workload counts.
+
+The plug-in projection holds each future stratum mean at its post-hoc point
+estimate. The bounded-KL interval is determined by the declared support,
+independent workload count, allocated alpha, and assumed mean; it does not
+estimate or assume an empirical within-stratum variance. A fresh cohort may
+shift the stratum means and therefore may produce either better or worse
+certificate bounds.
+
+Projections are labelled `posthoc-plugin-planning-projection`,
+`not-achieved-power`, `not-a-confidence-guarantee`,
+`not-a-commit-authorization`.
+
+## Minimum independent workloads
+
+The plan freezes a floor per active stratum:
+
+```json
+"minimum_independent_workloads_by_active_stratum": {
+  "causal": 3, "descriptive": 3
+},
+"minimum_independent_workloads_provenance":
+  "engineering-placeholder-not-scientifically-justified"
+```
+
+Every active stratum must appear exactly once; structural-safe strata must
+not appear at all, having no candidate observations to count. Repetitions
+never count toward the floor. A stratum below its floor yields
+`INSUFFICIENT_EVIDENCE` **even when both numerical bounds pass** — a bound
+computed from three clusters is arithmetically valid and evidentially thin,
+and the plan is where that judgement belongs. An *established violation*
+(`UNSAFE`) is retained, since both states fall back to the safe design and
+discarding a harm signal would be the worse error.
+
+The value `3` in the template is an explicitly labelled engineering
+placeholder, not a scientifically justified figure. The OED planner seats
+these floors first, as feasibility constraints, before optimising precision.
+
+## Feasibility: three distinct answers
+
+A projection that does not pass has two very different causes, and the
+planner classifies which:
+
+| classification | meaning |
+|---|---|
+| `POINT_ESTIMATE_BELOW_THRESHOLD` | the assumed point estimate is already on the failing side, so under the fixed-effect assumption no sample size helps — the interval would have to be centred somewhere it is not |
+| `PROJECTED_NOT_WITHIN_SEARCH_BUDGET` | the point estimate passes, but no tested allocation up to the search limit narrows the lower bound enough; a statement about the budget, not about possibility |
+| `PROJECTED_PASS_WITHIN_SEARCH_BUDGET` | at least one tested allocation passes both weighted gates |
+
+The search is a deterministic bounded ladder (50 … 25,600 active evidence
+blocks). It never searches unboundedly: an arbitrarily large "passing" cohort
+is not a useful planning answer.
+
+**Current real-audit result.** The weighted cost-saving point estimate is
+`0.2522193762995198` against a `0.25` minimum — a margin of `+0.00222`, on the
+passing side but minute. No allocation up to 25,600 blocks passes, so the
+classification is **`PROJECTED_NOT_WITHIN_SEARCH_BUDGET`**, *not* mathematical
+impossibility. An earlier draft of this document asserted that sample size
+alone could not fix it; that was wrong, and the classification above replaces
+it.
+
+## Allocation arithmetic
+
+Two invariants are asserted in code and tested:
+
+```
+sum(active_evidence_blocks_by_stratum) == active_evidence_block_budget
+planned_total_sessions == Σ_s (blocks_s × 2 arms × repetitions)
+```
+
+At a 200-block budget against the real audit the allocation is
+`causal: 100, descriptive: 100` (sum 200) with `temporal` receiving zero, and
+`planned_total_sessions = 200 × 2 × 2 = 800`. Note that *blocks allocated* and
+*projected independent workloads* are different quantities and are reported
+separately; do not read one as the other.
+
+Projections are computed over **freshly allocated blocks only**. The pilot's
+workloads selected the policy and cannot serve as its confirmation evidence,
+so counting them toward projected precision would overstate what the fresh
+cohort can establish.

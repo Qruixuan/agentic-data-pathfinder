@@ -224,6 +224,8 @@ class ConfirmationConfig:
     estimand_kind: str
     target_stratum_weights_integer: dict[str, int]
     weights_provenance: str
+    minimum_independent_workloads_by_active_stratum: dict[str, int]
+    minimum_independent_workloads_provenance: str
     planned_workloads_by_stratum: dict[str, int]
     repetitions: int
     source_path: Path
@@ -340,6 +342,40 @@ def load_confirmation_config(path: str | Path) -> ConfirmationConfig:
         "same strata",
     )
 
+    raw_minima = _mapping(
+        _field(
+            root,
+            "minimum_independent_workloads_by_active_stratum",
+            "minimum_independent_workloads_by_active_stratum",
+        ),
+        "minimum_independent_workloads_by_active_stratum",
+    )
+    _require(
+        raw_minima,
+        "minimum_independent_workloads_by_active_stratum cannot be empty",
+    )
+    minima: dict[str, int] = {}
+    for stratum_id, value in raw_minima.items():
+        name = (
+            "minimum_independent_workloads_by_active_stratum."
+            f"{stratum_id}"
+        )
+        _require(
+            isinstance(value, int) and not isinstance(value, bool),
+            f"{name} must be an integer, not a boolean or fraction",
+        )
+        _require(int(value) >= 1, f"{name} must be a positive integer")
+        key = _string(stratum_id, "stratum id")
+        _require(key not in minima, f"duplicate stratum in minima: {key}")
+        minima[key] = int(value)
+    minima_provenance = _string(
+        root.get(
+            "minimum_independent_workloads_provenance",
+            "engineering-placeholder-not-scientifically-justified",
+        ),
+        "minimum_independent_workloads_provenance",
+    )
+
     repetitions = _field(root, "repetitions", "repetitions")
     _require(
         isinstance(repetitions, int)
@@ -365,6 +401,8 @@ def load_confirmation_config(path: str | Path) -> ConfirmationConfig:
         estimand_kind=kind,
         target_stratum_weights_integer=weights,
         weights_provenance=provenance,
+        minimum_independent_workloads_by_active_stratum=minima,
+        minimum_independent_workloads_provenance=minima_provenance,
         planned_workloads_by_stratum=counts,
         repetitions=int(repetitions),
         source_path=source,
@@ -603,6 +641,22 @@ def freeze_confirmation_plan(
         ))
 
     active = [item for item in strata if item.role == "active"]
+    active_ids = {item.stratum_id for item in active}
+    structural_ids = {
+        item.stratum_id for item in strata if item.is_structural_safe
+    }
+    declared_minima = set(config.minimum_independent_workloads_by_active_stratum)
+    _require(
+        declared_minima == active_ids,
+        "minimum_independent_workloads_by_active_stratum must name exactly "
+        f"the active strata {sorted(active_ids)}; got "
+        f"{sorted(declared_minima)}",
+    )
+    _require(
+        not (declared_minima & structural_ids),
+        "a structural-safe stratum cannot carry an independent-workload "
+        "minimum: " + ", ".join(sorted(declared_minima & structural_ids)),
+    )
     _require(
         active,
         "every stratum applies the safe design, so there is nothing to "
@@ -622,6 +676,7 @@ def freeze_confirmation_plan(
         audit_hashes=audit_hashes,
         evaluation=evaluation,
         cohort_sha256=cohort_sha256,
+        cohort=cohort,
         inspected_digests=inspected_digests,
         inspected_workload_count=len(workload_ids),
         fresh_workload_count=len(cohort),
@@ -681,6 +736,7 @@ def _plan_document(
     audit_hashes: Mapping[str, str],
     evaluation: Mapping[str, Any],
     cohort_sha256: str,
+    cohort: Mapping[str, Mapping[str, Any]],
     inspected_digests: Mapping[str, str],
     inspected_workload_count: int,
     fresh_workload_count: int,
@@ -713,6 +769,15 @@ def _plan_document(
             "fresh_cohort_sha256": cohort_sha256,
             "disjoint_from_inspected_workload_ids": True,
             "disjoint_from_inspected_object_ids": True,
+        },
+        # Enumerated so a later certificate can check collected evidence
+        # against exactly the cohort that was frozen, not merely its count.
+        "fresh_cohort": {
+            workload_id: {
+                "stratum_id": entry["stratum_id"],
+                "object_id": entry["object_id"],
+            }
+            for workload_id, entry in sorted(cohort.items())
         },
         "thresholds": dict(REQUIRED_THRESHOLDS),
         "supports": {
@@ -763,6 +828,18 @@ def _plan_document(
             ),
         },
         "repetitions": config.repetitions,
+        "minimum_independent_workloads_by_active_stratum": dict(sorted(
+            config.minimum_independent_workloads_by_active_stratum.items()
+        )),
+        "minimum_independent_workloads_provenance": (
+            config.minimum_independent_workloads_provenance
+        ),
+        "minimum_independent_workloads_note": (
+            "Frozen per-active-stratum floors. Repetitions do not count "
+            "toward them and structural-safe strata have none. A stratum "
+            "below its floor yields INSUFFICIENT_EVIDENCE even when both "
+            "numerical bounds pass."
+        ),
         "independent_unit": "workload-object-cluster",
         "repetitions_increase_independent_units": False,
         "strata": [item.to_public_dict() for item in strata],

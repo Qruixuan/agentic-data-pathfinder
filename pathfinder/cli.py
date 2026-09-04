@@ -681,6 +681,24 @@ def _parser() -> argparse.ArgumentParser:
     confirm_plan.add_argument("--output-dir", type=Path, required=True)
     confirm_plan.add_argument("--compact", action="store_true")
 
+    certify_confirm = subcommands.add_parser(
+        "certify-distributed-policy-confirmation",
+        help=(
+            "evaluate a completed confirmation run against its frozen plan "
+            "using the weighted stratified certificate (offline)"
+        ),
+    )
+    certify_confirm.add_argument("--plan-dir", type=Path, required=True)
+    certify_confirm.add_argument("--evidence-dir", type=Path, required=True)
+    certify_confirm.add_argument(
+        "--execution-evidence",
+        type=Path,
+        required=True,
+        help="manifest binding the run to its plan and runtime model",
+    )
+    certify_confirm.add_argument("--output-dir", type=Path, required=True)
+    certify_confirm.add_argument("--compact", action="store_true")
+
     oed_plan = subcommands.add_parser(
         "plan-distributed-policy-oed",
         help=(
@@ -701,6 +719,15 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     oed_plan.add_argument("--repetitions", type=int, default=2)
+    oed_plan.add_argument(
+        "--minimum-independent-workloads",
+        action="append",
+        metavar="STRATUM=INTEGER",
+        help=(
+            "repeatable; frozen per-active-stratum floor treated as a "
+            "feasibility constraint before optimising precision"
+        ),
+    )
     oed_plan.add_argument(
         "--active-evidence-block-budget",
         type=int,
@@ -981,6 +1008,25 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _stratum_integers(
+    items: list[str] | None,
+    option: str,
+) -> dict[str, int] | None:
+    """Parse repeatable STRATUM=INTEGER options."""
+    if not items:
+        return None
+    parsed: dict[str, int] = {}
+    for item in items:
+        if "=" not in item:
+            raise ConfigError(f"{option} must be STRATUM=INTEGER")
+        key, _, value = item.partition("=")
+        try:
+            parsed[key.strip()] = int(value)
+        except ValueError as exc:
+            raise ConfigError(f"invalid {option} value: {item}") from exc
+    return parsed
+
+
 def _print_payload(payload: object, *, compact: bool) -> int:
     print(
         json.dumps(
@@ -1026,6 +1072,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=args.output_dir,
             )
             return _print_payload(payload, compact=args.compact)
+        if args.command == "certify-distributed-policy-confirmation":
+            from .distributed import (
+                certify_distributed_policy_confirmation,
+            )
+
+            payload = certify_distributed_policy_confirmation(
+                args.plan_dir,
+                args.evidence_dir,
+                execution_evidence=args.execution_evidence,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
         if args.command == "plan-distributed-policy-oed":
             from .distributed import plan_distributed_policy_oed
 
@@ -1051,6 +1109,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repetitions=args.repetitions,
                 active_evidence_block_budget=(
                     args.active_evidence_block_budget
+                ),
+                minimum_independent_workloads_by_active_stratum=(
+                    _stratum_integers(
+                        args.minimum_independent_workloads,
+                        "--minimum-independent-workloads",
+                    )
                 ),
                 total_sessions=args.total_sessions,
                 target_gate_width=args.target_gate_width,

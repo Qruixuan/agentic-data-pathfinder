@@ -49,7 +49,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Mapping
 
-from ..awm.model import one_sided_bounded_mean_bounds
+from ..awm.model import Interval, one_sided_bounded_mean_bounds
+from .weighted_certificate import (
+    StratumEvidence,
+    distance_to_threshold,
+    evaluate_weighted_policy_certificate,
+)
 from .confirmation import (
     ESTIMAND_KIND,
     WEIGHTS_PROVENANCE,
@@ -93,6 +98,10 @@ class StratumState:
     allocated_workloads: int = 0
     weight: float = 0.0
     repetitions: int = 2
+    _width_cache: dict[tuple[int, float], float] = field(
+        default_factory=dict,
+        repr=False,
+    )
 
     @property
     def is_active(self) -> bool:
@@ -100,7 +109,14 @@ class StratumState:
 
     @property
     def independent_workloads(self) -> int:
-        return self.pilot_workloads + self.allocated_workloads
+        """Independent clusters the *confirmation* would hold.
+
+        Only freshly allocated blocks count. The pilot's workloads selected
+        the policy and are therefore unusable as its confirmation evidence,
+        so projecting precision as though they carried over would overstate
+        what the fresh cohort can establish.
+        """
+        return self.allocated_workloads
 
     @property
     def paired_block_cost(self) -> int:
@@ -116,6 +132,9 @@ class StratumState:
         """Worst normalised gate width at a hypothetical sample size."""
         if independent_units < 1:
             return 1.0
+        cached = self._width_cache.get((independent_units, delta))
+        if cached is not None:
+            return cached
         widths = []
         for point, (lower, upper) in (
             (self.success_point_estimate, self.success_support),
@@ -128,7 +147,9 @@ class StratumState:
                 delta,
             )
             widths.append(bounds.upper - bounds.lower)
-        return max(widths)
+        width = max(widths)
+        self._width_cache[(independent_units, delta)] = width
+        return width
 
     def projected_gain(self, delta: float) -> float:
         """Reduction in worst normalised gate width from one more block."""
@@ -257,6 +278,9 @@ def plan_distributed_policy_oed(
     delta_success_margin: float = 0.05,
     minimum_cost_saving: float = 0.25,
     target_gate_width: float | None = None,
+    minimum_independent_workloads_by_active_stratum: (
+        Mapping[str, int] | None
+    ) = None,
     plan_id: str = "distributed-policy-oed-plan",
 ) -> dict[str, Any]:
     """Allocate future independent workload blocks, deterministically."""
@@ -320,6 +344,21 @@ def plan_distributed_policy_oed(
     family_size = len(active) * len(GATE_IDS) * 2
     adjusted_alpha = alpha / family_size
 
+    minima = {
+        state.stratum_id: int(
+            (minimum_independent_workloads_by_active_stratum or {}).get(
+                state.stratum_id,
+                1,
+            )
+        )
+        for state in active
+    }
+    for stratum_id, value in sorted(minima.items()):
+        _require(
+            value >= 1,
+            f"minimum for {stratum_id} must be a positive integer",
+        )
+
     budget = PlanningBudget(
         active_evidence_blocks=active_evidence_block_budget,
         total_sessions=total_sessions,
@@ -333,6 +372,34 @@ def plan_distributed_policy_oed(
     }
     stop_reason = None
     steps: list[dict[str, Any]] = []
+    # Feasibility before precision: a stratum below its frozen floor cannot
+    # produce an admissible certificate, so optimising elsewhere first would
+    # refine a quantity that is not yet usable.
+    for state in sorted(active, key=lambda item: item.stratum_id):
+        while (
+            state.allocated_workloads < minima[state.stratum_id]
+            and budget.can_afford(state.paired_block_cost)
+        ):
+            budget.spend(state.stratum_id, state.paired_block_cost)
+            state.allocated_workloads += 1
+            steps.append({
+                "step": len(steps) + 1,
+                "action": "COLLECT",
+                "stratum_id": state.stratum_id,
+                "independent_workload_blocks": 1,
+                "sessions": state.paired_block_cost,
+                "purpose": "meet_frozen_minimum_independent_workloads",
+                "worst_gate_width_before": None,
+                "worst_gate_width_after": state.gate_width(
+                    state.independent_workloads,
+                    adjusted_alpha,
+                ),
+                "score_per_session": None,
+            })
+    unmet = sorted(
+        state.stratum_id for state in active
+        if state.allocated_workloads < minima[state.stratum_id]
+    )
     while True:
         if target_gate_width is not None and all(
             state.gate_width(state.independent_workloads, adjusted_alpha)
@@ -389,6 +456,24 @@ def plan_distributed_policy_oed(
         "STOP_INSUFFICIENT_BUDGET"
         if stop_reason == "insufficient_budget" and not steps
         else "FREEZE_CONFIRMATION_PLAN"
+    )
+    feasibility = _feasibility_search(
+        states,
+        stratum_weights=stratum_weights,
+        alpha=alpha,
+        delta_success_margin=delta_success_margin,
+        minimum_cost_saving=minimum_cost_saving,
+        minima=minima,
+        policy_id=policy_id,
+    )
+    projection = _weighted_projection(
+        states,
+        stratum_weights=stratum_weights,
+        alpha=alpha,
+        delta_success_margin=delta_success_margin,
+        minimum_cost_saving=minimum_cost_saving,
+        minima=minima,
+        policy_id=policy_id,
     )
     margin_warnings = _margin_warnings(
         active,
@@ -519,6 +604,13 @@ def plan_distributed_policy_oed(
             )
         },
         "steps": steps,
+        "minimum_independent_workloads_by_active_stratum": dict(
+            sorted(minima.items())
+        ),
+        "unmet_minimum_strata": unmet,
+        "minimum_requirements_satisfied": not unmet,
+        "feasibility": feasibility,
+        "projected_weighted_certificate": projection,
         "margin_warnings": margin_warnings,
         "greedy_rule": (
             "score(s) = [width(n_s) - width(n_s+1)] / paired_block_cost(s), "
@@ -549,9 +641,372 @@ def plan_distributed_policy_oed(
             "Allocation is fixed before outcomes exist; this planner "
             "implements no anytime-valid or alpha-spending contract, so it "
             "must not be used adaptively during a run.",
+            "The plug-in projection holds each future stratum mean at its "
+            "post-hoc point estimate. The bounded-KL interval is determined "
+            "by the declared support, independent workload count, allocated "
+            "alpha, and assumed mean; it does not estimate or assume an "
+            "empirical within-stratum variance. A fresh cohort may shift "
+            "the stratum means and therefore may produce either better or "
+            "worse certificate bounds.",
         ],
     }
+    allocated_total = sum(
+        plan["active_evidence_blocks_by_stratum"].values()
+    )
+    _require(
+        allocated_total == budget.consumed_blocks,
+        "internal accounting error: allocated blocks do not equal consumed",
+    )
+    expected_sessions = sum(
+        count * 2 * repetitions
+        for count in plan["active_evidence_blocks_by_stratum"].values()
+    )
+    _require(
+        plan["planned_total_sessions"] == expected_sessions,
+        "internal accounting error: session total does not equal "
+        "blocks x 2 arms x repetitions",
+    )
     return _publish_plan(plan, output_dir=output_dir, source=source)
+
+
+def _weighted_projection(
+    states: Mapping[str, StratumState],
+    *,
+    stratum_weights: Mapping[str, int],
+    alpha: float,
+    delta_success_margin: float,
+    minimum_cost_saving: float,
+    minima: Mapping[str, int],
+    policy_id: str,
+) -> dict[str, Any]:
+    """Project the weighted certificate under the chosen allocation.
+
+    Uses the same aggregation core the real certificate will use, fed with
+    the pilot's point estimates repeated across the projected workload
+    count.
+
+    The plug-in projection holds each future stratum mean at its post-hoc
+    point estimate. The bounded-KL interval is determined by the declared
+    support, independent workload count, allocated alpha, and assumed mean;
+    it does not estimate or assume an empirical within-stratum variance. A
+    fresh cohort may shift the stratum means and therefore may produce
+    either better or worse certificate bounds.
+    """
+    empty = sorted(
+        state.stratum_id
+        for state in states.values()
+        if state.is_active and state.independent_workloads < 1
+    )
+    if empty:
+        # No fresh clusters yet in at least one active stratum, so there is
+        # nothing to project. Reported rather than raised: an unaffordable
+        # budget is a planning answer, not an error.
+        return {
+            "projection_class": "posthoc-plugin-planning-projection",
+            "not_achieved_power": True,
+            "not_a_confidence_guarantee": True,
+            "not_a_commit_authorization": True,
+            "available": False,
+            "unavailable_reason": (
+                "no fresh independent workloads allocated to: "
+                + ", ".join(empty)
+            ),
+            "uses_same_weighted_aggregation_core": True,
+        }
+    evidence: list[StratumEvidence] = []
+    for stratum_id in sorted(states):
+        state = states[stratum_id]
+        weight = int(stratum_weights[stratum_id])
+        if not state.is_active:
+            evidence.append(StratumEvidence(
+                stratum_id=stratum_id,
+                role="structural_safe",
+                integer_weight=weight,
+            ))
+            continue
+        count = state.independent_workloads
+        evidence.append(StratumEvidence(
+            stratum_id=stratum_id,
+            role="active",
+            integer_weight=weight,
+            success_differences=(state.success_point_estimate,) * count,
+            cost_savings=(state.cost_point_estimate,) * count,
+        ))
+    certificate = evaluate_weighted_policy_certificate(
+        evidence,
+        success_difference_support=Interval(-1.0, 1.0),
+        cost_saving_support=Interval(-2.0, 2.0),
+        alpha=alpha,
+        delta_success_margin=delta_success_margin,
+        minimum_cost_saving=minimum_cost_saving,
+        minimum_independent_workloads_by_stratum=minima,
+        safe_design_id=SAFE_DESIGN_ID,
+        policy_id=policy_id,
+    )
+    return {
+        "projection_class": "posthoc-plugin-planning-projection",
+        "not_achieved_power": True,
+        "not_a_confidence_guarantee": True,
+        "not_a_commit_authorization": True,
+        "available": True,
+        "assumed_stratum_point_estimates": {
+            stratum_id: {
+                "success_difference": states[stratum_id]
+                .success_point_estimate,
+                "cost_saving": states[stratum_id].cost_point_estimate,
+            }
+            for stratum_id in sorted(states)
+        },
+        "projected_independent_workloads": {
+            stratum_id: states[stratum_id].independent_workloads
+            if states[stratum_id].is_active
+            else 0
+            for stratum_id in sorted(states)
+        },
+        "projected_stratum_bounds": {
+            item["stratum_id"]: {
+                "success_difference": item["success_difference"],
+                "cost_saving": item["cost_saving"],
+                "structural_zero_effect": item["structural_zero_effect"],
+            }
+            for item in certificate["strata"]
+        },
+        "projected_overall_success_difference": dict(
+            certificate["overall_success_difference"]
+        ),
+        "projected_overall_cost_saving": dict(
+            certificate["overall_cost_saving"]
+        ),
+        "projected_gate_results": {
+            gate["gate_id"]: gate["result"]
+            for gate in certificate["gates"]
+        },
+        "projected_certificate_state": certificate["certificate_state"],
+        "projected_distance_to_threshold": distance_to_threshold(
+            certificate
+        ),
+        "family_size": certificate["confidence"]["family_size"],
+        "adjusted_alpha": certificate["confidence"]["adjusted_alpha"],
+        "uses_same_weighted_aggregation_core": True,
+    }
+
+
+FEASIBILITY_CLASSES = (
+    "POINT_ESTIMATE_BELOW_THRESHOLD",
+    "PROJECTED_NOT_WITHIN_SEARCH_BUDGET",
+    "PROJECTED_PASS_WITHIN_SEARCH_BUDGET",
+)
+#: Deterministic bounded ladder. The search never runs unbounded: an
+#: arbitrarily large "passing" cohort is not a useful planning answer.
+DEFAULT_SEARCH_LADDER = (
+    50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600,
+)
+
+
+def _allocate(
+    states: Mapping[str, StratumState],
+    blocks: int,
+    adjusted_alpha: float,
+    minima: Mapping[str, int],
+) -> dict[str, int]:
+    """Deterministic allocation of ``blocks`` active evidence blocks.
+
+    Frozen per-stratum minima are satisfied first, as feasibility
+    constraints: a stratum below its floor cannot contribute a usable
+    certificate at all, so buying precision elsewhere first would be
+    optimising a quantity that is not yet admissible.
+    """
+    active = sorted(
+        (state for state in states.values() if state.is_active),
+        key=lambda item: item.stratum_id,
+    )
+    allocation = {state.stratum_id: 0 for state in active}
+    remaining = blocks
+    for state in active:
+        need = max(0, int(minima.get(state.stratum_id, 1)))
+        take = min(need, remaining)
+        allocation[state.stratum_id] += take
+        remaining -= take
+        if remaining <= 0:
+            break
+    while remaining > 0:
+        scored = []
+        for state in active:
+            count = allocation[state.stratum_id]
+            gain = max(
+                0.0,
+                state.gate_width(count, adjusted_alpha)
+                - state.gate_width(count + 1, adjusted_alpha),
+            )
+            scored.append((gain / state.paired_block_cost, state))
+        best = max(score for score, _ in scored)
+        if best <= 0.0:
+            break
+        chosen = min(
+            (state for score, state in scored if score == best),
+            key=lambda item: item.stratum_id,
+        )
+        allocation[chosen.stratum_id] += 1
+        remaining -= 1
+    return allocation
+
+
+def _certificate_at(
+    states: Mapping[str, StratumState],
+    allocation: Mapping[str, int],
+    *,
+    stratum_weights: Mapping[str, int],
+    alpha: float,
+    delta_success_margin: float,
+    minimum_cost_saving: float,
+    minima: Mapping[str, int],
+    policy_id: str,
+) -> dict[str, Any]:
+    evidence: list[StratumEvidence] = []
+    for stratum_id in sorted(states):
+        state = states[stratum_id]
+        weight = int(stratum_weights[stratum_id])
+        if not state.is_active:
+            evidence.append(StratumEvidence(
+                stratum_id=stratum_id,
+                role="structural_safe",
+                integer_weight=weight,
+            ))
+            continue
+        count = int(allocation.get(stratum_id, 0))
+        evidence.append(StratumEvidence(
+            stratum_id=stratum_id,
+            role="active",
+            integer_weight=weight,
+            success_differences=(state.success_point_estimate,) * count,
+            cost_savings=(state.cost_point_estimate,) * count,
+        ))
+    return evaluate_weighted_policy_certificate(
+        evidence,
+        success_difference_support=Interval(-1.0, 1.0),
+        cost_saving_support=Interval(-2.0, 2.0),
+        alpha=alpha,
+        delta_success_margin=delta_success_margin,
+        minimum_cost_saving=minimum_cost_saving,
+        minimum_independent_workloads_by_stratum=minima,
+        safe_design_id=SAFE_DESIGN_ID,
+        policy_id=policy_id,
+    )
+
+
+def _feasibility_search(
+    states: Mapping[str, StratumState],
+    *,
+    stratum_weights: Mapping[str, int],
+    alpha: float,
+    delta_success_margin: float,
+    minimum_cost_saving: float,
+    minima: Mapping[str, int],
+    policy_id: str,
+    ladder: tuple[int, ...] = DEFAULT_SEARCH_LADDER,
+) -> dict[str, Any]:
+    """Classify whether any bounded allocation could pass both gates.
+
+    Distinguishes two very different failures. If the assumed point estimate
+    is already on the failing side of a threshold, no sample size helps under
+    the fixed-effect assumption -- the interval would have to be centred
+    somewhere it is not. If the point estimate passes but every tested
+    allocation still leaves the lower bound short, that is a statement about
+    the search budget, not about mathematical possibility.
+    """
+    weight_total = sum(int(value) for value in stratum_weights.values())
+    success_point = sum(
+        int(stratum_weights[stratum_id]) / weight_total
+        * (states[stratum_id].success_point_estimate
+           if states[stratum_id].is_active else 0.0)
+        for stratum_id in states
+    )
+    cost_point = sum(
+        int(stratum_weights[stratum_id]) / weight_total
+        * (states[stratum_id].cost_point_estimate
+           if states[stratum_id].is_active else 0.0)
+        for stratum_id in states
+    )
+    success_margin = success_point - (-delta_success_margin)
+    cost_margin = cost_point - minimum_cost_saving
+    below = [
+        name for name, margin in (
+            ("success_non_inferiority", success_margin),
+            ("cost_improvement", cost_margin),
+        )
+        if margin < 0.0
+    ]
+    result: dict[str, Any] = {
+        "overall_success_point_estimate": success_point,
+        "overall_cost_saving_point_estimate": cost_point,
+        "success_point_margin": success_margin,
+        "cost_point_margin": cost_margin,
+        "search_ladder": list(ladder),
+        "largest_tested_active_block_budget": max(ladder),
+        "assumption": (
+            "fixed-effect plug-in: the assumed point estimates are held "
+            "constant while only the sample size grows"
+        ),
+        "not_achieved_power": True,
+        "not_a_confidence_guarantee": True,
+    }
+    if below:
+        result.update({
+            "classification": "POINT_ESTIMATE_BELOW_THRESHOLD",
+            "gates_below_threshold": below,
+            "first_passing_active_block_budget": None,
+            "projected_state_at_largest_budget": None,
+            "detail": (
+                "under the fixed-effect assumption even an infinitely "
+                "narrow interval centred on the assumed point estimate "
+                "would fail these gates: " + ", ".join(below)
+            ),
+        })
+        return result
+
+    first_passing: int | None = None
+    state_at_largest: str | None = None
+    required = sum(minima.values())
+    for blocks in ladder:
+        if blocks < required:
+            # Cannot seat the frozen minima, so no certificate is
+            # admissible at this rung regardless of the bounds.
+            continue
+        allocation = _allocate(states, blocks, alpha, minima)
+        certificate = _certificate_at(
+            states,
+            allocation,
+            stratum_weights=stratum_weights,
+            alpha=alpha,
+            delta_success_margin=delta_success_margin,
+            minimum_cost_saving=minimum_cost_saving,
+            minima=minima,
+            policy_id=policy_id,
+        )
+        state_at_largest = certificate["certificate_state"]
+        if certificate["certificate_state"] == "SAFE_TO_COMMIT":
+            first_passing = blocks
+            break
+    result.update({
+        "classification": (
+            "PROJECTED_PASS_WITHIN_SEARCH_BUDGET"
+            if first_passing is not None
+            else "PROJECTED_NOT_WITHIN_SEARCH_BUDGET"
+        ),
+        "gates_below_threshold": [],
+        "first_passing_active_block_budget": first_passing,
+        "projected_state_at_largest_budget": state_at_largest,
+        "detail": (
+            f"a projected allocation of {first_passing} active evidence "
+            "blocks passes both weighted gates under the plug-in assumption"
+            if first_passing is not None
+            else "the point estimates are on the passing side, but no "
+            f"tested allocation up to {max(ladder)} active evidence blocks "
+            "narrows the weighted lower bounds enough; this is a statement "
+            "about the search budget, not about mathematical impossibility"
+        ),
+    })
+    return result
 
 
 def _matches_target(

@@ -197,6 +197,7 @@ def confirmation_config(
     planned: Mapping[str, int] | None = None,
     model: str = "qwen3.8-27b",
     repetitions: int = 2,
+    minima: Mapping[str, int] | None = None,
     **extra: Any,
 ) -> Path:
     payload: dict[str, Any] = {
@@ -211,6 +212,10 @@ def confirmation_config(
                 weights or TARGET_WEIGHTS
             ),
         },
+        "minimum_independent_workloads_by_active_stratum": dict(
+            minima if minima is not None
+            else {"causal": 3, "descriptive": 3}
+        ),
         "planned_workloads_by_stratum": dict(planned or {
             "causal": 12,
             "descriptive": 6,
@@ -600,6 +605,7 @@ class EstimandTest(unittest.TestCase):
             self.f.root / "config-unknown.json",
             weights={"causal": 14, "descriptive": 8, "spatial": 14},
             planned={"causal": 12, "descriptive": 6, "spatial": 12},
+            minima={"causal": 3, "descriptive": 3, "spatial": 3},
         )
         with self.assertRaisesRegex(
             ConfirmationPlanError,
