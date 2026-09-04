@@ -657,6 +657,64 @@ def _parser() -> argparse.ArgumentParser:
             "adapter; starts no worker, Data Agent, or MCP service"
         ),
     )
+    confirm_plan = subcommands.add_parser(
+        "freeze-distributed-policy-confirmation",
+        help=(
+            "freeze a prospective confirmation plan for one post-hoc "
+            "selected distributed policy (offline; authorises no commit)"
+        ),
+    )
+    confirm_plan.add_argument("--config", type=Path, required=True)
+    confirm_plan.add_argument("--policy-audit-dir", type=Path, required=True)
+    confirm_plan.add_argument(
+        "--inspected-workload-manifest",
+        type=Path,
+        action="append",
+        required=True,
+        help="repeatable; every already-inspected workload manifest",
+    )
+    confirm_plan.add_argument(
+        "--fresh-cohort-manifest",
+        type=Path,
+        required=True,
+    )
+    confirm_plan.add_argument("--output-dir", type=Path, required=True)
+    confirm_plan.add_argument("--compact", action="store_true")
+
+    oed_plan = subcommands.add_parser(
+        "plan-distributed-policy-oed",
+        help=(
+            "offline OED planning: allocate future independent workload "
+            "blocks for a confirmation cohort (never emits COMMIT)"
+        ),
+    )
+    oed_plan.add_argument("--policy-audit-dir", type=Path, required=True)
+    oed_plan.add_argument("--policy-id", required=True)
+    oed_plan.add_argument(
+        "--target-stratum-weight",
+        action="append",
+        required=True,
+        metavar="STRATUM=INTEGER",
+        help=(
+            "repeatable; integer target quotas defining the fixed "
+            "externally weighted stratified estimand, e.g. causal=14"
+        ),
+    )
+    oed_plan.add_argument("--repetitions", type=int, default=2)
+    oed_plan.add_argument(
+        "--active-evidence-block-budget",
+        type=int,
+        help=(
+            "number of paired safe/candidate workload blocks in ACTIVE "
+            "strata; not a benchmark cohort size"
+        ),
+    )
+    oed_plan.add_argument("--total-sessions", type=int)
+    oed_plan.add_argument("--target-gate-width", type=float)
+    oed_plan.add_argument("--plan-id", default="distributed-policy-oed-plan")
+    oed_plan.add_argument("--output-dir", type=Path, required=True)
+    oed_plan.add_argument("--compact", action="store_true")
+
     amendment = subcommands.add_parser(
         "create-distributed-execution-amendment",
         help=(
@@ -955,6 +1013,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "eligible_for_scientific_claims",
             )}, indent=2))
             return 0
+        if args.command == "freeze-distributed-policy-confirmation":
+            from .distributed import freeze_confirmation_plan
+
+            payload = freeze_confirmation_plan(
+                args.config,
+                args.policy_audit_dir,
+                inspected_workload_manifests=(
+                    args.inspected_workload_manifest
+                ),
+                fresh_cohort_manifest=args.fresh_cohort_manifest,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-distributed-policy-oed":
+            from .distributed import plan_distributed_policy_oed
+
+            weights: dict[str, int] = {}
+            for item in args.target_stratum_weight:
+                if "=" not in item:
+                    raise ConfigError(
+                        "--target-stratum-weight must be STRATUM=INTEGER"
+                    )
+                key, _, value = item.partition("=")
+                try:
+                    weights[key.strip()] = int(value)
+                except ValueError as exc:
+                    raise ConfigError(
+                        "target stratum weights must be integer quotas, "
+                        f"not rounded fractions: {item}"
+                    ) from exc
+            payload = plan_distributed_policy_oed(
+                args.policy_audit_dir,
+                policy_id=args.policy_id,
+                stratum_weights=weights,
+                output_dir=args.output_dir,
+                repetitions=args.repetitions,
+                active_evidence_block_budget=(
+                    args.active_evidence_block_budget
+                ),
+                total_sessions=args.total_sessions,
+                target_gate_width=args.target_gate_width,
+                plan_id=args.plan_id,
+            )
+            return _print_payload(payload, compact=args.compact)
         if args.command == "audit-distributed-policy-awm":
             from .awm import audit_distributed_policy_awm
 
