@@ -557,7 +557,8 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "system configuration whose representation IDs define the "
             "complete routing matrix; required when candidate designs use "
-            "exact per-representation routes instead of a wildcard"
+            "exact per-representation routes instead of a wildcard, and "
+            "bound by an execution amendment when one is supplied"
         ),
     )
     pilot_preflight.add_argument(
@@ -578,6 +579,24 @@ def _parser() -> argparse.ArgumentParser:
         "--measurement-manifest",
         type=Path,
         help="bind an operator measurement manifest to this preflight",
+    )
+    pilot_preflight.add_argument(
+        "--execution-amendment",
+        type=Path,
+        help=(
+            "compatibility evidence permitting execution at a revision "
+            "other than the preregistered protocol revision"
+        ),
+    )
+    pilot_preflight.add_argument(
+        "--workload-manifest",
+        type=Path,
+        help="workload definitions, required to check an amendment",
+    )
+    pilot_preflight.add_argument(
+        "--frozen-plan",
+        type=Path,
+        help="frozen plan document, required to check an amendment",
     )
     pilot_preflight.add_argument("--compact", action="store_true")
 
@@ -624,6 +643,41 @@ def _parser() -> argparse.ArgumentParser:
             "adapter; starts no worker, Data Agent, or MCP service"
         ),
     )
+    amendment = subcommands.add_parser(
+        "create-distributed-execution-amendment",
+        help=(
+            "record auditable evidence that the current implementation "
+            "revision may execute a pilot frozen at an earlier revision"
+        ),
+    )
+    amendment.add_argument("--preregistration", type=Path, required=True)
+    amendment.add_argument("--endpoint-registry", type=Path, required=True)
+    amendment.add_argument("--measurement-manifest", type=Path, required=True)
+    amendment.add_argument("--workload-manifest", type=Path, required=True)
+    amendment.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    amendment.add_argument("--frozen-plan", type=Path, required=True)
+    amendment.add_argument("--amendment-id", required=True)
+    amendment.add_argument(
+        "--reason",
+        required=True,
+        help="why this revision differs and why it is orchestration-only",
+    )
+    amendment.add_argument(
+        "--change-classification",
+        default="orchestration-only",
+        help=(
+            "only orchestration-only is accepted; anything else requires a "
+            "new freeze"
+        ),
+    )
+    amendment.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="write the amendment here; must be outside the input freeze",
+    )
+    amendment.add_argument("--compact", action="store_true")
+
     run_pilot.add_argument("--preregistration", type=Path, required=True)
     run_pilot.add_argument("--endpoint-registry", type=Path, required=True)
     run_pilot.add_argument("--measurement-manifest", type=Path, required=True)
@@ -646,6 +700,22 @@ def _parser() -> argparse.ArgumentParser:
         "--telemetry-quiescence-timeout",
         type=float,
         default=15.0,
+    )
+    run_pilot.add_argument(
+        "--execution-amendment",
+        type=Path,
+        help=(
+            "compatibility evidence permitting execution at a revision "
+            "other than the preregistered protocol revision"
+        ),
+    )
+    run_pilot.add_argument(
+        "--frozen-plan",
+        type=Path,
+        help=(
+            "frozen plan document an execution amendment is validated "
+            "against; defaults to the plan in --output-dir"
+        ),
     )
     run_pilot.add_argument("--max-attempts", type=int, default=3)
     run_pilot.add_argument(
@@ -1056,14 +1126,78 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=args.output_dir,
             )
             return _print_payload(payload, compact=args.compact)
+        if args.command == "create-distributed-execution-amendment":
+            from .distributed import (
+                GitRevisionResolver,
+                build_execution_amendment,
+                build_frozen_plan_document,
+                load_distributed_pilot_preregistration,
+                load_endpoint_registry,
+                load_measurement_manifest,
+            )
+
+            target = Path(args.output)
+            if target.exists():
+                raise ConfigError(
+                    f"refusing to overwrite an existing amendment: {target}"
+                )
+            preregistration = load_distributed_pilot_preregistration(
+                args.preregistration
+            )
+            registry = load_endpoint_registry(args.endpoint_registry)
+            provider = load_measurement_manifest(args.measurement_manifest)
+            workloads = json.loads(
+                Path(args.workload_manifest).read_text(encoding="utf-8")
+            )
+            if not isinstance(workloads, dict):
+                raise ConfigError(
+                    "the workload manifest must map workload_id -> workload"
+                )
+            payload = build_execution_amendment(
+                preregistration,
+                registry,
+                amendment_id=args.amendment_id,
+                reason=args.reason,
+                measurement_manifest_sha256=provider.manifest_sha256,
+                workloads=workloads,
+                system_config_path=args.config,
+                frozen_plan_path=args.frozen_plan,
+                recomputed_plan=build_frozen_plan_document(
+                    preregistration,
+                    registry,
+                    workloads=workloads,
+                ),
+                resolver=GitRevisionResolver(Path.cwd()),
+                change_classification=args.change_classification,
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            from hashlib import sha256 as _sha256
+
+            return _print_payload(
+                {
+                    **payload,
+                    "amendment_path": str(target.resolve()),
+                    "amendment_sha256": _sha256(
+                        target.read_bytes()
+                    ).hexdigest(),
+                },
+                compact=args.compact,
+            )
         if args.command == "run-distributed-pilot":
             from .distributed import (
                 FlowMeshDistributedSessionExecutor,
+                GitRevisionResolver,
                 HttpDataAgentHealthProbe,
+                build_frozen_plan_document,
                 load_distributed_pilot_preregistration,
                 load_endpoint_registry,
                 load_measurement_manifest,
                 preflight_distributed_pilot,
+                require_execution_compatibility,
                 run_distributed_pilot,
                 validate_workload_manifest,
             )
@@ -1097,6 +1231,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 preregistration.success_scoring_rule,
             )
             config = load_config(args.config)
+
+            # Resolved before any client, gateway, or session exists: a
+            # revision mismatch must stop the run before FlowMesh is touched.
+            frozen_plan_path = args.frozen_plan or (
+                Path(args.output_dir) / "distributed_pilot_plan.json"
+            )
+            execution_provenance = require_execution_compatibility(
+                preregistration,
+                registry,
+                resolver=GitRevisionResolver(Path.cwd()),
+                measurement_manifest_sha256=provider.manifest_sha256,
+                workloads=workloads,
+                system_config_path=args.config,
+                frozen_plan_path=(
+                    frozen_plan_path
+                    if Path(frozen_plan_path).is_file()
+                    else None
+                ),
+                recomputed_plan=build_frozen_plan_document(
+                    preregistration,
+                    registry,
+                    workloads=workloads,
+                ),
+                amendment_path=args.execution_amendment,
+            )
 
             backend, _ = build_routed_gateway_backend(
                 args.endpoint_registry,
@@ -1170,6 +1329,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         provider=provider,
                         preflight=report,
                         max_attempts=args.max_attempts,
+                        execution_provenance=execution_provenance,
+                        execution_amendment_path=args.execution_amendment,
                     )
                 finally:
                     client.close()
@@ -1186,10 +1347,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if complete else 1
         if args.command == "preflight-distributed-pilot":
             from .distributed import (
+                ExecutionAmendmentError,
+                GitRevisionResolver,
                 HttpDataAgentHealthProbe,
+                build_frozen_plan_document,
                 load_distributed_pilot_preregistration,
                 load_endpoint_registry,
                 preflight_distributed_pilot,
+                require_execution_compatibility,
             )
 
             pin = None
@@ -1213,8 +1378,58 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.config is not None
                 else ()
             )
+            preregistration = load_distributed_pilot_preregistration(
+                args.preregistration
+            )
+            amendment_workloads = None
+            if args.workload_manifest is not None:
+                amendment_workloads = json.loads(
+                    Path(args.workload_manifest).read_text(encoding="utf-8")
+                )
+            # Preflight is read-only and must stay usable for inspection at
+            # any revision, so a bare revision mismatch is reported rather
+            # than raised. A *supplied* amendment is fully validated, and an
+            # invalid one fails here -- before the operator reaches the run.
+            try:
+                amendment_provenance = require_execution_compatibility(
+                    preregistration,
+                    registry,
+                    resolver=GitRevisionResolver(Path.cwd()),
+                    measurement_manifest_sha256=manifest_sha256 or "",
+                    workloads=amendment_workloads or {},
+                    system_config_path=args.config,
+                    frozen_plan_path=args.frozen_plan,
+                    recomputed_plan=(
+                        build_frozen_plan_document(
+                            preregistration,
+                            registry,
+                            workloads=amendment_workloads,
+                        )
+                        if amendment_workloads is not None
+                        else None
+                    ),
+                    amendment_path=args.execution_amendment,
+                )
+                amendment_problem = None
+            except ExecutionAmendmentError as exc:
+                # A supplied amendment that does not validate is always a
+                # failure: the operator asserted compatibility and the
+                # assertion is wrong. A bare revision mismatch with no
+                # amendment is advisory offline and blocking for a live
+                # pilot, which is the run this preflight gates.
+                if args.execution_amendment is not None:
+                    raise
+                amendment_problem = str(exc)
+                amendment_provenance = {
+                    "protocol_git_revision": (
+                        preregistration.source_git_revision
+                    ),
+                    "execution_amendment_required": True,
+                    "execution_amendment_supplied": False,
+                    "detail": amendment_problem,
+                }
             payload = preflight_distributed_pilot(
-                load_distributed_pilot_preregistration(args.preregistration),
+                preregistration,
                 registry,
                 probe=HttpDataAgentHealthProbe(registry),
                 representation_ids=representation_ids,
@@ -1222,6 +1437,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mode=args.mode,
                 measurement_manifest_sha256=manifest_sha256,
             )
+            payload = {
+                **payload,
+                "execution_provenance": amendment_provenance,
+            }
+            if amendment_problem is not None:
+                live = args.mode == "live_pilot"
+                check = {
+                    "check_id": "execution.revision_matches_or_amended",
+                    "passed": False,
+                    "advisory": not live,
+                    "detail": amendment_problem,
+                }
+                payload["checks"] = list(payload["checks"]) + [check]
+                if live:
+                    payload["failed_checks"] = list(
+                        payload["failed_checks"]
+                    ) + [check["check_id"]]
+                    payload["status"] = "failed"
+                else:
+                    payload["advisory_warnings"] = list(
+                        payload["advisory_warnings"]
+                    ) + [check["check_id"]]
             _print_payload(payload, compact=args.compact)
             return 0 if payload["status"] == "ok" else 1
         if args.command == "plan-distributed-pilot":

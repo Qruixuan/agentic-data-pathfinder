@@ -348,6 +348,106 @@ Running this offline slice does **not** mean a distributed experiment has run.
 It means the software path is exercised end to end against fakes. A live
 pilot still requires the manual deployment steps in section 4.
 
+## 8b. Provenance: three distinct things
+
+A pilot's provenance has three layers that are easy to conflate and must not
+be.
+
+**1. Immutable scientific/protocol inputs.** The frozen preregistration,
+workload manifest and cohort, endpoint registry and placement, measurement
+manifest, system configuration, scoring contract, thresholds, seeds,
+repetitions, and the trial plan. These are hashed, frozen, and never edited.
+Changing any of them changes the experiment.
+
+**2. Execution implementation provenance.** The Git revision of the code that
+actually runs the pilot. The preregistration records the revision the protocol
+was frozen at (`source_git_revision`); the runner records the revision that
+executed (`execution_git_revision`). These are *different facts* and both are
+kept in the run state and the final result.
+
+**3. Non-semantic execution amendments.** A separately hashed document,
+`pathfinder.distributed-execution-amendment/v1alpha1`, recording that a
+specific later revision may execute a pilot frozen at an earlier one. It lives
+**outside** the input freeze and binds: the pilot id, both revisions, the
+preregistration / endpoint-registry / measurement-manifest / workload-content
+/ system-config / frozen-plan / frozen-plan-file digests, the change
+classification, a human reason, the paths that changed between the two
+revisions, an explicit plan-equivalence statement, and
+`credentials_recorded: false`.
+
+### What an amendment is, and is not
+
+It is **auditable compatibility evidence**. It is created only when the plan
+recomputed by the *new* code is byte-identical to the frozen plan, including
+its canonical digest.
+
+It is **not** cryptographic authenticity, and **not** independent approval. It
+is unsigned: anyone who can write the file can write any content into it. Its
+value is that a reviewer can later see exactly which revision ran, what
+differed, and that the plan did not move -- not that anyone vouched for it.
+
+It also does **not** establish that a code change is scientifically harmless.
+An identical recomputed plan evidences unchanged *plan-generating* semantics
+only. It says nothing about whether execution, measurement, or scoring behave
+the same. Do not infer harmlessness from plan equality alone; the
+classification is a human judgement, and only `orchestration-only` is
+accepted so that widening it is a reviewed code change rather than a config
+edit.
+
+An amendment can never change `confirmatory` or
+`eligible_for_scientific_claims`; carrying either field is rejected at load.
+
+### Changes that still require a completely new freeze
+
+An amendment covers orchestration only. Every one of these requires a new
+freeze and a new pilot id:
+
+- workloads or the cohort;
+- candidate designs, placement, or routing;
+- representations;
+- measurement or cost parameters;
+- scoring or thresholds;
+- repetitions, seeds, or trial ordering;
+- the plan schema or plan-generating semantics.
+
+In practice the plan-equivalence check catches most of these mechanically: any
+of them changes the recomputed plan, and amendment creation refuses. The
+remainder -- a change that alters execution or measurement behaviour without
+altering the plan -- is exactly what the human classification is for, and is
+the reason plan equality alone is not treated as sufficient.
+
+### The system configuration is a tracked repository file
+
+The v2 freeze does not contain a system configuration; it lives in the
+repository at `configs/pathfinderbench_restricted_pilot_v0_1_system.json` and
+is therefore free to move between revisions independently of the frozen
+inputs. Amendment creation resolves its repository-relative path and compares
+its content digest at the protocol revision against the execution revision,
+refusing an `orchestration-only` amendment if they differ or if the file did
+not exist at the protocol revision. The gate re-verifies this at run time
+rather than trusting the document, since the file can be edited after the
+amendment is written.
+
+### Fail-closed rules
+
+1. The runner resolves the revision actually executing.
+2. If it equals the preregistered protocol revision, no amendment is needed.
+3. If it differs, execution fails **before any FlowMesh session is opened**
+   unless a valid amendment is supplied.
+4. A supplied amendment must match the exact pilot, both revisions, and every
+   bound input digest.
+5. The plan is recomputed and must equal the frozen plan exactly.
+6. A missing, malformed, stale, tampered, or mismatched amendment fails
+   closed.
+7. The accepted amendment is copied into the run directory.
+8. Resume requires the same amendment, byte for byte; a swapped or removed
+   one is refused.
+9. Both revisions and the amendment digest are recorded in the run state and
+   the final result.
+
+Amendment creation additionally refuses a dirty working tree: a recorded
+revision that does not describe the running code would be worse than none.
+
 ## 9. Compatibility with the existing pipeline
 
 * Canonical pilot output keeps the existing record shape, so the Reduced

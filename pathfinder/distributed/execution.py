@@ -36,6 +36,7 @@ from .measurements import (
     MeasurementProvider,
     build_measured_cost_ledger,
 )
+from .amendment import bind_amendment_to_run
 from .preregistration import (
     DistributedPilotPreregistration,
     workload_content_sha256,
@@ -634,6 +635,8 @@ def run_distributed_pilot(
     preflight: Mapping[str, Any] | None = None,
     max_attempts: int = 3,
     require_preflight: bool = True,
+    execution_provenance: Mapping[str, Any] | None = None,
+    execution_amendment_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Execute the frozen plan cell by cell, durably and resumably."""
     if require_preflight:
@@ -668,6 +671,14 @@ def run_distributed_pilot(
         max_attempts=max_attempts,
         workloads=workloads,
     )
+    # Bound before any cell executes, and before any FlowMesh session is
+    # opened. On resume this refuses a swapped amendment, so a run cannot
+    # start under one compatibility claim and finish under another.
+    bound_amendment_sha256 = bind_amendment_to_run(
+        run.output_dir,
+        execution_amendment_path,
+    )
+
     if provider is not None:
         require = getattr(provider, "require_matching_run", None)
         if callable(require):
@@ -909,6 +920,17 @@ def run_distributed_pilot(
         ),
         "workload_id_manifest_sha256": (
             preregistration.workload_manifest_sha256
+        ),
+        "protocol_git_revision": (
+            (execution_provenance or {}).get("protocol_git_revision")
+            or preregistration.source_git_revision
+        ),
+        "execution_git_revision": (
+            (execution_provenance or {}).get("execution_git_revision")
+        ),
+        "execution_amendment_sha256": bound_amendment_sha256,
+        "execution_provenance": (
+            dict(execution_provenance) if execution_provenance else None
         ),
         "worker_lifecycle_managed": False,
         "services_started": False,
