@@ -681,6 +681,26 @@ def _parser() -> argparse.ArgumentParser:
     confirm_plan.add_argument("--output-dir", type=Path, required=True)
     confirm_plan.add_argument("--compact", action="store_true")
 
+    frame_bundles = subcommands.add_parser(
+        "build-frame-bundles",
+        help=(
+            "deterministically regenerate JPEG frame bundles aligned with "
+            "the frozen sampling metadata (offline; no LLM, no network)"
+        ),
+    )
+    frame_bundles.add_argument("--video-dir", type=Path, required=True)
+    frame_bundles.add_argument(
+        "--representation-dir", type=Path, required=True
+    )
+    frame_bundles.add_argument("--generation-manifest", type=Path)
+    frame_bundles.add_argument("--output-dir", type=Path, required=True)
+    frame_bundles.add_argument(
+        "--object-id",
+        action="append",
+        help="repeatable; build only these objects",
+    )
+    frame_bundles.add_argument("--compact", action="store_true")
+
     cost_audit = subcommands.add_parser(
         "audit-distributed-cost-reality",
         help=(
@@ -1081,6 +1101,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 fresh_cohort_manifest=args.fresh_cohort_manifest,
                 output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-frame-bundles":
+            from .frame_bundle import build_frame_bundles
+
+            payload = build_frame_bundles(
+                video_dir=args.video_dir,
+                representation_dir=args.representation_dir,
+                generation_manifest=args.generation_manifest,
+                output_dir=args.output_dir,
+                object_ids=args.object_id,
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "audit-distributed-cost-reality":
