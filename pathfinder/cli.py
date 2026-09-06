@@ -681,6 +681,17 @@ def _parser() -> argparse.ArgumentParser:
     confirm_plan.add_argument("--output-dir", type=Path, required=True)
     confirm_plan.add_argument("--compact", action="store_true")
 
+    cost_audit = subcommands.add_parser(
+        "audit-distributed-cost-reality",
+        help=(
+            "read-only post-hoc audit separating measured resources from "
+            "configured tariffs in a frozen distributed pilot"
+        ),
+    )
+    cost_audit.add_argument("--snapshot-dir", type=Path, required=True)
+    cost_audit.add_argument("--output-dir", type=Path, required=True)
+    cost_audit.add_argument("--compact", action="store_true")
+
     certify_confirm = subcommands.add_parser(
         "certify-distributed-policy-confirmation",
         help=(
@@ -1070,6 +1081,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 fresh_cohort_manifest=args.fresh_cohort_manifest,
                 output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "audit-distributed-cost-reality":
+            import subprocess
+
+            from .distributed import audit_distributed_cost_reality
+
+            try:
+                revision = subprocess.run(
+                    ("git", "rev-parse", "HEAD"),
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+            except Exception:
+                revision = None
+            payload = audit_distributed_cost_reality(
+                args.snapshot_dir,
+                output_dir=args.output_dir,
+                audit_git_revision=revision,
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "certify-distributed-policy-confirmation":
