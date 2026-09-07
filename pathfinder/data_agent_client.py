@@ -17,6 +17,11 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 DATA_AGENT_API_VERSION = "pathfinder.data-agent/v1alpha1"
 
+#: Accept header for the Agent-readable artifact path. Unchanged from the
+#: original contract; the binary path builds its own from the media types
+#: its caller explicitly allowed.
+_AGENT_ARTIFACT_ACCEPT = "application/json, text/*;q=0.9"
+
 logger = logging.getLogger("pathfinder.data_agent_client")
 
 
@@ -571,6 +576,59 @@ class DataAgentFetchedArtifact:
 
 
 @dataclass(frozen=True)
+class DataAgentBinaryArtifact:
+    """A bounded, verified binary artifact for *internal* Pathfinder use.
+
+    Deliberately distinct from :class:`DataAgentFetchedArtifact`. That type
+    is the Agent-facing contract and carries only content an Agent may read
+    as text; this one carries raw bytes and must never be rendered into an
+    Agent response. Keeping them apart is what stops "support tar bundles"
+    from quietly becoming "an Agent tool can return arbitrary bytes".
+    """
+
+    access_id: str
+    media_type: str
+    data: bytes
+    size_bytes: int
+    sha256: str
+    object_id: str | None = None
+    object_catalog_version: str | None = None
+    location: str | None = None
+    service_latency_ms: float | None = None
+    client_round_trip_ms: float | None = None
+    download_elapsed_ms: float | None = None
+
+    def to_metadata_dict(self) -> dict[str, Any]:
+        """Everything except the bytes, for reports and logs."""
+        return {
+            "access_id": self.access_id,
+            "media_type": self.media_type,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+            "object_id": self.object_id,
+            "object_catalog_version": self.object_catalog_version,
+            "location": self.location,
+        }
+
+
+class DataAgentBinaryClientProtocol(Protocol):
+    """Internal capability to download bounded non-text artifacts.
+
+    Separate from :class:`DataAgentClientProtocol` so that holding an
+    Agent-facing client does not imply the right to pull raw bytes.
+    """
+
+    def fetch_binary_artifact(
+        self,
+        request: "DataAgentAccessRequest",
+        *,
+        allowed_media_types: frozenset[str] | set[str] | tuple[str, ...],
+        on_phase: Callable[[str], None] | None = None,
+    ) -> DataAgentBinaryArtifact:
+        """Download one bounded artifact of an explicitly allowed type."""
+
+
+@dataclass(frozen=True)
 class DataAgentAccessTelemetry:
     access_id: str
     object_id: str | None
@@ -856,35 +914,9 @@ class HttpDataAgentClient:
         inside this client and is accepted only when it points to the exact
         artifact route on the configured Data Agent origin.
         """
-        refreshed = self.access(request)
-        payload = refreshed.payload
-        if payload.kind != "artifact_uri":
-            raise DataAgentArtifactUnsupportedError(
-                f"Data Agent access {request.access_id} does not refer to "
-                "a downloadable artifact"
-            )
-        artifact_url = self._validated_artifact_url(
-            payload.value,
-            request.access_id,
+        refreshed, raw, response_media_type, digest, _ = (
+            self._verified_artifact(request, accept=_AGENT_ARTIFACT_ACCEPT)
         )
-        raw, response_media_type = self._download_artifact(artifact_url)
-        expected_media_type = _base_media_type(payload.media_type)
-        if response_media_type != expected_media_type:
-            raise DataAgentProtocolError(
-                "Data Agent artifact Content-Type does not match the access "
-                "response"
-            )
-
-        digest = sha256(raw).hexdigest()
-        if payload.sha256 is None:
-            raise DataAgentProtocolError(
-                "Data Agent artifact payload must include sha256"
-            )
-        if digest != payload.sha256:
-            raise DataAgentArtifactIntegrityError(
-                f"Data Agent artifact for access {request.access_id} failed "
-                "SHA-256 verification"
-            )
 
         if _is_json_media_type(response_media_type):
             try:
@@ -912,6 +944,132 @@ class HttpDataAgentClient:
             size_bytes=len(raw),
             sha256=digest,
         )
+
+    def fetch_binary_artifact(
+        self,
+        request: DataAgentAccessRequest,
+        *,
+        allowed_media_types: frozenset[str] | set[str] | tuple[str, ...],
+        on_phase: Callable[[str], None] | None = None,
+    ) -> DataAgentBinaryArtifact:
+        """Download one bounded binary artifact of an allowed media type.
+
+        This is the *internal* counterpart to :meth:`fetch_artifact`. It
+        applies exactly the same trust boundary — same origin, exact
+        artifact route, no redirects, bounded Content-Length, bounded read,
+        media-type agreement, digest agreement, no signed URL in any error
+        — and differs only in what it is willing to return: verified bytes
+        of a media type the caller named up front, instead of Agent-readable
+        text.
+
+        ``allowed_media_types`` is mandatory and must be non-empty. There is
+        no wildcard: a caller that has not decided which binary format it
+        can safely parse has no business downloading one.
+
+        ``on_phase`` receives ``"access_completed"``,
+        ``"artifact_download_started"``, and
+        ``"artifact_download_completed"`` as they happen. A caller needs this
+        to know whether a network transfer actually occurred before a later
+        failure, which it cannot infer reliably from the exception type
+        alone: the same error class can be raised before or after the body
+        is fetched.
+        """
+        allowed = _normalized_media_types(allowed_media_types)
+
+        def _check_declared(declared: str) -> None:
+            # Checked before the download so a disallowed type costs no
+            # bytes; the post-download agreement check then catches a
+            # response whose Content-Type contradicts the access response.
+            if declared not in allowed:
+                raise DataAgentArtifactUnsupportedError(
+                    "Data Agent artifact media type is not permitted for "
+                    f"this download: {declared} (allowed: "
+                    f"{', '.join(sorted(allowed))})"
+                )
+
+        accept = ", ".join(sorted(allowed))
+        refreshed, raw, response_media_type, digest, elapsed_ms = (
+            self._verified_artifact(
+                request,
+                accept=accept,
+                declared_media_type_check=_check_declared,
+                on_phase=on_phase,
+            )
+        )
+        if response_media_type not in allowed:
+            raise DataAgentArtifactUnsupportedError(
+                "Data Agent artifact media type is not permitted for this "
+                f"download: {response_media_type}"
+            )
+        return DataAgentBinaryArtifact(
+            access_id=request.access_id,
+            media_type=response_media_type,
+            data=raw,
+            size_bytes=len(raw),
+            sha256=digest,
+            object_id=refreshed.object_id,
+            object_catalog_version=refreshed.object_catalog_version,
+            location=refreshed.location,
+            service_latency_ms=refreshed.service_latency_ms,
+            client_round_trip_ms=refreshed.client_round_trip_ms,
+            download_elapsed_ms=elapsed_ms,
+        )
+
+    def _verified_artifact(
+        self,
+        request: DataAgentAccessRequest,
+        *,
+        accept: str,
+        declared_media_type_check: Callable[[str], None] | None = None,
+        on_phase: Callable[[str], None] | None = None,
+    ) -> tuple[DataAgentAccessResult, bytes, str, str, float]:
+        """Refresh the access, download, and verify type and digest.
+
+        Shared by the Agent-readable and internal-binary paths so both
+        inherit one trust boundary rather than two that can drift.
+        """
+        refreshed = self.access(request)
+        if on_phase is not None:
+            on_phase("access_completed")
+        payload = refreshed.payload
+        if payload.kind != "artifact_uri":
+            raise DataAgentArtifactUnsupportedError(
+                f"Data Agent access {request.access_id} does not refer to "
+                "a downloadable artifact"
+            )
+        declared_media_type = _base_media_type(payload.media_type)
+        if declared_media_type_check is not None:
+            declared_media_type_check(declared_media_type)
+        artifact_url = self._validated_artifact_url(
+            payload.value,
+            request.access_id,
+        )
+        if on_phase is not None:
+            on_phase("artifact_download_started")
+        started = time.perf_counter()
+        raw, response_media_type = self._download_artifact(
+            artifact_url,
+            accept=accept,
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1_000.0
+        if on_phase is not None:
+            on_phase("artifact_download_completed")
+        if response_media_type != declared_media_type:
+            raise DataAgentProtocolError(
+                "Data Agent artifact Content-Type does not match the access "
+                "response"
+            )
+        digest = sha256(raw).hexdigest()
+        if payload.sha256 is None:
+            raise DataAgentProtocolError(
+                "Data Agent artifact payload must include sha256"
+            )
+        if digest != payload.sha256:
+            raise DataAgentArtifactIntegrityError(
+                f"Data Agent artifact for access {request.access_id} failed "
+                "SHA-256 verification"
+            )
+        return refreshed, raw, response_media_type, digest, elapsed_ms
 
     def _validated_artifact_url(self, value: Any, access_id: str) -> str:
         if not isinstance(value, str) or not value.strip():
@@ -950,9 +1108,14 @@ class HttpDataAgentClient:
             )
         return value
 
-    def _download_artifact(self, artifact_url: str) -> tuple[bytes, str]:
+    def _download_artifact(
+        self,
+        artifact_url: str,
+        *,
+        accept: str = _AGENT_ARTIFACT_ACCEPT,
+    ) -> tuple[bytes, str]:
         headers = {
-            "Accept": "application/json, text/*;q=0.9",
+            "Accept": accept,
             "User-Agent": "pathfinder-data-agent-client/0.1",
             "X-Pathfinder-Protocol-Version": DATA_AGENT_API_VERSION,
         }
@@ -1170,6 +1333,29 @@ class HttpDataAgentClient:
 
 def _base_media_type(value: str) -> str:
     return value.split(";", 1)[0].strip().lower()
+
+
+def _normalized_media_types(value: Any) -> frozenset[str]:
+    """Normalize a caller's allow-list, refusing an empty or wildcard one."""
+    if isinstance(value, str) or not isinstance(value, (frozenset, set, tuple, list)):
+        raise ValueError(
+            "allowed_media_types must be a collection of media-type strings"
+        )
+    normalized = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                "allowed_media_types entries must be non-empty strings"
+            )
+        base = _base_media_type(item)
+        if not base or "*" in base:
+            raise ValueError(
+                f"allowed_media_types entry is not an exact media type: {item!r}"
+            )
+        normalized.add(base)
+    if not normalized:
+        raise ValueError("allowed_media_types cannot be empty")
+    return frozenset(normalized)
 
 
 def _is_json_media_type(media_type: str) -> bool:

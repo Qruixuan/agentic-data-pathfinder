@@ -519,14 +519,26 @@ class ValidationTest(unittest.TestCase):
 
         root = self.root / "contain"
         root.mkdir(parents=True)
-        for candidate in ("../outside.json", "a/../../outside.json"):
+        # Which branch fires is platform dependent: "/etc/passwd" has no
+        # drive, so Path.is_absolute() is False on Windows and the escape is
+        # caught by the resolved-containment check instead of the relative
+        # check. The guarantee under test is that the path is refused and
+        # never resolves inside the root, not which sentence says so.
+        containment_refusal = (
+            "must be relative|must not traverse upwards|escapes its "
+            "declared root"
+        )
+        for candidate in (
+            "../outside.json",
+            "a/../../outside.json",
+            "/etc/passwd",
+        ):
             with self.subTest(candidate=candidate):
                 with self.assertRaisesRegex(
-                    FrameBundleError, "traverse upwards"
-                ):
+                    FrameBundleError, containment_refusal
+                ) as context:
                     _contained(root, candidate, "path")
-        with self.assertRaisesRegex(FrameBundleError, "must be relative"):
-            _contained(root, "/etc/passwd", "path")
+                self.assertIn(candidate, str(context.exception))
         with self.assertRaisesRegex(FrameBundleError, "non-empty"):
             _contained(root, "   ", "path")
         inside = _contained(root, "a/b.json", "path")

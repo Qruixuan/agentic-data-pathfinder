@@ -701,6 +701,51 @@ def _parser() -> argparse.ArgumentParser:
     )
     frame_bundles.add_argument("--compact", action="store_true")
 
+    bundle_smoke = subcommands.add_parser(
+        "run-frame-bundle-transfer-smoke",
+        help=(
+            "download one sampled_frame_bundle from a Data Agent, validate "
+            "the tar and manifest, reconcile transfer telemetry, and write "
+            "a conformance report (no LLM; transfer evidence only)"
+        ),
+    )
+    bundle_smoke.add_argument("--data-agent-url", required=True)
+    bundle_smoke.add_argument("--object-id", required=True)
+    bundle_smoke.add_argument("--plan-id", required=True)
+    bundle_smoke.add_argument(
+        "--location",
+        required=True,
+        help="requested binding.location for the access",
+    )
+    bundle_smoke.add_argument("--output-dir", type=Path, required=True)
+    bundle_smoke.add_argument("--representation-id")
+    bundle_smoke.add_argument("--task-class", default="video_qa")
+    bundle_smoke.add_argument("--expected-sha256")
+    bundle_smoke.add_argument("--expected-size-bytes", type=int)
+    bundle_smoke.add_argument("--expected-catalog-version")
+    bundle_smoke.add_argument("--access-id")
+    bundle_smoke.add_argument("--session-id")
+    bundle_smoke.add_argument("--trial-id")
+    bundle_smoke.add_argument("--latency-multiplier", type=float, default=1.0)
+    bundle_smoke.add_argument("--timeout", type=float, default=30.0)
+    bundle_smoke.add_argument("--max-retries", type=int, default=0)
+    bundle_smoke.add_argument(
+        "--telemetry-quiescence-timeout", type=float, default=5.0
+    )
+    bundle_smoke.add_argument("--max-artifact-bytes", type=int)
+    bundle_smoke.add_argument("--max-member-count", type=int)
+    bundle_smoke.add_argument("--max-frame-count", type=int)
+    bundle_smoke.add_argument("--max-frame-bytes", type=int)
+    bundle_smoke.add_argument("--max-total-contained-bytes", type=int)
+    bundle_smoke.add_argument("--max-manifest-bytes", type=int)
+    bundle_smoke.add_argument("--max-frame-dimension", type=int)
+    bundle_smoke.add_argument(
+        "--retain-artifact",
+        action="store_true",
+        help="also write the verified tar into the output directory",
+    )
+    bundle_smoke.add_argument("--compact", action="store_true")
+
     cost_audit = subcommands.add_parser(
         "audit-distributed-cost-reality",
         help=(
@@ -1113,6 +1158,83 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_dir=args.output_dir,
                 object_ids=args.object_id,
             )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-frame-bundle-transfer-smoke":
+            from dataclasses import replace as _replace
+
+            from .frame_bundle import REPRESENTATION_ID
+            from .frame_bundle_ingest import DEFAULT_FRAME_BUNDLE_LIMITS
+            from .frame_bundle_transfer import (
+                SMOKE_REPORT_NAME,
+                run_frame_bundle_transfer_smoke,
+            )
+
+            overrides = {
+                name: getattr(args, name)
+                for name in (
+                    "max_artifact_bytes",
+                    "max_member_count",
+                    "max_frame_count",
+                    "max_frame_bytes",
+                    "max_total_contained_bytes",
+                    "max_manifest_bytes",
+                    "max_frame_dimension",
+                )
+                if getattr(args, name) is not None
+            }
+            limits = (
+                _replace(DEFAULT_FRAME_BUNDLE_LIMITS, **overrides)
+                if overrides
+                else DEFAULT_FRAME_BUNDLE_LIMITS
+            )
+            # The bearer token is read from PATHFINDER_DATA_AGENT_TOKEN
+            # inside the client settings. It is deliberately not an option:
+            # a token on the command line lands in shell history and in the
+            # process table.
+            report = run_frame_bundle_transfer_smoke(
+                base_url=args.data_agent_url,
+                object_id=args.object_id,
+                plan_id=args.plan_id,
+                requested_location=args.location,
+                output_dir=args.output_dir,
+                representation_id=(
+                    args.representation_id or REPRESENTATION_ID
+                ),
+                task_class_id=args.task_class,
+                access_id=args.access_id,
+                session_id=args.session_id,
+                trial_id=args.trial_id,
+                latency_multiplier=args.latency_multiplier,
+                expected_artifact_sha256=args.expected_sha256,
+                expected_artifact_size_bytes=args.expected_size_bytes,
+                expected_object_catalog_version=(
+                    args.expected_catalog_version
+                ),
+                limits=limits,
+                quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout
+                ),
+                timeout_seconds=args.timeout,
+                max_retries=args.max_retries,
+                retain_artifact=args.retain_artifact,
+            )
+            # stdout carries a summary; the full canonical report, including
+            # per-frame metadata, is the file on disk.
+            payload = {
+                "status": report["status"],
+                "evidence_class": report["evidence_class"],
+                "eligible_for_scientific_claims": False,
+                "object_id": report["bundle"]["object_id"],
+                "representation_id": report["bundle"]["representation_id"],
+                "artifact": report["artifact"],
+                "frame_count": report["bundle"]["frame_count"],
+                "total_jpeg_bytes": report["bundle"]["total_jpeg_bytes"],
+                "tar_member_count": report["bundle"]["tar_member_count"],
+                "latency_ms": report["latency_ms"],
+                "delivery": report["delivery"],
+                "report_path": str(args.output_dir / SMOKE_REPORT_NAME),
+                "retained_artifact": report["outputs"]["retained_artifact"],
+            }
             return _print_payload(payload, compact=args.compact)
         if args.command == "audit-distributed-cost-reality":
             import subprocess

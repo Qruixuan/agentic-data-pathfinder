@@ -452,12 +452,19 @@ def _frame_member_name(index: int) -> str:
     return f"{FRAMES_DIRECTORY}/{index:03d}.jpg"
 
 
-def _deterministic_tar(members: Sequence[tuple[str, bytes]]) -> bytes:
+def deterministic_frame_bundle_tar(
+    members: Sequence[tuple[str, bytes]],
+) -> bytes:
     """Archive members with fully explicit metadata.
 
     Nothing here is read from the filesystem: mtime, ownership, and mode are
     fixed, names are canonical POSIX, and order is lexicographic. Shelling
     out to ``tar`` would make the bytes depend on the host's tar build.
+
+    This is the single definition of what a canonical bundle archive *is*.
+    Ingestion reconstructs a downloaded bundle through this same function and
+    compares raw bytes, so there is exactly one serializer and no second,
+    subtly different reader-side notion of "canonical".
     """
     ordered = sorted(members, key=lambda item: item[0])
     buffer = io.BytesIO()
@@ -632,7 +639,7 @@ def build_frame_bundles(
             )
             members.append((OBJECT_MANIFEST_NAME, object_manifest_bytes))
 
-            archive = _deterministic_tar(members)
+            archive = deterministic_frame_bundle_tar(members)
             (object_dir / BUNDLE_NAME).write_bytes(archive)
 
             object_jpeg_bytes = int(document["total_jpeg_bytes"])
