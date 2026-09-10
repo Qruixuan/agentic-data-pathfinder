@@ -1568,6 +1568,86 @@ def _parser() -> argparse.ArgumentParser:
     )
     flowmesh_container_dag_run.add_argument("--compact", action="store_true")
 
+    full_chain_candidates = subcommands.add_parser(
+        "list-flowmesh-container-full-chain-candidates",
+        help=(
+            "list complete, terminal, unconditional physical operation paths "
+            "that can be pinned as FlowMesh workflows"
+        ),
+    )
+    full_chain_candidates.add_argument(
+        "--container-operations", type=Path, required=True
+    )
+    full_chain_candidates.add_argument("--compact", action="store_true")
+
+    full_chain_plan = subcommands.add_parser(
+        "plan-flowmesh-container-full-chain",
+        help=(
+            "freeze one complete existing physical operation path as a "
+            "non-submitting FlowMesh workflow package"
+        ),
+    )
+    full_chain_plan.add_argument(
+        "--container-operations", type=Path, required=True
+    )
+    full_chain_plan.add_argument(
+        "--node-api-url",
+        action="append",
+        required=True,
+        help=(
+            "repeat NODE_ID=http://host:port for every selected execution "
+            "node; bindings are frozen into the plan"
+        ),
+    )
+    full_chain_plan.add_argument("--worker-alias", required=True)
+    full_chain_plan.add_argument("--smoke-id", required=True)
+    full_chain_plan.add_argument("--trial-key")
+    full_chain_plan.add_argument("--owner", default="pathfinder")
+    full_chain_plan.add_argument(
+        "--api-task-timeout-seconds",
+        type=int,
+        default=None,
+        help=(
+            "per-task FlowMesh API executor timeout in seconds (default 120), "
+            "frozen into the plan and refused below any derived operation floor"
+        ),
+    )
+    full_chain_plan.add_argument("--output-dir", type=Path, required=True)
+    full_chain_plan.add_argument("--compact", action="store_true")
+
+    verify_full_chain_plan = subcommands.add_parser(
+        "verify-flowmesh-container-full-chain-plan",
+        help="verify a frozen complete physical-chain workflow package offline",
+    )
+    verify_full_chain_plan.add_argument("--plan-dir", type=Path, required=True)
+    verify_full_chain_plan.add_argument("--compact", action="store_true")
+
+    full_chain_run = subcommands.add_parser(
+        "run-flowmesh-container-full-chain",
+        help=(
+            "validate, submit, and verify every task in one frozen complete "
+            "physical path against already-running services"
+        ),
+    )
+    full_chain_run.add_argument("--plan-dir", type=Path, required=True)
+    full_chain_run.add_argument("--output-dir", type=Path, required=True)
+    full_chain_run.add_argument("--worker-alias", required=True)
+    full_chain_run.add_argument("--flowmesh-base-url")
+    full_chain_run.add_argument("--task-timeout", type=int, default=600)
+    full_chain_run.add_argument("--poll-interval", type=float, default=2.0)
+    full_chain_run.add_argument("--compact", action="store_true")
+
+    verify_full_chain_run = subcommands.add_parser(
+        "verify-flowmesh-container-full-chain-run",
+        help=(
+            "verify a completed full physical-chain FlowMesh artifact offline: "
+            "checksums, plan binding, pinning, coverage, and telemetry"
+        ),
+    )
+    verify_full_chain_run.add_argument("--run-dir", type=Path, required=True)
+    verify_full_chain_run.add_argument("--plan-dir", type=Path)
+    verify_full_chain_run.add_argument("--compact", action="store_true")
+
     parity = subcommands.add_parser(
         "evaluate-backend-parity",
         help=(
@@ -1957,6 +2037,91 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             finally:
                 client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "list-flowmesh-container-full-chain-candidates":
+            from .integrations.flowmesh.container_full_chain import (
+                list_full_physical_container_operation_chain_candidates,
+            )
+            from .integrations.flowmesh.container_dag import (
+                load_container_operations,
+            )
+
+            candidates = list_full_physical_container_operation_chain_candidates(
+                load_container_operations(args.container_operations)
+            )
+            payload = {
+                "status": "COMPLETE",
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+                "workflow_submitted": False,
+                "services_started": False,
+                "eligible_for_scientific_claims": False,
+            }
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-flowmesh-container-full-chain":
+            from .integrations.flowmesh.container_dag import (
+                DEFAULT_API_TASK_TIMEOUT_SECONDS,
+            )
+            from .integrations.flowmesh.container_full_chain import (
+                plan_flowmesh_container_full_physical_chain,
+            )
+
+            api_task_timeout = args.api_task_timeout_seconds
+            if api_task_timeout is None:
+                api_task_timeout = DEFAULT_API_TASK_TIMEOUT_SECONDS
+            payload = plan_flowmesh_container_full_physical_chain(
+                container_operations_path=args.container_operations,
+                node_api_urls=_node_api_url_mapping(args.node_api_url),
+                worker_alias=args.worker_alias,
+                smoke_id=args.smoke_id,
+                trial_key=args.trial_key,
+                owner=args.owner,
+                api_task_timeout_seconds=api_task_timeout,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-full-chain-plan":
+            from .integrations.flowmesh.container_full_chain import (
+                verify_flowmesh_container_full_physical_chain_plan,
+            )
+
+            payload = verify_flowmesh_container_full_physical_chain_plan(
+                args.plan_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-flowmesh-container-full-chain":
+            from .integrations.flowmesh import FlowMeshSettings, SdkFlowMeshClient
+            from .integrations.flowmesh.container_full_chain import (
+                run_flowmesh_container_full_physical_chain,
+            )
+
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=args.worker_alias,
+                validate_before_submit=True,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_container_full_physical_chain(
+                    plan_dir=args.plan_dir,
+                    output_dir=args.output_dir,
+                    client=client,
+                    settings=settings,
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-full-chain-run":
+            from .integrations.flowmesh.container_full_chain import (
+                verify_flowmesh_container_full_physical_chain_run,
+            )
+
+            payload = verify_flowmesh_container_full_physical_chain_run(
+                args.run_dir,
+                plan_dir=args.plan_dir,
+            )
             return _print_payload(payload, compact=args.compact)
         if args.command == "evaluate-backend-parity":
             from .simulator import evaluate_backend_parity
