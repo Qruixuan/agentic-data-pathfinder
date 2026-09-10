@@ -1518,6 +1518,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     flowmesh_container_dag_plan.add_argument("--compact", action="store_true")
 
+    verify_flowmesh_container_dag_run = subcommands.add_parser(
+        "verify-flowmesh-container-dag-run",
+        help=(
+            "verify a completed FlowMesh container-DAG run artifact offline: "
+            "checksums, plan binding, task-result coverage, worker identity, "
+            "and preserved container telemetry"
+        ),
+    )
+    verify_flowmesh_container_dag_run.add_argument(
+        "--run-dir", type=Path, required=True
+    )
+    verify_flowmesh_container_dag_run.add_argument(
+        "--plan-dir",
+        type=Path,
+        help="optional frozen plan directory to bind the run against",
+    )
+    verify_flowmesh_container_dag_run.add_argument(
+        "--compact", action="store_true"
+    )
+
     verify_flowmesh_container_dag_plan = subcommands.add_parser(
         "verify-flowmesh-container-dag-plan",
         help="verify a frozen non-submitting FlowMesh container-DAG package",
@@ -1890,6 +1910,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 owner=args.owner,
                 api_task_timeout_seconds=api_task_timeout,
                 output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-dag-run":
+            from .integrations.flowmesh.container_dag import (
+                verify_flowmesh_container_operation_dag_run,
+            )
+
+            payload = verify_flowmesh_container_operation_dag_run(
+                args.run_dir,
+                plan_dir=args.plan_dir,
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "verify-flowmesh-container-dag-plan":

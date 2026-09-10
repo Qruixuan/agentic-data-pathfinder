@@ -14,6 +14,7 @@ container-operation contract rather than inventing new operation attributes.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import tempfile
@@ -47,7 +48,68 @@ FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION = (
 LEGACY_API_TASK_TIMEOUT_SECONDS = 120
 DEFAULT_API_TASK_TIMEOUT_SECONDS = 120
 FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-operation-dag-run/v1alpha2"
+)
+#: v1alpha1 runs discarded every timing field. They stay readable and are
+#: labelled timing-not-recorded rather than back-filled; a measurement that
+#: was never preserved cannot be recovered later.
+FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-operation-dag-run/v1alpha1"
+)
+
+TELEMETRY_PROVENANCE_VERSION = "pathfinder.container-dag-telemetry/v1alpha1"
+
+#: Exactly the container-result fields that may be preserved. Anything else
+#: the runtime returns -- payload digests, prompts, answers, cache internals
+#: -- stays out of the artifact.
+_TELEMETRY_TIMING_FIELDS = (
+    "service_time_ms",
+    "fixture_materialization_ms_excluded_from_storage_measurement",
+    "application_shaping_target_ms",
+)
+
+#: What each preserved number actually is. Recorded in the artifact so a
+#: later reader cannot mistake a configured target for a measurement.
+TELEMETRY_FIELD_PROVENANCE: dict[str, str] = {
+    "service_time_ms": (
+        "measured inside the container operation as the monotonic interval "
+        "between the start and end of the operation body on the executing "
+        "node; it excludes FlowMesh scheduling, queueing, and HTTP transport"
+    ),
+    "fixture_materialization_ms_excluded_from_storage_measurement": (
+        "measured on the executing node while preparing the read fixture, "
+        "before the timed operation body begins; it is deliberately EXCLUDED "
+        "from service_time_ms and is reported separately so a storage "
+        "measurement is never inflated by test-fixture setup"
+    ),
+    "application_shaping_target_ms": (
+        "a CONFIGURED application-level shaping target derived from the "
+        "frozen link adapter, not an independently measured network latency "
+        "and not an observed round-trip time"
+    ),
+    "logical_bytes": (
+        "the exact byte count declared by the frozen operation and confirmed "
+        "by the container result"
+    ),
+    "physical_bytes": (
+        "the exact byte count the container reported reading or transferring"
+    ),
+    "telemetry_complete": (
+        "the container's own assertion that it reported a complete record; a "
+        "false or missing value refuses the run artifact"
+    ),
+}
+
+TELEMETRY_DISCLAIMERS: tuple[str, ...] = (
+    "No cross-container clock comparison is made: every timing value is a "
+    "duration measured by one node against its own monotonic clock, and "
+    "durations from different nodes are never subtracted or ordered.",
+    "No queue time, scheduling delay, or end-to-end latency is claimed; "
+    "those were not measured and are not derivable from these records.",
+    "No network throughput is derived from bytes and service time: the "
+    "transfer is application-shaped, so such a ratio would describe the "
+    "shaper, not the link.",
+    "This is infrastructure-conformance telemetry, not a performance result.",
 )
 
 _PLAN_FILES = {
@@ -884,6 +946,95 @@ def _workflow_failure(
     )
 
 
+def _finite_non_negative(value: Any, field: str) -> float:
+    _require(
+        isinstance(value, (int, float)) and not isinstance(value, bool),
+        f"container telemetry {field} must be a number",
+    )
+    number = float(value)
+    _require(
+        math.isfinite(number),
+        f"container telemetry {field} must be finite",
+    )
+    _require(number >= 0.0, f"container telemetry {field} must not be negative")
+    return number
+
+
+def _operation_telemetry(
+    result: Mapping[str, Any],
+    operation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Extract and validate the preserved telemetry subset.
+
+    Every field is required. A missing timing value is refused rather than
+    defaulted, because a silent zero would be indistinguishable from a real
+    measurement of zero.
+    """
+    kind = operation["operation_kind"]
+    telemetry: dict[str, Any] = {}
+    for field in (
+        "service_time_ms",
+        "fixture_materialization_ms_excluded_from_storage_measurement",
+    ):
+        _require(field in result, f"container result is missing {field}")
+        telemetry[field] = _finite_non_negative(result[field], field)
+
+    _require(
+        "application_shaping_target_ms" in result,
+        "container result is missing application_shaping_target_ms",
+    )
+    shaping = result["application_shaping_target_ms"]
+    if shaping is None:
+        # Null is legitimate only where the runtime genuinely has no shaping
+        # target: it is set exclusively on the network transfer path.
+        _require(
+            kind != "network_transfer",
+            "a network transfer must report an application shaping target",
+        )
+        telemetry["application_shaping_target_ms"] = None
+    else:
+        _require(
+            kind == "network_transfer",
+            f"a {kind} operation must not report an application shaping "
+            "target",
+        )
+        telemetry["application_shaping_target_ms"] = _finite_non_negative(
+            shaping, "application_shaping_target_ms"
+        )
+
+    if kind != "storage_read":
+        # Only a fixture-backed read materializes anything; a non-zero value
+        # elsewhere means the record does not describe the operation it
+        # claims to.
+        _require(
+            telemetry[
+                "fixture_materialization_ms_excluded_from_storage_measurement"
+            ]
+            == 0.0,
+            f"a {kind} operation must not report fixture materialization time",
+        )
+
+    started = result.get("started_monotonic_ns")
+    finished = result.get("finished_monotonic_ns")
+    if isinstance(started, int) and isinstance(finished, int):
+        # Same-node, same-clock consistency only. This is not a cross-
+        # container comparison; it checks the record against itself.
+        _require(
+            finished >= started,
+            "container telemetry finished before it started",
+        )
+        _require(
+            abs(
+                (finished - started) / 1_000_000.0
+                - telemetry["service_time_ms"]
+            )
+            <= 1e-6,
+            "container service_time_ms disagrees with its own monotonic "
+            "interval",
+        )
+    return telemetry
+
+
 def _operation_result(
     raw: Mapping[str, Any],
     operation: Mapping[str, Any],
@@ -938,12 +1089,271 @@ def _operation_result(
         "execution_node_id": operation["execution_node_id"],
         "logical_bytes": result["logical_bytes"],
         "physical_bytes": result["physical_bytes"],
+        **_operation_telemetry(result, operation),
+        "telemetry_provenance_version": TELEMETRY_PROVENANCE_VERSION,
         "telemetry_complete": True,
         "idempotent_replay": False,
         "api_executor": "api",
         "api_http_status": api["status_code"],
         "container_result_sha256": _sha256_bytes(_canonical_bytes(result)),
         "task_detail_available": task_detail is not None,
+    }
+
+
+def _aggregate_telemetry(
+    task_results: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Descriptive aggregates that follow directly from preserved records.
+
+    Deliberately absent: queue time, scheduling delay, end-to-end latency,
+    and any bytes-per-second figure. None of those were measured, and a
+    throughput ratio over an application-shaped transfer would describe the
+    shaper rather than the link.
+    """
+    service = [float(row["service_time_ms"]) for row in task_results]
+    materialization = [
+        float(
+            row["fixture_materialization_ms_excluded_from_storage_measurement"]
+        )
+        for row in task_results
+    ]
+    by_kind = {
+        str(row["operation_kind"]): round(float(row["service_time_ms"]), 6)
+        for row in task_results
+    }
+    shaping = {
+        str(row["operation_kind"]): row["application_shaping_target_ms"]
+        for row in task_results
+        if row.get("application_shaping_target_ms") is not None
+    }
+    return {
+        "telemetry_provenance_version": TELEMETRY_PROVENANCE_VERSION,
+        "record_count": len(task_results),
+        "telemetry_complete_record_count": sum(
+            1 for row in task_results if row.get("telemetry_complete") is True
+        ),
+        "service_time_ms_by_operation_kind": by_kind,
+        "service_time_ms_sum": round(sum(service), 6),
+        "service_time_ms_max": round(max(service), 6) if service else 0.0,
+        "service_time_ms_min": round(min(service), 6) if service else 0.0,
+        "fixture_materialization_ms_sum_excluded_from_storage_measurement": (
+            round(sum(materialization), 6)
+        ),
+        "configured_application_shaping_target_ms_by_operation_kind": shaping,
+        "logical_bytes_sum": sum(int(row["logical_bytes"]) for row in task_results),
+        "physical_bytes_sum": sum(
+            int(row["physical_bytes"]) for row in task_results
+        ),
+        "service_time_ms_sum_is_end_to_end_latency": False,
+        "network_throughput_derived": False,
+        "queue_time_measured": False,
+    }
+
+
+def _read_run(
+    run_dir: str | Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    """Read and checksum-verify a completed run artifact directory."""
+
+    root = Path(run_dir).resolve()
+    _require(root.is_dir(), f"container DAG run directory does not exist: {root}")
+    try:
+        checksums = (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise FlowMeshContainerDagError(
+            "container DAG run checksum file is unreadable"
+        ) from exc
+    observed: dict[str, str] = {}
+    for line in checksums:
+        digest, separator, name = line.partition("  ")
+        _require(
+            separator == "  " and name in _RUN_FILES,
+            "invalid container DAG run checksum row",
+        )
+        _require(name not in observed, "duplicate container DAG run checksum")
+        observed[name] = digest
+    _require(
+        set(observed) == _RUN_FILES, "container DAG run checksum set is incomplete"
+    )
+    for name, digest in observed.items():
+        _require((root / name).is_file(), f"container DAG run file is missing: {name}")
+        _require(
+            _sha256_bytes((root / name).read_bytes()) == digest,
+            f"container DAG run checksum mismatch: {name}",
+        )
+    try:
+        summary = json.loads(
+            (root / "flowmesh-container-dag-run.json").read_text(encoding="utf-8")
+        )
+        submission = json.loads(
+            (root / "flowmesh-container-dag-submission.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        rows = [
+            json.loads(line)
+            for line in (
+                root / "flowmesh-container-dag-task-results.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise FlowMeshContainerDagError(
+            "container DAG run artifact is invalid JSON"
+        ) from exc
+    _require(isinstance(summary, dict), "container DAG run summary must be an object")
+    _require(
+        isinstance(submission, dict), "container DAG submission must be an object"
+    )
+    _require(
+        all(isinstance(row, dict) for row in rows),
+        "each container DAG task result must be an object",
+    )
+    return summary, rows, submission
+
+
+def verify_flowmesh_container_operation_dag_run(
+    run_dir: str | Path,
+    *,
+    plan_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Offline verification of a completed container-DAG run artifact.
+
+    Checks the artifact against itself and, when a plan directory is given,
+    against the exact plan it claims to have executed. Nothing here contacts
+    FlowMesh, a container, or a network.
+    """
+
+    summary, rows, submission = _read_run(run_dir)
+    schema = summary.get("schema_version")
+    _require(
+        schema
+        in (
+            FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION,
+            FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION,
+        ),
+        "unsupported container DAG run schema",
+    )
+    _require(summary.get("status") == "COMPLETE", "container DAG run is not complete")
+    legacy = schema == FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION
+
+    operation_keys = summary.get("operation_keys")
+    _require(
+        isinstance(operation_keys, list) and operation_keys,
+        "container DAG run summary has no operation keys",
+    )
+    _require(
+        {row.get("operation_key") for row in rows} == set(operation_keys),
+        "container DAG task results do not cover the exact run operations",
+    )
+    _require(
+        len(rows) == len(operation_keys),
+        "container DAG task result count does not match the run operations",
+    )
+    _require(
+        summary.get("task_result_count") == len(rows),
+        "container DAG run summary task_result_count is wrong",
+    )
+
+    worker = summary.get("selected_worker")
+    _require(isinstance(worker, Mapping), "container DAG run has no selected worker")
+    worker_id = worker.get("worker_id")
+    _text(worker_id, "selected worker_id")
+    _require(
+        submission.get("selected_worker_id") == worker_id,
+        "container DAG submission worker does not match the run summary",
+    )
+    _require(
+        all(row.get("worker_id") == worker_id for row in rows),
+        "a container DAG task result names a different worker than the pin",
+    )
+    _require(
+        all(row.get("api_http_status") == 200 for row in rows),
+        "a container DAG task result does not report a 200 API status",
+    )
+    _require(
+        all(row.get("telemetry_complete") is True for row in rows),
+        "a container DAG task result does not report complete telemetry",
+    )
+    for row in rows:
+        _text(row.get("container_result_sha256"), "container_result_sha256")
+
+    if plan_dir is not None:
+        plan = _read_plan(plan_dir)
+        _require(
+            plan["plan_sha256"] == summary.get("plan_sha256"),
+            "container DAG run is not bound to the supplied plan",
+        )
+        _require(
+            [row["operation_key"] for row in plan["operations"]]
+            == list(operation_keys),
+            "container DAG run operations do not match the supplied plan",
+        )
+        _require(
+            plan["worker_alias"] == worker.get("alias", plan["worker_alias"]),
+            "container DAG run worker alias does not match the plan",
+        )
+
+    if legacy:
+        return {
+            "status": "VERIFIED",
+            "schema_version": schema,
+            "smoke_id": summary.get("smoke_id"),
+            "plan_sha256": summary.get("plan_sha256"),
+            "worker_id": worker_id,
+            "task_result_count": len(rows),
+            "plan_binding_checked": plan_dir is not None,
+            "timing_recorded": False,
+            "telemetry_recording": "not-recorded-legacy",
+            "telemetry": None,
+            "eligible_for_scientific_claims": False,
+        }
+
+    for row in rows:
+        _require(
+            row.get("telemetry_provenance_version") == TELEMETRY_PROVENANCE_VERSION,
+            "container DAG task result has an unsupported telemetry provenance",
+        )
+        # Re-validate against the operation kind the record itself declares.
+        _operation_telemetry(row, {"operation_kind": row.get("operation_kind")})
+        _require(
+            type(row.get("logical_bytes")) is int
+            and row["logical_bytes"] >= 0
+            and type(row.get("physical_bytes")) is int
+            and row["physical_bytes"] >= 0,
+            "container DAG task result byte counts are invalid",
+        )
+        if row.get("operation_kind") in ("storage_read", "network_transfer"):
+            _require(
+                row["physical_bytes"] == row["logical_bytes"],
+                "container DAG I/O result did not report exact physical bytes",
+            )
+        else:
+            _require(
+                row["physical_bytes"] == 0,
+                "container DAG compute result must not report transfer bytes",
+            )
+    _require(
+        summary.get("telemetry") == _aggregate_telemetry(rows),
+        "container DAG run telemetry aggregate does not match its task results",
+    )
+    _require(
+        summary.get("telemetry_provenance", {}).get("fields")
+        == TELEMETRY_FIELD_PROVENANCE,
+        "container DAG run telemetry provenance record changed",
+    )
+    return {
+        "status": "VERIFIED",
+        "schema_version": schema,
+        "smoke_id": summary.get("smoke_id"),
+        "plan_sha256": summary.get("plan_sha256"),
+        "worker_id": worker_id,
+        "task_result_count": len(rows),
+        "plan_binding_checked": plan_dir is not None,
+        "timing_recorded": True,
+        "telemetry_recording": "whitelisted-validated",
+        "telemetry": summary["telemetry"],
+        "eligible_for_scientific_claims": False,
     }
 
 
@@ -1051,6 +1461,12 @@ def run_flowmesh_container_operation_dag(
             "storage-read": [],
             "network-transfer": ["storage-read"],
             "compute": ["network-transfer"],
+        },
+        "telemetry": _aggregate_telemetry(task_results),
+        "telemetry_provenance": {
+            "version": TELEMETRY_PROVENANCE_VERSION,
+            "fields": dict(TELEMETRY_FIELD_PROVENANCE),
+            "disclaimers": list(TELEMETRY_DISCLAIMERS),
         },
         "evidence_class": "orchestration-transport-compute-conformance",
         "llm_called": False,

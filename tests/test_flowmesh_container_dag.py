@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from pathfinder.integrations.flowmesh.container_dag import (
     FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION,
+    FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION,
     FlowMeshContainerDagError,
     _document_sha256,
     derive_operation_lower_bounds,
@@ -15,6 +16,7 @@ from pathfinder.integrations.flowmesh.container_dag import (
     list_linear_container_operation_dag_candidates,
     plan_flowmesh_container_operation_dag,
     run_flowmesh_container_operation_dag,
+    verify_flowmesh_container_operation_dag_run,
     select_linear_container_operation_dag,
     verify_flowmesh_container_operation_dag_plan,
 )
@@ -209,6 +211,410 @@ def _restamp(plan_dir: Path, mutate: Any) -> None:
             digest = hashlib.sha256(body).hexdigest()
         rows.append(f"{digest}  {name}")
     sums.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+_RUN_URLS = {
+    "N3": "http://127.0.0.1:29083",
+    "N7": "http://127.0.0.1:29087",
+    "N6": "http://127.0.0.1:29086",
+}
+
+
+def _plan_and_run(
+    root: Path, *, mutate_result: Any = None, assigned_worker: str | None = None
+) -> tuple[dict[str, Any], Path, Path]:
+    source = root / "container_operations.jsonl"
+    source.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in _chain()),
+        encoding="utf-8",
+    )
+    plan_dir = root / "plan"
+    plan_flowmesh_container_operation_dag(
+        container_operations_path=source,
+        node_api_urls=_RUN_URLS,
+        worker_alias="container-smoke-worker",
+        smoke_id="telemetry-smoke",
+        trial_key="smoke-trial",
+        output_dir=plan_dir,
+    )
+    client = FakeFlowMeshClient()
+    client.mutate_result = mutate_result
+    if assigned_worker is not None:
+        client.assigned_worker = assigned_worker
+    run_dir = root / "run"
+    summary = run_flowmesh_container_operation_dag(
+        plan_dir=plan_dir,
+        output_dir=run_dir,
+        client=client,
+        settings=FlowMeshSettings(
+            worker_alias="container-smoke-worker",
+            validate_before_submit=True,
+        ),
+    )
+    return summary, plan_dir, run_dir
+
+
+def _records(run_dir: Path) -> list[dict[str, Any]]:
+    return [
+        json.loads(line)
+        for line in (
+            run_dir / "flowmesh-container-dag-task-results.jsonl"
+        ).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _restamp_run(run_dir: Path, mutate: Any) -> None:
+    """Edit a run artifact and re-stamp its checksums."""
+    import hashlib
+
+    path = run_dir / "flowmesh-container-dag-task-results.jsonl"
+    rows = _records(run_dir)
+    mutate(rows)
+    body = "".join(
+        json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n"
+        for row in rows
+    ).encode("utf-8")
+    path.write_bytes(body)
+    sums = run_dir / "SHA256SUMS"
+    lines = []
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        digest, _, name = line.partition("  ")
+        if name == path.name:
+            digest = hashlib.sha256(body).hexdigest()
+        lines.append(f"{digest}  {name}")
+    sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class ContainerTelemetryTest(unittest.TestCase):
+    """Real measured container timing must survive into the run artifact.
+
+    The point is auditable infrastructure telemetry, not a performance
+    claim -- so every preserved number is validated and labelled with what it
+    actually is.
+    """
+
+    def test_the_whitelisted_telemetry_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            summary, _, run_dir = _plan_and_run(Path(temporary))
+            rows = {row["operation_kind"]: row for row in _records(run_dir)}
+            self.assertEqual(12.5, rows["storage_read"]["service_time_ms"])
+            self.assertEqual(96.03, rows["network_transfer"]["service_time_ms"])
+            self.assertEqual(3.25, rows["compute"]["service_time_ms"])
+            self.assertEqual(
+                4.75,
+                rows["storage_read"][
+                    "fixture_materialization_ms_excluded_from_storage_measurement"
+                ],
+            )
+            self.assertEqual(
+                96_000.0,
+                rows["network_transfer"]["application_shaping_target_ms"],
+            )
+            self.assertEqual(3, summary["task_result_count"])
+
+    def test_non_whitelisted_container_fields_are_not_copied(self) -> None:
+        # A payload digest or cache internal must not ride along.
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            blob = (
+                run_dir / "flowmesh-container-dag-task-results.jsonl"
+            ).read_text(encoding="utf-8")
+            for leaked in ("payload_sha256", "cache_result", "cache_evictions"):
+                self.assertNotIn(leaked, blob)
+            for secret in ("api_key", "authorization", "bearer", "prompt"):
+                self.assertNotIn(secret, blob.lower())
+
+    def test_a_null_shaping_target_is_kept_only_off_the_transfer_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            rows = {row["operation_kind"]: row for row in _records(run_dir)}
+            self.assertIsNone(rows["storage_read"]["application_shaping_target_ms"])
+            self.assertIsNone(rows["compute"]["application_shaping_target_ms"])
+            self.assertIsNotNone(
+                rows["network_transfer"]["application_shaping_target_ms"]
+            )
+
+    def test_a_transfer_without_a_shaping_target_is_refused(self) -> None:
+        def drop(body: dict[str, Any]) -> None:
+            if body["operation_kind"] == "network_transfer":
+                body["application_shaping_target_ms"] = None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                _plan_and_run(Path(temporary), mutate_result=drop)
+        self.assertIn("shaping target", str(context.exception))
+
+    def test_a_shaping_target_on_a_non_transfer_is_refused(self) -> None:
+        def add(body: dict[str, Any]) -> None:
+            if body["operation_kind"] == "compute":
+                body["application_shaping_target_ms"] = 5.0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(FlowMeshContainerDagError):
+                _plan_and_run(Path(temporary), mutate_result=add)
+
+    def test_malformed_timing_refuses_the_run_artifact(self) -> None:
+        cases = {
+            "missing": lambda b: b.pop("service_time_ms"),
+            "nan": lambda b: b.__setitem__("service_time_ms", float("nan")),
+            "infinite": lambda b: b.__setitem__("service_time_ms", float("inf")),
+            "negative": lambda b: b.__setitem__("service_time_ms", -1.0),
+            "string": lambda b: b.__setitem__("service_time_ms", "12.5"),
+            "boolean": lambda b: b.__setitem__("service_time_ms", True),
+            "none": lambda b: b.__setitem__("service_time_ms", None),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with self.assertRaises(FlowMeshContainerDagError):
+                        _plan_and_run(Path(temporary), mutate_result=mutate)
+
+    def test_missing_or_negative_materialization_is_refused(self) -> None:
+        for mutate in (
+            lambda b: b.pop(
+                "fixture_materialization_ms_excluded_from_storage_measurement"
+            ),
+            lambda b: b.__setitem__(
+                "fixture_materialization_ms_excluded_from_storage_measurement",
+                -0.5,
+            ),
+        ):
+            with self.subTest(mutate=mutate):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with self.assertRaises(FlowMeshContainerDagError):
+                        _plan_and_run(Path(temporary), mutate_result=mutate)
+
+    def test_materialization_time_off_the_read_path_is_refused(self) -> None:
+        def mislabel(body: dict[str, Any]) -> None:
+            if body["operation_kind"] == "compute":
+                body[
+                    "fixture_materialization_ms_excluded_from_storage_measurement"
+                ] = 2.0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(FlowMeshContainerDagError):
+                _plan_and_run(Path(temporary), mutate_result=mislabel)
+
+    def test_service_time_disagreeing_with_its_own_clock_is_refused(
+        self,
+    ) -> None:
+        # Same-node consistency only; this is not a cross-container check.
+        def skew(body: dict[str, Any]) -> None:
+            body["service_time_ms"] = body["service_time_ms"] + 5.0
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                _plan_and_run(Path(temporary), mutate_result=skew)
+        self.assertIn("monotonic interval", str(context.exception))
+
+    def test_inconsistent_bytes_refuse_the_run(self) -> None:
+        for mutate in (
+            lambda b: b.__setitem__("physical_bytes", b["physical_bytes"] + 1),
+            lambda b: b.__setitem__("logical_bytes", b["logical_bytes"] + 1),
+        ):
+            with self.subTest(mutate=mutate):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with self.assertRaises(FlowMeshContainerDagError):
+                        _plan_and_run(Path(temporary), mutate_result=mutate)
+
+    def test_the_aggregate_is_descriptive_and_claims_nothing_extra(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            summary, _, _ = _plan_and_run(Path(temporary))
+            telemetry = summary["telemetry"]
+            self.assertEqual(
+                round(12.5 + 96.03 + 3.25, 6), telemetry["service_time_ms_sum"]
+            )
+            self.assertEqual(96.03, telemetry["service_time_ms_max"])
+            self.assertEqual(3.25, telemetry["service_time_ms_min"])
+            self.assertEqual(
+                4.75,
+                telemetry[
+                    "fixture_materialization_ms_sum_excluded_from_storage_measurement"
+                ],
+            )
+            self.assertEqual(3, telemetry["telemetry_complete_record_count"])
+            # Explicitly not claimed.
+            self.assertFalse(
+                telemetry["service_time_ms_sum_is_end_to_end_latency"]
+            )
+            self.assertFalse(telemetry["network_throughput_derived"])
+            self.assertFalse(telemetry["queue_time_measured"])
+            for absent in (
+                "throughput_bytes_per_second",
+                "queue_time_ms",
+                "end_to_end_latency_ms",
+            ):
+                self.assertNotIn(absent, telemetry)
+
+    def test_the_summary_records_field_level_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            summary, _, _ = _plan_and_run(Path(temporary))
+            provenance = summary["telemetry_provenance"]
+            fields = provenance["fields"]
+            self.assertIn(
+                "measured inside the container operation",
+                fields["service_time_ms"],
+            )
+            self.assertIn(
+                "EXCLUDED from service_time_ms",
+                fields[
+                    "fixture_materialization_ms_excluded_from_storage_measurement"
+                ],
+            )
+            self.assertIn(
+                "CONFIGURED", fields["application_shaping_target_ms"]
+            )
+            self.assertIn(
+                "not an independently measured network latency",
+                fields["application_shaping_target_ms"],
+            )
+            joined = " ".join(provenance["disclaimers"])
+            self.assertIn("No cross-container clock comparison", joined)
+            self.assertIn("No queue time", joined)
+
+
+class RunVerificationTest(unittest.TestCase):
+    """Offline verification of a completed run artifact."""
+
+    def test_a_complete_run_verifies_and_binds_to_its_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, plan_dir, run_dir = _plan_and_run(Path(temporary))
+            report = verify_flowmesh_container_operation_dag_run(
+                run_dir, plan_dir=plan_dir
+            )
+            self.assertEqual("VERIFIED", report["status"])
+            self.assertTrue(report["timing_recorded"])
+            self.assertTrue(report["plan_binding_checked"])
+            self.assertEqual(3, report["task_result_count"])
+            self.assertEqual("wkr-77", report["worker_id"])
+            self.assertFalse(report["eligible_for_scientific_claims"])
+
+    def test_verification_without_a_plan_still_checks_the_artifact(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            report = verify_flowmesh_container_operation_dag_run(run_dir)
+            self.assertEqual("VERIFIED", report["status"])
+            self.assertFalse(report["plan_binding_checked"])
+
+    def test_a_run_bound_to_a_different_plan_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, _, run_dir = _plan_and_run(root)
+            other = root / "other"
+            other.mkdir()
+            source = other / "container_operations.jsonl"
+            source.write_text(
+                "".join(
+                    json.dumps(row, sort_keys=True) + "\n" for row in _chain()
+                ),
+                encoding="utf-8",
+            )
+            plan_flowmesh_container_operation_dag(
+                container_operations_path=source,
+                node_api_urls=_RUN_URLS,
+                worker_alias="container-smoke-worker",
+                smoke_id="a-different-smoke",
+                trial_key="smoke-trial",
+                output_dir=other / "plan",
+            )
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_run(
+                    run_dir, plan_dir=other / "plan"
+                )
+            self.assertIn("not bound", str(context.exception))
+
+    def test_a_tampered_task_result_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            _restamp_run(
+                run_dir,
+                lambda rows: rows[0].__setitem__("service_time_ms", 0.1),
+            )
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_run(run_dir)
+            self.assertIn("aggregate does not match", str(context.exception))
+
+    def test_a_tampered_worker_identity_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            _restamp_run(
+                run_dir,
+                lambda rows: rows[1].__setitem__("worker_id", "wkr-other"),
+            )
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_run(run_dir)
+            self.assertIn("different worker", str(context.exception))
+
+    def test_a_dropped_task_result_fails_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            _restamp_run(run_dir, lambda rows: rows.pop())
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_run(run_dir)
+            self.assertIn("do not cover", str(context.exception))
+
+    def test_a_corrupted_checksum_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            path = run_dir / "flowmesh-container-dag-task-results.jsonl"
+            path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_run(run_dir)
+            self.assertIn("checksum mismatch", str(context.exception))
+
+    def test_a_legacy_run_is_labelled_timing_not_recorded(self) -> None:
+        # A v1alpha1 run never preserved timing. It stays readable, is
+        # labelled, and is not rewritten.
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as temporary:
+            _, _, run_dir = _plan_and_run(Path(temporary))
+            summary_path = run_dir / "flowmesh-container-dag-run.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["schema_version"] = (
+                FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION
+            )
+            del summary["telemetry"]
+            del summary["telemetry_provenance"]
+            body = json.dumps(
+                summary, indent=2, sort_keys=True, ensure_ascii=False
+            ).encode("utf-8") + b"\n"
+            summary_path.write_bytes(body)
+
+            def strip(rows: list[dict[str, Any]]) -> None:
+                for row in rows:
+                    for field in (
+                        "service_time_ms",
+                        "fixture_materialization_ms_excluded_from_storage_measurement",
+                        "application_shaping_target_ms",
+                        "telemetry_provenance_version",
+                    ):
+                        row.pop(field, None)
+
+            _restamp_run(run_dir, strip)
+            sums = run_dir / "SHA256SUMS"
+            lines = []
+            for line in sums.read_text(encoding="utf-8").splitlines():
+                digest, _, name = line.partition("  ")
+                if name == summary_path.name:
+                    digest = hashlib.sha256(body).hexdigest()
+                lines.append(f"{digest}  {name}")
+            sums.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            before = summary_path.read_bytes()
+            report = verify_flowmesh_container_operation_dag_run(run_dir)
+            self.assertEqual("VERIFIED", report["status"])
+            self.assertFalse(report["timing_recorded"])
+            self.assertEqual("not-recorded-legacy", report["telemetry_recording"])
+            self.assertIsNone(report["telemetry"])
+            self.assertEqual(before, summary_path.read_bytes())
 
 
 class ApiTaskTimeoutTest(unittest.TestCase):
@@ -616,6 +1022,44 @@ class ConditionalLedgerTest(unittest.TestCase):
             self.assertIn("conditional operation", str(context.exception))
 
 
+#: Timings a real ContainerNodeRuntime returns. The monotonic pair is kept
+#: consistent with service_time_ms so the same-record clock check passes.
+_SERVICE_MS = {"storage_read": 12.5, "network_transfer": 96.03, "compute": 3.25}
+
+
+def _container_body(
+    operation: Mapping[str, Any], physical_bytes: int
+) -> dict[str, Any]:
+    kind = operation["operation_kind"]
+    service_ms = _SERVICE_MS[kind]
+    started = 1_000_000_000
+    return {
+        "status": "completed",
+        "outcome_type": "completed",
+        "telemetry_complete": True,
+        "credentials_recorded": False,
+        "idempotent_replay": False,
+        "operation_key": operation["operation_key"],
+        "operation_kind": kind,
+        "execution_node_id": operation["execution_node_id"],
+        "logical_bytes": operation["logical_bytes"],
+        "physical_bytes": physical_bytes,
+        "started_monotonic_ns": started,
+        "finished_monotonic_ns": started + int(service_ms * 1_000_000),
+        "service_time_ms": service_ms,
+        "fixture_materialization_ms_excluded_from_storage_measurement": (
+            4.75 if kind == "storage_read" else 0.0
+        ),
+        "application_shaping_target_ms": (
+            96_000.0 if kind == "network_transfer" else None
+        ),
+        # Fields the whitelist must NOT carry into the artifact.
+        "payload_sha256": "c" * 64,
+        "cache_result": None,
+        "cache_evictions": [],
+    }
+
+
 class FakeFlowMeshClient:
     def __init__(self, *, assigned_worker: str = "wkr-77") -> None:
         self.assigned_worker = assigned_worker
@@ -637,6 +1081,8 @@ class FakeFlowMeshClient:
             status="IDLE",
         )
 
+    mutate_result: Any = None
+
     def validate(self, workflow: Mapping[str, Any]) -> WorkflowValidation:
         self.validated.append(dict(workflow))
         return WorkflowValidation(ok=True)
@@ -653,18 +1099,9 @@ class FakeFlowMeshClient:
                 in ("storage_read", "network_transfer")
                 else 0
             )
-            body = {
-                "status": "completed",
-                "outcome_type": "completed",
-                "telemetry_complete": True,
-                "credentials_recorded": False,
-                "idempotent_replay": False,
-                "operation_key": operation["operation_key"],
-                "operation_kind": operation["operation_kind"],
-                "execution_node_id": operation["execution_node_id"],
-                "logical_bytes": operation["logical_bytes"],
-                "physical_bytes": physical_bytes,
-            }
+            body = _container_body(operation, physical_bytes)
+            if self.mutate_result is not None:
+                self.mutate_result(body)
             self.results[task_id] = {
                 "executor": "api",
                 "ok": True,
