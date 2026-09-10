@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pathfinder.integrations.flowmesh.container_dag import (
+    FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION,
     FlowMeshContainerDagError,
     _document_sha256,
+    derive_operation_lower_bounds,
     build_flowmesh_container_operation_workflow,
     list_linear_container_operation_dag_candidates,
     plan_flowmesh_container_operation_dag,
@@ -37,6 +39,7 @@ def _operation(
     trial_key: str = "smoke-trial",
     logical_bytes: int = 4096,
     condition: dict[str, Any] | None = None,
+    link_adapter: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": CONTAINER_OPERATION_SCHEMA_VERSION,
@@ -53,7 +56,7 @@ def _operation(
         "logical_bytes": logical_bytes,
         "operation_adapter": "fixture-v1",
         "resource_adapter": None,
-        "link_adapter": None,
+        "link_adapter": link_adapter,
         "cache_adapter": None,
         "task_executor": {"semantic_quality_enabled": False},
         "execution_node_id": node,
@@ -130,6 +133,295 @@ def _cache_branch(trial_key: str, *, suffix: str = "") -> list[dict[str, Any]]:
         lookup, "cache_read", "N5", [], trial_key=trial_key, logical_bytes=0
     )
     return [lookup_row, read, transfer, compute]
+
+
+def _link(bandwidth: int, rtt_ms: float = 30.0) -> dict[str, Any]:
+    return {
+        "adapter": "application-rate-rtt-shaper-v1",
+        "link_id": "N3-N8-edge",
+        "source_node_id": "N3",
+        "destination_node_id": "N8",
+        "bandwidth_bytes_per_second": bandwidth,
+        "round_trip_time_ms": rtt_ms,
+        "required_capabilities": [],
+    }
+
+
+def _d4_chain() -> list[dict[str, Any]]:
+    """A D4-style edge trial: 240 MB across a 1.25 MB/s link.
+
+    The transfer alone cannot finish in under 192 s, so the historical fixed
+    120 s API timeout would kill it mid-flight.
+    """
+    read = _operation("smoke-trial|read-raw", "storage_read", "N3", [],
+                      logical_bytes=240_000_000)
+    transfer = _operation(
+        "smoke-trial|transfer-raw", "network_transfer", "N3",
+        [read["operation_key"]], logical_bytes=240_000_000,
+        link_adapter=_link(1_250_000),
+    )
+    compute = _operation("smoke-trial|decode", "compute", "N8",
+                         [transfer["operation_key"]], logical_bytes=0)
+    return [read, transfer, compute]
+
+
+_D4_URLS = {"N3": "http://127.0.0.1:19083", "N8": "http://127.0.0.1:19088"}
+
+
+def _freeze(root: Path, ledger: list[dict[str, Any]], **kwargs: Any) -> Any:
+    source = root / "container_operations.jsonl"
+    source.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in ledger),
+        encoding="utf-8",
+    )
+    options: dict[str, Any] = {
+        "container_operations_path": source,
+        "node_api_urls": _D4_URLS,
+        "worker_alias": "fixture-alias",
+        "smoke_id": "d4-timeout-smoke",
+        "output_dir": root / "plan",
+    }
+    options.update(kwargs)
+    return plan_flowmesh_container_operation_dag(**options)
+
+
+def _restamp(plan_dir: Path, mutate: Any) -> None:
+    """Apply an edit and re-stamp both digests.
+
+    Without re-stamping, the plan digest fires first and a test would prove
+    nothing about the timeout or lower-bound guards.
+    """
+    import hashlib
+
+    path = plan_dir / "flowmesh-container-dag-plan.json"
+    plan = json.loads(path.read_text(encoding="utf-8"))
+    mutate(plan)
+    plan["plan_sha256"] = _document_sha256(plan, "plan_sha256")
+    body = json.dumps(
+        plan, indent=2, sort_keys=True, ensure_ascii=False
+    ).encode("utf-8") + b"\n"
+    path.write_bytes(body)
+    sums = plan_dir / "SHA256SUMS"
+    rows = []
+    for line in sums.read_text(encoding="utf-8").splitlines():
+        digest, _, name = line.partition("  ")
+        if name == path.name:
+            digest = hashlib.sha256(body).hexdigest()
+        rows.append(f"{digest}  {name}")
+    sums.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+class ApiTaskTimeoutTest(unittest.TestCase):
+    """The API executor timeout must be planned, not fixed at 120 s.
+
+    ``--task-timeout`` on the run command controls workflow polling, which
+    cannot rescue a task the FlowMesh API executor has already abandoned.
+    """
+
+    def test_the_derived_bound_is_transfer_time_plus_one_round_trip(
+        self,
+    ) -> None:
+        bounds = derive_operation_lower_bounds(_d4_chain())
+        self.assertEqual(
+            [0.0, 192.03, 0.0],
+            [row["lower_bound_seconds"] for row in bounds],
+        )
+        self.assertEqual(
+            ["not-derivable", "link-rate-and-round-trip", "not-derivable"],
+            [row["basis"] for row in bounds],
+        )
+        # Storage and compute carry no rate in the frozen record, so no
+        # duration is invented for them.
+        self.assertEqual({}, bounds[0]["components"])
+        self.assertEqual(
+            {"transfer_seconds": 192.0, "round_trip_seconds": 0.03},
+            bounds[1]["components"],
+        )
+
+    def test_a_240mb_transfer_rejects_120_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                _freeze(Path(temporary), _d4_chain(),
+                        api_task_timeout_seconds=120)
+        message = str(context.exception)
+        self.assertIn("smoke-trial|transfer-raw", message)
+        self.assertIn("120s", message)
+        self.assertIn("192.03s", message)
+
+    def test_the_default_timeout_is_the_legacy_120_seconds(self) -> None:
+        # The default is unchanged, so an oversized plan is refused rather
+        # than silently widened.
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                _freeze(Path(temporary), _d4_chain())
+        self.assertIn("requested 120s", str(context.exception))
+
+    def test_a_conservative_300_second_timeout_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = _freeze(root, _d4_chain(), api_task_timeout_seconds=300)
+            self.assertEqual("FROZEN_WORKFLOW_INPUTS", payload["status"])
+            self.assertEqual(300, payload["api_task_timeout_seconds"])
+            self.assertEqual(192.03, payload["max_operation_lower_bound_seconds"])
+            plan = json.loads(
+                (root / "plan" / "flowmesh-container-dag-plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(300, plan["api_task_timeout_seconds"])
+            self.assertEqual(
+                derive_operation_lower_bounds(plan["operations"]),
+                plan["operation_lower_bound_seconds"],
+            )
+
+    def test_the_frozen_timeout_reaches_every_generated_api_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _freeze(root, _d4_chain(), api_task_timeout_seconds=300)
+            template = json.loads(
+                (
+                    root / "plan"
+                    / "flowmesh-container-dag-workflow-template.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [300, 300, 300],
+                [
+                    node["spec"]["api"]["timeout_sec"]
+                    for node in template["spec"]["graph"]["nodes"]
+                ],
+            )
+        workflow = build_flowmesh_container_operation_workflow(
+            _d4_chain(),
+            node_api_urls=_D4_URLS,
+            selected_worker_id="worker-1",
+            smoke_id="d4",
+            api_task_timeout_seconds=300,
+        )
+        self.assertEqual(
+            [300, 300, 300],
+            [
+                node["spec"]["api"]["timeout_sec"]
+                for node in workflow["spec"]["graph"]["nodes"]
+            ],
+        )
+
+    def test_the_workflow_builder_also_refuses_an_impossible_timeout(
+        self,
+    ) -> None:
+        with self.assertRaises(FlowMeshContainerDagError):
+            build_flowmesh_container_operation_workflow(
+                _d4_chain(),
+                node_api_urls=_D4_URLS,
+                selected_worker_id="worker-1",
+                smoke_id="d4",
+                api_task_timeout_seconds=120,
+            )
+
+    def test_verification_reports_the_timeout_and_bound_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _freeze(root, _d4_chain(), api_task_timeout_seconds=300)
+            report = verify_flowmesh_container_operation_dag_plan(
+                root / "plan"
+            )
+            self.assertEqual("VERIFIED", report["status"])
+            self.assertEqual(300, report["api_task_timeout_seconds"])
+            self.assertEqual("plan", report["api_task_timeout_source"])
+            self.assertEqual(
+                192.03, report["max_operation_lower_bound_seconds"]
+            )
+            self.assertEqual(
+                ["not-derivable", "link-rate-and-round-trip", "not-derivable"],
+                [
+                    row["basis"]
+                    for row in report["operation_lower_bound_seconds"]
+                ],
+            )
+
+    def test_a_tampered_timeout_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _freeze(root, _d4_chain(), api_task_timeout_seconds=300)
+            _restamp(
+                root / "plan",
+                lambda plan: plan.__setitem__("api_task_timeout_seconds", 120),
+            )
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_plan(root / "plan")
+            self.assertIn("192.03s", str(context.exception))
+
+    def test_a_tampered_lower_bound_record_fails_verification(self) -> None:
+        # Shrinking the recorded bound would otherwise make an impossible
+        # timeout look adequate; the bound is re-derived from the operations.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _freeze(root, _d4_chain(), api_task_timeout_seconds=300)
+
+            def shrink(plan: dict[str, Any]) -> None:
+                plan["operation_lower_bound_seconds"][1][
+                    "lower_bound_seconds"
+                ] = 1.0
+                plan["max_operation_lower_bound_seconds"] = 1.0
+
+            _restamp(root / "plan", shrink)
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_plan(root / "plan")
+            self.assertIn("does not match its operations", str(context.exception))
+
+    def test_a_tampered_max_bound_alone_fails_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _freeze(root, _d4_chain(), api_task_timeout_seconds=300)
+            _restamp(
+                root / "plan",
+                lambda plan: plan.__setitem__(
+                    "max_operation_lower_bound_seconds", 1.0
+                ),
+            )
+            with self.assertRaises(FlowMeshContainerDagError):
+                verify_flowmesh_container_operation_dag_plan(root / "plan")
+
+    def test_a_nonpositive_timeout_is_refused(self) -> None:
+        for value in (0, -1, 1.5, True, "300"):
+            with self.subTest(timeout=value):
+                with tempfile.TemporaryDirectory() as temporary:
+                    with self.assertRaises(FlowMeshContainerDagError):
+                        _freeze(Path(temporary), _d4_chain(),
+                                api_task_timeout_seconds=value)
+
+    def test_a_legacy_plan_verifies_under_its_recorded_semantics(self) -> None:
+        # A v1alpha1 plan predates the field entirely. It must stay
+        # verifiable, be reported as legacy, and not be rewritten.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _freeze(root, _d4_chain(), api_task_timeout_seconds=300)
+            plan_path = root / "plan" / "flowmesh-container-dag-plan.json"
+
+            def downgrade(plan: dict[str, Any]) -> None:
+                plan["schema_version"] = (
+                    FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION
+                )
+                del plan["api_task_timeout_seconds"]
+                del plan["operation_lower_bound_seconds"]
+                del plan["max_operation_lower_bound_seconds"]
+
+            _restamp(root / "plan", downgrade)
+            before = plan_path.read_bytes()
+            report = verify_flowmesh_container_operation_dag_plan(
+                root / "plan"
+            )
+            self.assertEqual("VERIFIED", report["status"])
+            self.assertEqual(120, report["api_task_timeout_seconds"])
+            self.assertEqual(
+                "legacy-fixed-default", report["api_task_timeout_source"]
+            )
+            self.assertEqual(
+                FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION,
+                report["schema_version"],
+            )
+            # Verification never rewrites the plan on disk.
+            self.assertEqual(before, plan_path.read_bytes())
 
 
 class ConditionalLedgerTest(unittest.TestCase):

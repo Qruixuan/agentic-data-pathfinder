@@ -1503,6 +1503,17 @@ def _parser() -> argparse.ArgumentParser:
     flowmesh_container_dag_plan.add_argument("--trial-key")
     flowmesh_container_dag_plan.add_argument("--owner", default="pathfinder")
     flowmesh_container_dag_plan.add_argument(
+        "--api-task-timeout-seconds",
+        type=int,
+        default=None,
+        help=(
+            "per-task FlowMesh API executor timeout in seconds (default 120), "
+            "frozen into the plan and used verbatim at submission; planning is "
+            "refused if it is below a selected operation's derived lower "
+            "bound. This is distinct from run-time workflow polling"
+        ),
+    )
+    flowmesh_container_dag_plan.add_argument(
         "--output-dir", type=Path, required=True
     )
     flowmesh_container_dag_plan.add_argument("--compact", action="store_true")
@@ -1861,9 +1872,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _print_payload(payload, compact=args.compact)
         if args.command == "plan-flowmesh-container-dag":
             from .integrations.flowmesh.container_dag import (
+                DEFAULT_API_TASK_TIMEOUT_SECONDS,
                 plan_flowmesh_container_operation_dag,
             )
 
+            # Resolved here rather than in the parser so the default lives in
+            # exactly one place and the flowmesh module stays lazily imported.
+            api_task_timeout = args.api_task_timeout_seconds
+            if api_task_timeout is None:
+                api_task_timeout = DEFAULT_API_TASK_TIMEOUT_SECONDS
             payload = plan_flowmesh_container_operation_dag(
                 container_operations_path=args.container_operations,
                 node_api_urls=_node_api_url_mapping(args.node_api_url),
@@ -1871,6 +1888,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 smoke_id=args.smoke_id,
                 trial_key=args.trial_key,
                 owner=args.owner,
+                api_task_timeout_seconds=api_task_timeout,
                 output_dir=args.output_dir,
             )
             return _print_payload(payload, compact=args.compact)

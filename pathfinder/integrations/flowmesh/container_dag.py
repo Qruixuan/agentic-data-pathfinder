@@ -35,8 +35,17 @@ from .redaction import redact_secrets
 
 
 FLOWMESH_CONTAINER_DAG_PLAN_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-operation-dag-plan/v1alpha2"
+)
+#: v1alpha1 plans have no planner-controlled API timeout. They stay
+#: verifiable under the fixed 120 s the planner emitted at the time; they are
+#: never rewritten, and the legacy timeout is reported rather than assumed.
+FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-operation-dag-plan/v1alpha1"
 )
+#: The API timeout the v1alpha1 planner hard-coded into every task.
+LEGACY_API_TASK_TIMEOUT_SECONDS = 120
+DEFAULT_API_TASK_TIMEOUT_SECONDS = 120
 FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-operation-dag-run/v1alpha1"
 )
@@ -346,6 +355,90 @@ def list_linear_container_operation_dag_candidates(
     return candidates
 
 
+def _operation_lower_bound(operation: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive a conservative duration lower bound from the frozen operation.
+
+    Only quantities the operation already carries are used. A network
+    transfer with a link adapter has a real floor -- the payload cannot cross
+    a rate-limited link faster than ``logical_bytes / bandwidth``, and at
+    least one round trip is needed -- so that floor is computed. Storage and
+    compute carry no rate in the frozen record, so their bound is 0.0: an
+    honest "nothing derivable here", never an invented duration.
+
+    The bound is a floor, not an estimate. Real execution is slower.
+    """
+    components: dict[str, float] = {}
+    seconds = 0.0
+    link = operation.get("link_adapter")
+    if operation["operation_kind"] == "network_transfer" and isinstance(link, Mapping):
+        bandwidth = link.get("bandwidth_bytes_per_second")
+        _require(
+            isinstance(bandwidth, (int, float))
+            and not isinstance(bandwidth, bool)
+            and bandwidth > 0,
+            "link adapter bandwidth_bytes_per_second must be a positive number",
+        )
+        rtt_ms = link.get("round_trip_time_ms", 0.0)
+        _require(
+            isinstance(rtt_ms, (int, float))
+            and not isinstance(rtt_ms, bool)
+            and rtt_ms >= 0,
+            "link adapter round_trip_time_ms must be a non-negative number",
+        )
+        transfer = operation["logical_bytes"] / float(bandwidth)
+        latency = float(rtt_ms) / 1000.0
+        components = {
+            "transfer_seconds": round(transfer, 6),
+            "round_trip_seconds": round(latency, 6),
+        }
+        seconds = transfer + latency
+    basis = "link-rate-and-round-trip" if components else "not-derivable"
+    return {
+        "operation_key": operation["operation_key"],
+        "operation_kind": operation["operation_kind"],
+        "lower_bound_seconds": round(seconds, 6),
+        "basis": basis,
+        "components": components,
+    }
+
+
+def derive_operation_lower_bounds(
+    operations: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Per-operation conservative duration floors, in selection order."""
+    return [_operation_lower_bound(row) for row in operations]
+
+
+def _require_api_timeout_covers(
+    bounds: Sequence[Mapping[str, Any]],
+    api_task_timeout_seconds: int,
+) -> None:
+    """Refuse a timeout that provably cannot let an operation finish.
+
+    A task killed mid-transfer produces a failure indistinguishable from a
+    real one, so this is checked when the plan is frozen rather than
+    discovered on a worker minutes into a run.
+    """
+    for bound in bounds:
+        if api_task_timeout_seconds < bound["lower_bound_seconds"]:
+            raise FlowMeshContainerDagError(
+                "API task timeout is shorter than the derived lower bound for "
+                f"operation {bound['operation_key']}: requested "
+                f"{api_task_timeout_seconds}s, required at least "
+                f"{bound['lower_bound_seconds']}s "
+                f"(basis: {bound['basis']}); this floor excludes storage, "
+                "compute, and scheduling overhead, so choose a larger value"
+            )
+
+
+def _validate_api_task_timeout(value: Any) -> int:
+    _require(
+        type(value) is int and value > 0,
+        "api_task_timeout_seconds must be a positive integer",
+    )
+    return int(value)
+
+
 def _validate_node_api_urls(
     operations: Sequence[Mapping[str, Any]],
     node_api_urls: Mapping[str, str],
@@ -373,7 +466,11 @@ def _validate_node_api_urls(
     return dict(sorted(normalized.items()))
 
 
-def _task_spec(operation: Mapping[str, Any], url: str) -> dict[str, Any]:
+def _task_spec(
+    operation: Mapping[str, Any],
+    url: str,
+    api_task_timeout_seconds: int,
+) -> dict[str, Any]:
     return {
         "taskType": "api",
         "api": {
@@ -381,7 +478,7 @@ def _task_spec(operation: Mapping[str, Any], url: str) -> dict[str, Any]:
             "method": "POST",
             "headers": {"Content-Type": "application/json"},
             "body": _copy_operation(operation),
-            "timeout_sec": 120,
+            "timeout_sec": api_task_timeout_seconds,
             "response": {
                 "parse_json": False,
                 "return_body": True,
@@ -403,8 +500,14 @@ def build_flowmesh_container_operation_workflow(
     selected_worker_id: str,
     smoke_id: str,
     owner: str = "pathfinder",
+    api_task_timeout_seconds: int = LEGACY_API_TASK_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    """Build a worker-pinned FlowMesh API graph for an exact three-step DAG."""
+    """Build a worker-pinned FlowMesh API graph for an exact three-step DAG.
+
+    ``api_task_timeout_seconds`` is applied verbatim to every API task. The
+    default reproduces the value the v1alpha1 planner hard-coded, so a legacy
+    plan still builds the workflow it was frozen against.
+    """
 
     _require(len(operations) == 3, "container DAG must contain exactly three operations")
     copied = [_validate_operation(row) for row in operations]
@@ -424,6 +527,8 @@ def build_flowmesh_container_operation_workflow(
     worker = _text(selected_worker_id, "selected_worker_id")
     run_name = _text(smoke_id, "smoke_id")
     resolved_urls = _validate_node_api_urls(copied, node_api_urls)
+    timeout = _validate_api_task_timeout(api_task_timeout_seconds)
+    _require_api_timeout_covers(derive_operation_lower_bounds(copied), timeout)
     nodes: list[dict[str, Any]] = []
     for index, (name, operation) in enumerate(zip(_STEP_NAMES, copied)):
         item: dict[str, Any] = {
@@ -431,6 +536,7 @@ def build_flowmesh_container_operation_workflow(
             "spec": _task_spec(
                 operation,
                 resolved_urls[operation["execution_node_id"]],
+                timeout,
             ),
         }
         if index:
@@ -468,10 +574,12 @@ def _workflow_template(
     smoke_id: str,
     worker_alias: str,
     owner: str,
+    api_task_timeout_seconds: int,
 ) -> dict[str, Any]:
     """Build a non-submittable template that contains no volatile worker ID."""
 
     urls = _validate_node_api_urls(operations, node_api_urls)
+    timeout = _validate_api_task_timeout(api_task_timeout_seconds)
     nodes: list[dict[str, Any]] = []
     for index, (name, operation) in enumerate(zip(_STEP_NAMES, operations)):
         node: dict[str, Any] = {
@@ -479,6 +587,7 @@ def _workflow_template(
             "spec": _task_spec(
                 operation,
                 urls[str(operation["execution_node_id"])],
+                timeout,
             ),
         }
         if index:
@@ -556,7 +665,15 @@ def _read_plan(plan_dir: str | Path) -> dict[str, Any]:
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FlowMeshContainerDagError("container DAG plan is invalid JSON") from exc
     _require(isinstance(plan, dict), "container DAG plan must be an object")
-    _require(plan.get("schema_version") == FLOWMESH_CONTAINER_DAG_PLAN_SCHEMA_VERSION, "unsupported container DAG plan schema")
+    schema = plan.get("schema_version")
+    _require(
+        schema
+        in (
+            FLOWMESH_CONTAINER_DAG_PLAN_SCHEMA_VERSION,
+            FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION,
+        ),
+        "unsupported container DAG plan schema",
+    )
     _require(plan.get("status") == "FROZEN", "container DAG plan is not frozen")
     _require(plan.get("plan_sha256") == _document_sha256(plan, "plan_sha256"), "container DAG plan digest mismatch")
     operations = plan.get("operations")
@@ -587,6 +704,43 @@ def _read_plan(plan_dir: str | Path) -> dict[str, Any]:
     _require(isinstance(urls, Mapping), "container DAG plan has no node API URLs")
     _validate_node_api_urls(selected, urls)
     _text(plan.get("worker_alias"), "worker_alias")
+    if schema == FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION:
+        # A legacy plan is read under the semantics it was frozen with and is
+        # never rewritten. Its timeout is reported, not invented.
+        _require(
+            "api_task_timeout_seconds" not in plan,
+            "a legacy container DAG plan must not declare an API task timeout",
+        )
+        plan["api_task_timeout_seconds"] = LEGACY_API_TASK_TIMEOUT_SECONDS
+        plan["api_task_timeout_source"] = "legacy-fixed-default"
+        plan["operation_lower_bound_seconds"] = derive_operation_lower_bounds(
+            selected
+        )
+        plan["max_operation_lower_bound_seconds"] = max(
+            (
+                row["lower_bound_seconds"]
+                for row in plan["operation_lower_bound_seconds"]
+            ),
+            default=0.0,
+        )
+        return plan
+    timeout = _validate_api_task_timeout(plan.get("api_task_timeout_seconds"))
+    # Re-derive from the stored operations rather than trusting the recorded
+    # evidence. The plan digest already covers both, but a tampered plan can
+    # be re-stamped; a bound recomputed from the operations themselves cannot
+    # be edited without also editing the operation it comes from.
+    recomputed = derive_operation_lower_bounds(selected)
+    _require(
+        plan.get("operation_lower_bound_seconds") == recomputed,
+        "container DAG plan lower-bound record does not match its operations",
+    )
+    _require(
+        plan.get("max_operation_lower_bound_seconds")
+        == max((row["lower_bound_seconds"] for row in recomputed), default=0.0),
+        "container DAG plan maximum lower bound does not match its operations",
+    )
+    _require_api_timeout_covers(recomputed, timeout)
+    plan["api_task_timeout_source"] = "plan"
     return plan
 
 
@@ -599,6 +753,7 @@ def plan_flowmesh_container_operation_dag(
     output_dir: str | Path,
     trial_key: str | None = None,
     owner: str = "pathfinder",
+    api_task_timeout_seconds: int = DEFAULT_API_TASK_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Freeze an exact three-operation FlowMesh container-DAG input package.
 
@@ -614,6 +769,12 @@ def plan_flowmesh_container_operation_dag(
         load_container_operations(source), trial_key=trial_key
     )
     urls = _validate_node_api_urls(selected, node_api_urls)
+    timeout = _validate_api_task_timeout(api_task_timeout_seconds)
+    # Derive the floors before writing anything: a plan that cannot finish is
+    # refused at freeze time rather than after a worker has burned the wall
+    # clock on it.
+    bounds = derive_operation_lower_bounds(selected)
+    _require_api_timeout_covers(bounds, timeout)
     plan = {
         "schema_version": FLOWMESH_CONTAINER_DAG_PLAN_SCHEMA_VERSION,
         "status": "FROZEN",
@@ -627,6 +788,11 @@ def plan_flowmesh_container_operation_dag(
             selected[0]["dependency_operation_keys"]
         ),
         "node_api_urls": urls,
+        "api_task_timeout_seconds": timeout,
+        "operation_lower_bound_seconds": bounds,
+        "max_operation_lower_bound_seconds": max(
+            (row["lower_bound_seconds"] for row in bounds), default=0.0
+        ),
         "evidence_class": "orchestration-transport-compute-conformance",
         "llm_called": False,
         "semantic_task_quality_evaluated": False,
@@ -640,6 +806,7 @@ def plan_flowmesh_container_operation_dag(
         smoke_id=run_name,
         worker_alias=alias,
         owner=owner_name,
+        api_task_timeout_seconds=timeout,
     )
     documents = {
         "flowmesh-container-dag-plan.json": _json_bytes(plan),
@@ -657,6 +824,10 @@ def plan_flowmesh_container_operation_dag(
         "execution_nodes": [row["execution_node_id"] for row in selected],
         "worker_alias": alias,
         "plan_sha256": plan["plan_sha256"],
+        "api_task_timeout_seconds": timeout,
+        "max_operation_lower_bound_seconds": plan[
+            "max_operation_lower_bound_seconds"
+        ],
         "workflow_submitted": False,
         "services_started": False,
         "llm_called": False,
@@ -678,6 +849,13 @@ def verify_flowmesh_container_operation_dag_plan(
         "execution_nodes": [row["execution_node_id"] for row in plan["operations"]],
         "worker_alias": plan["worker_alias"],
         "plan_sha256": plan["plan_sha256"],
+        "schema_version": plan["schema_version"],
+        "api_task_timeout_seconds": plan["api_task_timeout_seconds"],
+        "api_task_timeout_source": plan["api_task_timeout_source"],
+        "operation_lower_bound_seconds": plan["operation_lower_bound_seconds"],
+        "max_operation_lower_bound_seconds": plan[
+            "max_operation_lower_bound_seconds"
+        ],
         "workflow_submitted": False,
         "services_started": False,
         "eligible_for_scientific_claims": False,
@@ -795,6 +973,7 @@ def run_flowmesh_container_operation_dag(
         selected_worker_id=identity.worker_id,
         smoke_id=plan["smoke_id"],
         owner=plan["owner"],
+        api_task_timeout_seconds=plan["api_task_timeout_seconds"],
     )
     validation = client.validate(workflow)
     _require(
