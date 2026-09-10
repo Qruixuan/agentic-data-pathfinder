@@ -519,11 +519,9 @@ class ValidationTest(unittest.TestCase):
 
         root = self.root / "contain"
         root.mkdir(parents=True)
-        # Which branch fires is platform dependent: "/etc/passwd" has no
-        # drive, so Path.is_absolute() is False on Windows and the escape is
-        # caught by the resolved-containment check instead of the relative
-        # check. The guarantee under test is that the path is refused and
-        # never resolves inside the root, not which sentence says so.
+        # The helper validates POSIX and Windows path dialects on every
+        # platform.  The guarantee is that each candidate is refused, rather
+        # than which of the dialect-specific checks reports the refusal.
         containment_refusal = (
             "must be relative|must not traverse upwards|escapes its "
             "declared root"
@@ -531,7 +529,10 @@ class ValidationTest(unittest.TestCase):
         for candidate in (
             "../outside.json",
             "a/../../outside.json",
+            r"..\outside.json",
             "/etc/passwd",
+            r"C:\Windows\system.ini",
+            r"\\server\share\file.json",
         ):
             with self.subTest(candidate=candidate):
                 with self.assertRaisesRegex(

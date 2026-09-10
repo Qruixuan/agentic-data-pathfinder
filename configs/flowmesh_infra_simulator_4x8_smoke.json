@@ -1,0 +1,575 @@
+{
+  "schema_version": "pathfinder.flowmesh-infra-simulator-scenario/v1alpha1",
+  "scenario_id": "flowmesh-infra-4x8-local-smoke-v1",
+  "seed": 20260909,
+  "repetitions": 2,
+  "arrival_interval_ms": 0.25,
+  "trial_admission_slots": 4,
+  "calibration_provenance": "provisional-development-profile-not-measured-performance",
+  "rate_card": {
+    "rate_card_id": "provisional-local-simulator-units-v1",
+    "provenance": "configured-development-only-not-a-real-price-schedule",
+    "rates": {
+      "control_ms": 0.000001,
+      "cpu_ms": 0.000002,
+      "gpu_ms": 0.00002,
+      "index_ms": 0.000002,
+      "hdd_byte": 0.0000000002,
+      "nvme_byte": 0.0000000001,
+      "network_byte": 0.0000000003
+    }
+  },
+  "nodes": [
+    {
+      "node_id": "N1",
+      "roles": ["flowmesh-control", "ledger"],
+      "resources": [
+        {
+          "resource_id": "N1.control",
+          "kind": "control",
+          "slots": 2,
+          "base_latency_ms": 0.2,
+          "jitter_fraction": 0.05,
+          "time_rate_id": "control_ms"
+        }
+      ]
+    },
+    {
+      "node_id": "N2",
+      "roles": ["catalogue", "index"],
+      "resources": [
+        {
+          "resource_id": "N2.index",
+          "kind": "index",
+          "slots": 4,
+          "base_latency_ms": 0.1,
+          "jitter_fraction": 0.05,
+          "time_rate_id": "index_ms"
+        }
+      ]
+    },
+    {
+      "node_id": "N3",
+      "roles": ["origin-cold", "object-store"],
+      "resources": [
+        {
+          "resource_id": "N3.hdd",
+          "kind": "storage",
+          "slots": 8,
+          "base_latency_ms": 8.0,
+          "throughput_bytes_per_second": 150000000,
+          "jitter_fraction": 0.1,
+          "byte_rate_id": "hdd_byte"
+        }
+      ]
+    },
+    {
+      "node_id": "N4",
+      "roles": ["origin-warm", "derived-store"],
+      "resources": [
+        {
+          "resource_id": "N4.nvme",
+          "kind": "storage",
+          "slots": 8,
+          "base_latency_ms": 0.08,
+          "throughput_bytes_per_second": 2000000000,
+          "jitter_fraction": 0.03,
+          "byte_rate_id": "nvme_byte"
+        }
+      ]
+    },
+    {
+      "node_id": "N5",
+      "roles": ["materializer"],
+      "resources": [
+        {
+          "resource_id": "N5.cpu",
+          "kind": "cpu",
+          "slots": 8,
+          "base_latency_ms": 0.0,
+          "time_rate_id": "cpu_ms"
+        }
+      ]
+    },
+    {
+      "node_id": "N6",
+      "roles": ["inference"],
+      "resources": [
+        {
+          "resource_id": "N6.gpu",
+          "kind": "gpu",
+          "slots": 2,
+          "base_latency_ms": 0.0,
+          "jitter_fraction": 0.05,
+          "time_rate_id": "gpu_ms"
+        }
+      ]
+    },
+    {
+      "node_id": "N7",
+      "roles": ["flowmesh-worker", "execution-core"],
+      "resources": [
+        {
+          "resource_id": "N7.cpu",
+          "kind": "cpu",
+          "slots": 4,
+          "base_latency_ms": 0.0,
+          "time_rate_id": "cpu_ms"
+        },
+        {
+          "resource_id": "N7.index",
+          "kind": "index",
+          "slots": 2,
+          "base_latency_ms": 0.05,
+          "time_rate_id": "index_ms"
+        },
+        {
+          "resource_id": "N7.nvme",
+          "kind": "storage",
+          "slots": 4,
+          "base_latency_ms": 0.05,
+          "throughput_bytes_per_second": 2500000000,
+          "byte_rate_id": "nvme_byte"
+        }
+      ],
+      "caches": [
+        {
+          "cache_id": "N7.derived-cache",
+          "capacity_bytes": 10000000,
+          "initial_entries": [
+            {
+              "object_id": "video-descriptive",
+              "representation_id": "multimodal_digest",
+              "size_bytes": 24000
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "N8",
+      "roles": ["flowmesh-worker", "execution-edge"],
+      "resources": [
+        {
+          "resource_id": "N8.cpu",
+          "kind": "cpu",
+          "slots": 4,
+          "base_latency_ms": 0.0,
+          "time_rate_id": "cpu_ms"
+        },
+        {
+          "resource_id": "N8.index",
+          "kind": "index",
+          "slots": 2,
+          "base_latency_ms": 0.05,
+          "time_rate_id": "index_ms"
+        },
+        {
+          "resource_id": "N8.nvme",
+          "kind": "storage",
+          "slots": 4,
+          "base_latency_ms": 0.05,
+          "throughput_bytes_per_second": 2500000000,
+          "byte_rate_id": "nvme_byte"
+        }
+      ],
+      "caches": [
+        {
+          "cache_id": "N8.derived-cache",
+          "capacity_bytes": 10000000,
+          "initial_entries": [
+            {
+              "object_id": "video-descriptive",
+              "representation_id": "multimodal_digest",
+              "size_bytes": 24000
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "links": [
+    {
+      "link_id": "N2-N7-core",
+      "source_node_id": "N2",
+      "destination_node_id": "N7",
+      "slots": 8,
+      "bandwidth_bytes_per_second": 12500000000,
+      "round_trip_time_ms": 0.2,
+      "jitter_fraction": 0.02,
+      "byte_rate_id": "network_byte"
+    },
+    {
+      "link_id": "N2-N8-edge",
+      "source_node_id": "N2",
+      "destination_node_id": "N8",
+      "slots": 2,
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30,
+      "jitter_fraction": 0.05,
+      "byte_rate_id": "network_byte"
+    },
+    {
+      "link_id": "N3-N7-cold",
+      "source_node_id": "N3",
+      "destination_node_id": "N7",
+      "slots": 4,
+      "bandwidth_bytes_per_second": 3125000000,
+      "round_trip_time_ms": 2,
+      "jitter_fraction": 0.03,
+      "byte_rate_id": "network_byte"
+    },
+    {
+      "link_id": "N3-N8-edge",
+      "source_node_id": "N3",
+      "destination_node_id": "N8",
+      "slots": 2,
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30,
+      "jitter_fraction": 0.05,
+      "byte_rate_id": "network_byte"
+    },
+    {
+      "link_id": "N4-N7-core",
+      "source_node_id": "N4",
+      "destination_node_id": "N7",
+      "slots": 8,
+      "bandwidth_bytes_per_second": 12500000000,
+      "round_trip_time_ms": 0.2,
+      "jitter_fraction": 0.02,
+      "byte_rate_id": "network_byte"
+    },
+    {
+      "link_id": "N4-N8-edge",
+      "source_node_id": "N4",
+      "destination_node_id": "N8",
+      "slots": 2,
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30,
+      "jitter_fraction": 0.05,
+      "byte_rate_id": "network_byte"
+    },
+    {
+      "link_id": "N7-N6-core",
+      "source_node_id": "N7",
+      "destination_node_id": "N6",
+      "slots": 8,
+      "bandwidth_bytes_per_second": 12500000000,
+      "round_trip_time_ms": 0.2,
+      "jitter_fraction": 0.02,
+      "byte_rate_id": "network_byte"
+    },
+    {
+      "link_id": "N8-N6-edge",
+      "source_node_id": "N8",
+      "destination_node_id": "N6",
+      "slots": 2,
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30,
+      "jitter_fraction": 0.05,
+      "byte_rate_id": "network_byte"
+    }
+  ],
+  "objects": [
+    {
+      "object_id": "video-descriptive",
+      "representations": {
+        "raw_video": 120000000,
+        "sampled_frame_bundle": 4000000,
+        "multimodal_digest": 24000
+      }
+    },
+    {
+      "object_id": "video-temporal",
+      "representations": {
+        "raw_video": 180000000,
+        "sampled_frame_bundle": 5200000,
+        "multimodal_digest": 28000
+      }
+    },
+    {
+      "object_id": "video-causal",
+      "representations": {
+        "raw_video": 240000000,
+        "sampled_frame_bundle": 6800000,
+        "multimodal_digest": 36000
+      }
+    },
+    {
+      "object_id": "video-retrieval-target",
+      "representations": {
+        "raw_video": 90000000,
+        "sampled_frame_bundle": 3600000,
+        "multimodal_digest": 20000
+      }
+    }
+  ],
+  "workloads": [
+    {
+      "workload_id": "smoke-descriptive",
+      "workload_class": "W1",
+      "object_id": "video-descriptive",
+      "task_type": "flowmesh.agent.video_qa.descriptive",
+      "quality_provenance": "synthetic-smoke-fixture-not-scientific-evidence",
+      "task_success_by_design": {
+        "D0": true,
+        "D1": true,
+        "D2": true,
+        "D3": true,
+        "D4": true,
+        "D5": true,
+        "D6": true,
+        "D7": true
+      }
+    },
+    {
+      "workload_id": "smoke-temporal",
+      "workload_class": "W2",
+      "object_id": "video-temporal",
+      "task_type": "flowmesh.agent.video_qa.temporal",
+      "quality_provenance": "synthetic-smoke-fixture-not-scientific-evidence",
+      "task_success_by_design": {
+        "D0": true,
+        "D1": true,
+        "D2": true,
+        "D3": true,
+        "D4": true,
+        "D5": true,
+        "D6": true,
+        "D7": true
+      }
+    },
+    {
+      "workload_id": "smoke-causal",
+      "workload_class": "W3",
+      "object_id": "video-causal",
+      "task_type": "flowmesh.agent.video_qa.causal",
+      "quality_provenance": "synthetic-smoke-fixture-not-scientific-evidence",
+      "task_success_by_design": {
+        "D0": true,
+        "D1": true,
+        "D2": true,
+        "D3": true,
+        "D4": true,
+        "D5": true,
+        "D6": true,
+        "D7": true
+      }
+    },
+    {
+      "workload_id": "smoke-retrieval",
+      "workload_class": "W4",
+      "object_id": "video-retrieval-target",
+      "task_type": "flowmesh.agent.video_retrieval",
+      "quality_provenance": "synthetic-smoke-fixture-not-scientific-evidence",
+      "task_success_by_design": {
+        "D0": true,
+        "D1": true,
+        "D2": true,
+        "D3": true,
+        "D4": true,
+        "D5": true,
+        "D6": true,
+        "D7": true
+      }
+    }
+  ],
+  "operation_templates": [
+    {
+      "template_id": "raw-full",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "read-raw", "kind": "storage_read", "depends_on": ["schedule"], "resource_id": "N3.hdd", "representation_id": "raw_video"},
+        {"op_id": "transfer-raw", "kind": "network_transfer", "depends_on": ["read-raw"], "link_id": "$raw_link", "representation_id": "raw_video"},
+        {"op_id": "decode", "kind": "compute", "depends_on": ["transfer-raw"], "resource_id": "$executor_cpu", "service_ms": 20},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["decode"], "link_id": "$inference_link", "size_bytes": 262144},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 100}
+      ]
+    },
+    {
+      "template_id": "raw-indexed",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "query-index", "kind": "index_query", "depends_on": ["schedule"], "resource_id": "N2.index", "service_ms": 2},
+        {"op_id": "return-index", "kind": "network_transfer", "depends_on": ["query-index"], "link_id": "$index_link", "size_bytes": 4096},
+        {"op_id": "read-range", "kind": "storage_read", "depends_on": ["return-index"], "resource_id": "N3.hdd", "representation_id": "raw_video", "byte_multiplier": 0.25},
+        {"op_id": "transfer-range", "kind": "network_transfer", "depends_on": ["read-range"], "link_id": "$raw_link", "representation_id": "raw_video", "byte_multiplier": 0.25},
+        {"op_id": "decode", "kind": "compute", "depends_on": ["transfer-range"], "resource_id": "$executor_cpu", "service_ms": 8},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["decode"], "link_id": "$inference_link", "size_bytes": 262144},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 100}
+      ]
+    },
+    {
+      "template_id": "raw-scan",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "scan-raw", "kind": "storage_read", "depends_on": ["schedule"], "resource_id": "N3.hdd", "representation_id": "raw_video", "byte_multiplier": 8},
+        {"op_id": "transfer-scan", "kind": "network_transfer", "depends_on": ["scan-raw"], "link_id": "$raw_link", "representation_id": "raw_video", "byte_multiplier": 8},
+        {"op_id": "scan-compute", "kind": "compute", "depends_on": ["transfer-scan"], "resource_id": "$executor_cpu", "service_ms": 80},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["scan-compute"], "link_id": "$inference_link", "size_bytes": 262144},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 100}
+      ]
+    },
+    {
+      "template_id": "remote-digest",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "read-digest", "kind": "storage_read", "depends_on": ["schedule"], "resource_id": "N4.nvme", "representation_id": "multimodal_digest"},
+        {"op_id": "transfer-digest", "kind": "network_transfer", "depends_on": ["read-digest"], "link_id": "$derived_link", "representation_id": "multimodal_digest"},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["transfer-digest"], "link_id": "$inference_link", "representation_id": "multimodal_digest"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 75}
+      ]
+    },
+    {
+      "template_id": "remote-frames",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "read-frames", "kind": "storage_read", "depends_on": ["schedule"], "resource_id": "N4.nvme", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "transfer-frames", "kind": "network_transfer", "depends_on": ["read-frames"], "link_id": "$derived_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["transfer-frames"], "link_id": "$inference_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 90}
+      ]
+    },
+    {
+      "template_id": "remote-combined",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "read-digest", "kind": "storage_read", "depends_on": ["schedule"], "resource_id": "N4.nvme", "representation_id": "multimodal_digest"},
+        {"op_id": "read-frames", "kind": "storage_read", "depends_on": ["schedule"], "resource_id": "N4.nvme", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "transfer-digest", "kind": "network_transfer", "depends_on": ["read-digest"], "link_id": "$derived_link", "representation_id": "multimodal_digest"},
+        {"op_id": "transfer-frames", "kind": "network_transfer", "depends_on": ["read-frames"], "link_id": "$derived_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "send-digest", "kind": "network_transfer", "depends_on": ["transfer-digest"], "link_id": "$inference_link", "representation_id": "multimodal_digest"},
+        {"op_id": "send-frames", "kind": "network_transfer", "depends_on": ["transfer-frames"], "link_id": "$inference_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-digest", "send-frames"], "resource_id": "N6.gpu", "service_ms": 110}
+      ]
+    },
+    {
+      "template_id": "remote-retrieval",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "query-index", "kind": "index_query", "depends_on": ["schedule"], "resource_id": "N2.index", "service_ms": 3},
+        {"op_id": "return-candidates", "kind": "network_transfer", "depends_on": ["query-index"], "link_id": "$index_link", "size_bytes": 40960},
+        {"op_id": "read-candidate-digests", "kind": "storage_read", "depends_on": ["return-candidates"], "resource_id": "N4.nvme", "representation_id": "multimodal_digest", "byte_multiplier": 10},
+        {"op_id": "transfer-candidate-digests", "kind": "network_transfer", "depends_on": ["read-candidate-digests"], "link_id": "$derived_link", "representation_id": "multimodal_digest", "byte_multiplier": 10},
+        {"op_id": "read-selected-frames", "kind": "storage_read", "depends_on": ["transfer-candidate-digests"], "resource_id": "N4.nvme", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "transfer-selected-frames", "kind": "network_transfer", "depends_on": ["read-selected-frames"], "link_id": "$derived_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["transfer-selected-frames"], "link_id": "$inference_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 100}
+      ]
+    },
+    {
+      "template_id": "local-digest",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "lookup", "kind": "cache_lookup", "depends_on": ["schedule"], "cache_id": "$cache", "representation_id": "multimodal_digest", "service_ms": 0.05},
+        {"op_id": "read-local", "kind": "cache_read", "depends_on": ["lookup"], "condition": {"cache_op_id": "lookup", "equals": "hit"}, "resource_id": "$local_storage", "representation_id": "multimodal_digest"},
+        {"op_id": "read-remote", "kind": "storage_read", "depends_on": ["lookup"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "resource_id": "N4.nvme", "representation_id": "multimodal_digest"},
+        {"op_id": "transfer-remote", "kind": "network_transfer", "depends_on": ["lookup", "read-remote"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "link_id": "$derived_link", "representation_id": "multimodal_digest"},
+        {"op_id": "insert", "kind": "cache_insert", "depends_on": ["lookup", "transfer-remote"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "cache_id": "$cache", "resource_id": "$local_storage", "representation_id": "multimodal_digest"},
+        {"op_id": "ready", "kind": "barrier", "depends_on": ["read-local", "insert"]},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["ready"], "link_id": "$inference_link", "representation_id": "multimodal_digest"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 75}
+      ]
+    },
+    {
+      "template_id": "local-frames",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "lookup", "kind": "cache_lookup", "depends_on": ["schedule"], "cache_id": "$cache", "representation_id": "sampled_frame_bundle", "service_ms": 0.05},
+        {"op_id": "read-local", "kind": "cache_read", "depends_on": ["lookup"], "condition": {"cache_op_id": "lookup", "equals": "hit"}, "resource_id": "$local_storage", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "read-remote", "kind": "storage_read", "depends_on": ["lookup"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "resource_id": "N4.nvme", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "transfer-remote", "kind": "network_transfer", "depends_on": ["lookup", "read-remote"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "link_id": "$derived_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "insert", "kind": "cache_insert", "depends_on": ["lookup", "transfer-remote"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "cache_id": "$cache", "resource_id": "$local_storage", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "ready", "kind": "barrier", "depends_on": ["read-local", "insert"]},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["ready"], "link_id": "$inference_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 90}
+      ]
+    },
+    {
+      "template_id": "local-combined",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "lookup-digest", "kind": "cache_lookup", "depends_on": ["schedule"], "cache_id": "$cache", "representation_id": "multimodal_digest", "service_ms": 0.05},
+        {"op_id": "read-local-digest", "kind": "cache_read", "depends_on": ["lookup-digest"], "condition": {"cache_op_id": "lookup-digest", "equals": "hit"}, "resource_id": "$local_storage", "representation_id": "multimodal_digest"},
+        {"op_id": "read-remote-digest", "kind": "storage_read", "depends_on": ["lookup-digest"], "condition": {"cache_op_id": "lookup-digest", "equals": "miss"}, "resource_id": "N4.nvme", "representation_id": "multimodal_digest"},
+        {"op_id": "transfer-digest", "kind": "network_transfer", "depends_on": ["lookup-digest", "read-remote-digest"], "condition": {"cache_op_id": "lookup-digest", "equals": "miss"}, "link_id": "$derived_link", "representation_id": "multimodal_digest"},
+        {"op_id": "insert-digest", "kind": "cache_insert", "depends_on": ["lookup-digest", "transfer-digest"], "condition": {"cache_op_id": "lookup-digest", "equals": "miss"}, "cache_id": "$cache", "resource_id": "$local_storage", "representation_id": "multimodal_digest"},
+        {"op_id": "digest-ready", "kind": "barrier", "depends_on": ["read-local-digest", "insert-digest"]},
+        {"op_id": "lookup-frames", "kind": "cache_lookup", "depends_on": ["schedule"], "cache_id": "$cache", "representation_id": "sampled_frame_bundle", "service_ms": 0.05},
+        {"op_id": "read-local-frames", "kind": "cache_read", "depends_on": ["lookup-frames"], "condition": {"cache_op_id": "lookup-frames", "equals": "hit"}, "resource_id": "$local_storage", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "read-remote-frames", "kind": "storage_read", "depends_on": ["lookup-frames"], "condition": {"cache_op_id": "lookup-frames", "equals": "miss"}, "resource_id": "N4.nvme", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "transfer-frames", "kind": "network_transfer", "depends_on": ["lookup-frames", "read-remote-frames"], "condition": {"cache_op_id": "lookup-frames", "equals": "miss"}, "link_id": "$derived_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "insert-frames", "kind": "cache_insert", "depends_on": ["lookup-frames", "transfer-frames"], "condition": {"cache_op_id": "lookup-frames", "equals": "miss"}, "cache_id": "$cache", "resource_id": "$local_storage", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "frames-ready", "kind": "barrier", "depends_on": ["read-local-frames", "insert-frames"]},
+        {"op_id": "send-digest", "kind": "network_transfer", "depends_on": ["digest-ready"], "link_id": "$inference_link", "representation_id": "multimodal_digest"},
+        {"op_id": "send-frames", "kind": "network_transfer", "depends_on": ["frames-ready"], "link_id": "$inference_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-digest", "send-frames"], "resource_id": "N6.gpu", "service_ms": 110}
+      ]
+    },
+    {
+      "template_id": "local-retrieval",
+      "operations": [
+        {"op_id": "schedule", "kind": "control", "resource_id": "N1.control", "service_ms": 0.5},
+        {"op_id": "query-local-index", "kind": "index_query", "depends_on": ["schedule"], "resource_id": "$local_index", "service_ms": 3},
+        {"op_id": "lookup", "kind": "cache_lookup", "depends_on": ["query-local-index"], "cache_id": "$cache", "representation_id": "sampled_frame_bundle", "service_ms": 0.05},
+        {"op_id": "read-local", "kind": "cache_read", "depends_on": ["lookup"], "condition": {"cache_op_id": "lookup", "equals": "hit"}, "resource_id": "$local_storage", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "read-remote", "kind": "storage_read", "depends_on": ["lookup"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "resource_id": "N4.nvme", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "transfer-remote", "kind": "network_transfer", "depends_on": ["lookup", "read-remote"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "link_id": "$derived_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "insert", "kind": "cache_insert", "depends_on": ["lookup", "transfer-remote"], "condition": {"cache_op_id": "lookup", "equals": "miss"}, "cache_id": "$cache", "resource_id": "$local_storage", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "ready", "kind": "barrier", "depends_on": ["read-local", "insert"]},
+        {"op_id": "send-model-input", "kind": "network_transfer", "depends_on": ["ready"], "link_id": "$inference_link", "representation_id": "sampled_frame_bundle"},
+        {"op_id": "infer", "kind": "compute", "depends_on": ["send-model-input"], "resource_id": "N6.gpu", "service_ms": 100}
+      ]
+    }
+  ],
+  "designs": [
+    {
+      "design_id": "D0",
+      "executor_node_id": "N7",
+      "route_templates": {"W1": "raw-full", "W2": "raw-full", "W3": "raw-full", "W4": "raw-scan"},
+      "bindings": {"executor_cpu": "N7.cpu", "raw_link": "N3-N7-cold", "index_link": "N2-N7-core", "derived_link": "N4-N7-core", "inference_link": "N7-N6-core", "local_storage": "N7.nvme", "local_index": "N7.index", "cache": "N7.derived-cache"}
+    },
+    {
+      "design_id": "D1",
+      "executor_node_id": "N7",
+      "route_templates": {"W1": "raw-full", "W2": "raw-indexed", "W3": "raw-indexed", "W4": "raw-indexed"},
+      "bindings": {"executor_cpu": "N7.cpu", "raw_link": "N3-N7-cold", "index_link": "N2-N7-core", "derived_link": "N4-N7-core", "inference_link": "N7-N6-core", "local_storage": "N7.nvme", "local_index": "N7.index", "cache": "N7.derived-cache"}
+    },
+    {
+      "design_id": "D2",
+      "executor_node_id": "N7",
+      "route_templates": {"W1": "remote-digest", "W2": "remote-frames", "W3": "remote-combined", "W4": "remote-retrieval"},
+      "bindings": {"executor_cpu": "N7.cpu", "raw_link": "N3-N7-cold", "index_link": "N2-N7-core", "derived_link": "N4-N7-core", "inference_link": "N7-N6-core", "local_storage": "N7.nvme", "local_index": "N7.index", "cache": "N7.derived-cache"}
+    },
+    {
+      "design_id": "D3",
+      "executor_node_id": "N7",
+      "route_templates": {"W1": "local-digest", "W2": "local-frames", "W3": "local-combined", "W4": "local-retrieval"},
+      "bindings": {"executor_cpu": "N7.cpu", "raw_link": "N3-N7-cold", "index_link": "N2-N7-core", "derived_link": "N4-N7-core", "inference_link": "N7-N6-core", "local_storage": "N7.nvme", "local_index": "N7.index", "cache": "N7.derived-cache"}
+    },
+    {
+      "design_id": "D4",
+      "executor_node_id": "N8",
+      "route_templates": {"W1": "raw-full", "W2": "raw-full", "W3": "raw-full", "W4": "raw-scan"},
+      "bindings": {"executor_cpu": "N8.cpu", "raw_link": "N3-N8-edge", "index_link": "N2-N8-edge", "derived_link": "N4-N8-edge", "inference_link": "N8-N6-edge", "local_storage": "N8.nvme", "local_index": "N8.index", "cache": "N8.derived-cache"}
+    },
+    {
+      "design_id": "D5",
+      "executor_node_id": "N8",
+      "route_templates": {"W1": "raw-full", "W2": "raw-indexed", "W3": "raw-indexed", "W4": "raw-indexed"},
+      "bindings": {"executor_cpu": "N8.cpu", "raw_link": "N3-N8-edge", "index_link": "N2-N8-edge", "derived_link": "N4-N8-edge", "inference_link": "N8-N6-edge", "local_storage": "N8.nvme", "local_index": "N8.index", "cache": "N8.derived-cache"}
+    },
+    {
+      "design_id": "D6",
+      "executor_node_id": "N8",
+      "route_templates": {"W1": "remote-digest", "W2": "remote-frames", "W3": "remote-combined", "W4": "remote-retrieval"},
+      "bindings": {"executor_cpu": "N8.cpu", "raw_link": "N3-N8-edge", "index_link": "N2-N8-edge", "derived_link": "N4-N8-edge", "inference_link": "N8-N6-edge", "local_storage": "N8.nvme", "local_index": "N8.index", "cache": "N8.derived-cache"}
+    },
+    {
+      "design_id": "D7",
+      "executor_node_id": "N8",
+      "route_templates": {"W1": "local-digest", "W2": "local-frames", "W3": "local-combined", "W4": "local-retrieval"},
+      "bindings": {"executor_cpu": "N8.cpu", "raw_link": "N3-N8-edge", "index_link": "N2-N8-edge", "derived_link": "N4-N8-edge", "inference_link": "N8-N6-edge", "local_storage": "N8.nvme", "local_index": "N8.index", "cache": "N8.derived-cache"}
+    }
+  ]
+}

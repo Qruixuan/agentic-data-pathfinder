@@ -1,0 +1,34 @@
+{
+  "schema_version": "pathfinder.flowmesh-infra-calibration-config/v1alpha1",
+  "calibration_id": "pathfinderbench-existing-evidence-object-sizes-v1",
+  "output_scenario_id": "flowmesh-infra-4x8-existing-evidence-partial-v1",
+  "object_profiles": [
+    {
+      "workload_class": "W1",
+      "target_object_id": "video-descriptive",
+      "mode": "cohort-representative",
+      "stratum_id": "descriptive",
+      "selection_rule": "nearest-object-to-raw-size-median"
+    },
+    {
+      "workload_class": "W2",
+      "target_object_id": "video-temporal",
+      "mode": "cohort-representative",
+      "stratum_id": "temporal",
+      "selection_rule": "nearest-object-to-raw-size-median"
+    },
+    {
+      "workload_class": "W3",
+      "target_object_id": "video-causal",
+      "mode": "cohort-representative",
+      "stratum_id": "causal",
+      "selection_rule": "nearest-object-to-raw-size-median"
+    },
+    {
+      "workload_class": "W4",
+      "target_object_id": "video-retrieval-target",
+      "mode": "retain-base",
+      "reason": "The existing 36-workload NExT-QA package contains no cross-object retrieval cohort."
+    }
+  ]
+}

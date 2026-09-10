@@ -1,0 +1,14 @@
+.git
+.github
+.venv
+.venvs
+__pycache__
+*.py[cod]
+*.sqlite3
+*.db
+*.log
+*.tar
+*.mp4
+data
+outputs
+tests

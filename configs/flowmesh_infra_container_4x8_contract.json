@@ -1,0 +1,301 @@
+{
+  "schema_version": "pathfinder.container-emulation-backend-spec/v1alpha1",
+  "backend_id": "flowmesh-infra-4x8-single-host-container-development-v1",
+  "scenario_id": "flowmesh-infra-4x8-local-smoke-v1",
+  "deployment_mode": "single-host-eight-container",
+  "orchestrator": "docker-compose-v2",
+  "measurement_clock": "monotonic-nanoseconds",
+  "credentials_recorded": false,
+  "payload_policy": {
+    "mode": "deterministic-size-preserving-fixture",
+    "semantic_content_required": false,
+    "purpose": "infrastructure-conformance-before-real-artifact-binding"
+  },
+  "nodes": [
+    {
+      "node_id": "N1",
+      "container_name": "pathfinder-sim-n1-control",
+      "network_namespace": "pathfinder-sim-n1",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    },
+    {
+      "node_id": "N2",
+      "container_name": "pathfinder-sim-n2-index",
+      "network_namespace": "pathfinder-sim-n2",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    },
+    {
+      "node_id": "N3",
+      "container_name": "pathfinder-sim-n3-origin-cold",
+      "network_namespace": "pathfinder-sim-n3",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    },
+    {
+      "node_id": "N4",
+      "container_name": "pathfinder-sim-n4-origin-warm",
+      "network_namespace": "pathfinder-sim-n4",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    },
+    {
+      "node_id": "N5",
+      "container_name": "pathfinder-sim-n5-materializer",
+      "network_namespace": "pathfinder-sim-n5",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    },
+    {
+      "node_id": "N6",
+      "container_name": "pathfinder-sim-n6-inference",
+      "network_namespace": "pathfinder-sim-n6",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    },
+    {
+      "node_id": "N7",
+      "container_name": "pathfinder-sim-n7-execution-core",
+      "network_namespace": "pathfinder-sim-n7",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    },
+    {
+      "node_id": "N8",
+      "container_name": "pathfinder-sim-n8-execution-edge",
+      "network_namespace": "pathfinder-sim-n8",
+      "image_ref": "pathfinder-infra-node:development",
+      "image_digest": null,
+      "read_only_root_filesystem": true
+    }
+  ],
+  "resource_adapters": [
+    {
+      "resource_id": "N1.control",
+      "node_id": "N1",
+      "resource_kind": "control",
+      "adapter": "monotonic-control-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N2.index",
+      "node_id": "N2",
+      "resource_kind": "index",
+      "adapter": "bm25-index-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N3.hdd",
+      "node_id": "N3",
+      "resource_kind": "storage",
+      "adapter": "posix-exact-read-v1",
+      "measurement_source": "operation-runner-timing-and-fio"
+    },
+    {
+      "resource_id": "N4.nvme",
+      "node_id": "N4",
+      "resource_kind": "storage",
+      "adapter": "posix-exact-read-v1",
+      "measurement_source": "operation-runner-timing-and-fio"
+    },
+    {
+      "resource_id": "N5.cpu",
+      "node_id": "N5",
+      "resource_kind": "cpu",
+      "adapter": "deterministic-compute-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N6.gpu",
+      "node_id": "N6",
+      "resource_kind": "gpu",
+      "adapter": "task-executor-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N7.cpu",
+      "node_id": "N7",
+      "resource_kind": "cpu",
+      "adapter": "deterministic-compute-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N7.index",
+      "node_id": "N7",
+      "resource_kind": "index",
+      "adapter": "bm25-index-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N7.nvme",
+      "node_id": "N7",
+      "resource_kind": "storage",
+      "adapter": "posix-exact-read-v1",
+      "measurement_source": "operation-runner-timing-and-fio"
+    },
+    {
+      "resource_id": "N8.cpu",
+      "node_id": "N8",
+      "resource_kind": "cpu",
+      "adapter": "deterministic-compute-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N8.index",
+      "node_id": "N8",
+      "resource_kind": "index",
+      "adapter": "bm25-index-v1",
+      "measurement_source": "operation-runner-timing"
+    },
+    {
+      "resource_id": "N8.nvme",
+      "node_id": "N8",
+      "resource_kind": "storage",
+      "adapter": "posix-exact-read-v1",
+      "measurement_source": "operation-runner-timing-and-fio"
+    }
+  ],
+  "cache_adapters": [
+    {
+      "cache_id": "N7.derived-cache",
+      "node_id": "N7",
+      "capacity_bytes": 10000000,
+      "adapter": "filesystem-lru-v1",
+      "initial_entries": [
+        {
+          "object_id": "video-descriptive",
+          "representation_id": "multimodal_digest",
+          "size_bytes": 24000
+        }
+      ]
+    },
+    {
+      "cache_id": "N8.derived-cache",
+      "node_id": "N8",
+      "capacity_bytes": 10000000,
+      "adapter": "filesystem-lru-v1",
+      "initial_entries": [
+        {
+          "object_id": "video-descriptive",
+          "representation_id": "multimodal_digest",
+          "size_bytes": 24000
+        }
+      ]
+    }
+  ],
+  "link_adapters": [
+    {
+      "link_id": "N2-N7-core",
+      "source_node_id": "N2",
+      "destination_node_id": "N7",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 12500000000,
+      "round_trip_time_ms": 0.2,
+      "required_capabilities": []
+    },
+    {
+      "link_id": "N2-N8-edge",
+      "source_node_id": "N2",
+      "destination_node_id": "N8",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30.0,
+      "required_capabilities": []
+    },
+    {
+      "link_id": "N3-N7-cold",
+      "source_node_id": "N3",
+      "destination_node_id": "N7",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 3125000000,
+      "round_trip_time_ms": 2.0,
+      "required_capabilities": []
+    },
+    {
+      "link_id": "N3-N8-edge",
+      "source_node_id": "N3",
+      "destination_node_id": "N8",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30.0,
+      "required_capabilities": []
+    },
+    {
+      "link_id": "N4-N7-core",
+      "source_node_id": "N4",
+      "destination_node_id": "N7",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 12500000000,
+      "round_trip_time_ms": 0.2,
+      "required_capabilities": []
+    },
+    {
+      "link_id": "N4-N8-edge",
+      "source_node_id": "N4",
+      "destination_node_id": "N8",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30.0,
+      "required_capabilities": []
+    },
+    {
+      "link_id": "N7-N6-core",
+      "source_node_id": "N7",
+      "destination_node_id": "N6",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 12500000000,
+      "round_trip_time_ms": 0.2,
+      "required_capabilities": []
+    },
+    {
+      "link_id": "N8-N6-edge",
+      "source_node_id": "N8",
+      "destination_node_id": "N6",
+      "adapter": "application-rate-rtt-shaper-v1",
+      "bandwidth_bytes_per_second": 1250000,
+      "round_trip_time_ms": 30.0,
+      "required_capabilities": []
+    }
+  ],
+  "operation_adapters": {
+    "barrier": "dependency-barrier-v1",
+    "cache_insert": "filesystem-cache-insert-v1",
+    "cache_lookup": "filesystem-cache-lookup-v1",
+    "cache_read": "posix-exact-read-v1",
+    "compute": "task-operation-v1",
+    "control": "monotonic-control-v1",
+    "index_query": "bm25-query-v1",
+    "network_transfer": "http-exact-byte-transfer-v1",
+    "storage_read": "posix-exact-read-v1"
+  },
+  "task_executors": [
+    {
+      "task_type": "flowmesh.agent.video_qa.descriptive",
+      "adapter": "deterministic-artifact-envelope-v1",
+      "semantic_quality_enabled": false
+    },
+    {
+      "task_type": "flowmesh.agent.video_qa.temporal",
+      "adapter": "deterministic-artifact-envelope-v1",
+      "semantic_quality_enabled": false
+    },
+    {
+      "task_type": "flowmesh.agent.video_qa.causal",
+      "adapter": "deterministic-artifact-envelope-v1",
+      "semantic_quality_enabled": false
+    },
+    {
+      "task_type": "flowmesh.agent.video_retrieval",
+      "adapter": "bm25-retrieval-envelope-v1",
+      "semantic_quality_enabled": false
+    }
+  ]
+}

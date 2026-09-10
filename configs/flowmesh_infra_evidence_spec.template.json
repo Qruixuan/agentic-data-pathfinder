@@ -1,0 +1,34 @@
+{
+  "schema_version": "pathfinder.flowmesh-infra-evidence-spec/v1alpha1",
+  "evidence_id": "replace-with-frozen-measurement-id",
+  "credentials_recorded": false,
+  "sources": [
+    {
+      "source_id": "fio-origin-cold-read",
+      "kind": "fio",
+      "path": "measurements/fio-origin-cold-read.json",
+      "node_id": "N3",
+      "resource_id": "N3.hdd",
+      "operation": "read"
+    },
+    {
+      "source_id": "iperf-origin-cold-to-execution-core",
+      "kind": "iperf3",
+      "path": "measurements/iperf-origin-cold-to-execution-core.json",
+      "link_id": "N3-N7-cold",
+      "source_node_id": "N3",
+      "destination_node_id": "N7",
+      "round_trip_time_ms_samples": [2.0, 2.1, 1.9]
+    },
+    {
+      "source_id": "model-timing",
+      "kind": "model-timing-jsonl",
+      "path": "measurements/model-timing.jsonl"
+    },
+    {
+      "source_id": "flowmesh-routes",
+      "kind": "flowmesh-trace-import",
+      "path": "measurements/flowmesh-trace-import"
+    }
+  ]
+}

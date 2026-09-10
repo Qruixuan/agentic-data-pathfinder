@@ -1,5 +1,21 @@
 # Pathfinder Minimal System
 
+The repository also includes an offline, deterministic
+[FlowMesh physical-layout and infrastructure simulator](FLOWMESH_INFRA_SIMULATOR.md).
+Its first reference scenario exercises four workload classes across eight
+logical physical designs without starting FlowMesh or an external model. The
+same package can import frozen real FlowMesh canonical records as
+privacy-minimized calibration observations without modifying the source run.
+It also provides a development W4 lexical-retrieval evaluator and an immutable
+fio/iperf3/model-timing/FlowMesh evidence-to-scenario fitting path.
+The scenario can now be compiled into one backend-neutral operation plan,
+bound to an exact eight-container contract, and evaluated under a shared
+cross-backend metric contract before any Docker service is launched.
+It can also generate a non-launching local Docker Compose package whose node
+protocol performs bounded real file I/O and exact-byte HTTP transfer with
+semantic quality explicitly disabled. See
+[FLOWMESH_INFRA_SIMULATOR.md](FLOWMESH_INFRA_SIMULATOR.md).
+
 This repository now includes a minimal, runnable Python implementation of the
 causal access-response harness described in the research documents. It is the
 first vertical slice of Pathfinder. It now also includes offline Reduced

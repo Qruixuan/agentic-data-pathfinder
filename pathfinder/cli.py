@@ -1081,6 +1081,328 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=1024 * 1024,
     )
+    simulator = subcommands.add_parser(
+        "simulate-flowmesh-infra",
+        help=(
+            "run a deterministic offline FlowMesh physical-layout and "
+            "infrastructure scenario"
+        ),
+    )
+    simulator.add_argument("--scenario", type=Path, required=True)
+    simulator.add_argument("--output-dir", type=Path, required=True)
+    simulator.add_argument("--compact", action="store_true")
+
+    verify_simulator = subcommands.add_parser(
+        "verify-flowmesh-infra-simulation",
+        help="verify the checksums and completion state of a simulator run",
+    )
+    verify_simulator.add_argument("--output-dir", type=Path, required=True)
+    verify_simulator.add_argument("--compact", action="store_true")
+
+    trace_import = subcommands.add_parser(
+        "import-flowmesh-infra-trace",
+        help=(
+            "normalize frozen FlowMesh records into privacy-minimized "
+            "simulator calibration observations"
+        ),
+    )
+    trace_import.add_argument("--records", type=Path, required=True)
+    trace_import.add_argument("--output-dir", type=Path, required=True)
+    trace_import.add_argument("--compact", action="store_true")
+
+    verify_trace_import = subcommands.add_parser(
+        "verify-flowmesh-infra-trace-import",
+        help="verify a published FlowMesh simulator trace import",
+    )
+    verify_trace_import.add_argument("--output-dir", type=Path, required=True)
+    verify_trace_import.add_argument("--compact", action="store_true")
+
+    calibrate_simulator = subcommands.add_parser(
+        "calibrate-flowmesh-infra-scenario",
+        help=(
+            "produce an evidence-bound partially calibrated simulator "
+            "scenario without inferring unmeasured parameters"
+        ),
+    )
+    for flag in (
+        "scenario",
+        "calibration-config",
+        "workload-manifest",
+        "representation-manifest",
+        "frame-bundle-root",
+        "video-root",
+        "output-dir",
+    ):
+        calibrate_simulator.add_argument("--" + flag, type=Path, required=True)
+    calibrate_simulator.add_argument("--retrieval-output-dir", type=Path)
+    calibrate_simulator.add_argument("--compact", action="store_true")
+
+    verify_calibration = subcommands.add_parser(
+        "verify-flowmesh-infra-calibration",
+        help="verify a published simulator calibration",
+    )
+    verify_calibration.add_argument("--output-dir", type=Path, required=True)
+    verify_calibration.add_argument("--compact", action="store_true")
+
+    retrieval = subcommands.add_parser(
+        "build-simulator-retrieval-cohort",
+        help=(
+            "build a content-bound W4 cohort, deterministic lexical index, "
+            "and retrieval-quality evaluation"
+        ),
+    )
+    retrieval.add_argument("--config", type=Path, required=True)
+    retrieval.add_argument(
+        "--representation-manifest",
+        type=Path,
+        required=True,
+    )
+    retrieval.add_argument("--answer-observations", type=Path)
+    retrieval.add_argument("--output-dir", type=Path, required=True)
+    retrieval.add_argument("--compact", action="store_true")
+
+    verify_retrieval = subcommands.add_parser(
+        "verify-simulator-retrieval-cohort",
+        help="verify an immutable W4 retrieval/index evaluation",
+    )
+    verify_retrieval.add_argument("--output-dir", type=Path, required=True)
+    verify_retrieval.add_argument("--compact", action="store_true")
+
+    evidence = subcommands.add_parser(
+        "build-flowmesh-infra-evidence",
+        help=(
+            "normalize fio, iperf3, model timing, and FlowMesh trace "
+            "measurements into one immutable evidence bundle"
+        ),
+    )
+    evidence.add_argument("--spec", type=Path, required=True)
+    evidence.add_argument("--output-dir", type=Path, required=True)
+    evidence.add_argument("--compact", action="store_true")
+
+    verify_evidence = subcommands.add_parser(
+        "verify-flowmesh-infra-evidence",
+        help="verify a unified infrastructure evidence bundle",
+    )
+    verify_evidence.add_argument("--output-dir", type=Path, required=True)
+    verify_evidence.add_argument("--compact", action="store_true")
+
+    fitter = subcommands.add_parser(
+        "fit-flowmesh-infra-scenario",
+        help=(
+            "fit directly identified storage, network, and compute "
+            "parameters into a new simulator scenario"
+        ),
+    )
+    fitter.add_argument("--scenario", type=Path, required=True)
+    fitter.add_argument("--evidence-dir", type=Path, required=True)
+    fitter.add_argument("--output-scenario-id", required=True)
+    fitter.add_argument("--output-dir", type=Path, required=True)
+    fitter.add_argument("--compact", action="store_true")
+
+    verify_fit = subcommands.add_parser(
+        "verify-flowmesh-infra-fit",
+        help="verify an evidence-fitted simulator scenario",
+    )
+    verify_fit.add_argument("--output-dir", type=Path, required=True)
+    verify_fit.add_argument("--compact", action="store_true")
+
+    portable = subcommands.add_parser(
+        "build-portable-execution-plan",
+        help=(
+            "compile a simulator scenario into a backend-neutral trial and "
+            "operation contract without executing it"
+        ),
+    )
+    portable.add_argument("--scenario", type=Path, required=True)
+    portable.add_argument("--output-dir", type=Path, required=True)
+    portable.add_argument("--compact", action="store_true")
+
+    verify_portable = subcommands.add_parser(
+        "verify-portable-execution-plan",
+        help="verify an immutable backend-neutral execution plan",
+    )
+    verify_portable.add_argument("--output-dir", type=Path, required=True)
+    verify_portable.add_argument("--compact", action="store_true")
+
+    container_plan = subcommands.add_parser(
+        "plan-container-simulation",
+        help=(
+            "bind a portable plan to exact container nodes, resources, links, "
+            "caches, and operation adapters without launching Docker"
+        ),
+    )
+    container_plan.add_argument("--scenario", type=Path, required=True)
+    container_plan.add_argument(
+        "--portable-plan-dir",
+        type=Path,
+        required=True,
+    )
+    container_plan.add_argument(
+        "--container-spec",
+        type=Path,
+        required=True,
+    )
+    container_plan.add_argument("--output-dir", type=Path, required=True)
+    container_plan.add_argument("--compact", action="store_true")
+
+    verify_container = subcommands.add_parser(
+        "verify-container-simulation-plan",
+        help="verify a non-launching container-emulation execution contract",
+    )
+    verify_container.add_argument("--output-dir", type=Path, required=True)
+    verify_container.add_argument("--compact", action="store_true")
+
+    local_compose = subcommands.add_parser(
+        "build-local-container-compose",
+        help=(
+            "generate an eight-node Docker Compose project from a validated "
+            "container plan without invoking Docker"
+        ),
+    )
+    local_compose.add_argument(
+        "--container-plan-dir",
+        type=Path,
+        required=True,
+    )
+    local_compose.add_argument("--output-dir", type=Path, required=True)
+    local_compose.add_argument("--host-port-base", type=int, default=19080)
+    local_compose.add_argument("--compact", action="store_true")
+
+    verify_local_compose = subcommands.add_parser(
+        "verify-local-container-compose",
+        help="verify a generated local Compose project without calling Docker",
+    )
+    verify_local_compose.add_argument("--output-dir", type=Path, required=True)
+    verify_local_compose.add_argument("--compact", action="store_true")
+
+    local_preflight = subcommands.add_parser(
+        "preflight-local-container-host",
+        help="read-only check for a usable Docker engine and Compose v2",
+    )
+    local_preflight.add_argument("--compact", action="store_true")
+
+    container_node = subcommands.add_parser(
+        "serve-container-node",
+        help="serve one bounded infrastructure-only container node",
+    )
+    container_node.add_argument("--node-id", required=True)
+    container_node.add_argument(
+        "--state-dir",
+        type=Path,
+        default=Path("/tmp/pathfinder-node"),
+    )
+    container_node.add_argument("--host", default="0.0.0.0")
+    container_node.add_argument("--port", type=int, default=9080)
+    container_node.add_argument(
+        "--max-operation-bytes",
+        type=int,
+        default=1024 * 1024 * 1024,
+    )
+
+    container_run = subcommands.add_parser(
+        "run-local-container-simulation",
+        help=(
+            "execute serial or capacity-gated concurrent infrastructure trials "
+            "against already-running local container nodes"
+        ),
+    )
+    container_run.add_argument("--compose-package-dir", type=Path, required=True)
+    container_run.add_argument("--portable-plan-dir", type=Path, required=True)
+    container_run.add_argument("--output-dir", type=Path, required=True)
+    container_run.add_argument("--trial-limit", type=int)
+    container_run.add_argument(
+        "--trial-key",
+        action="append",
+        help=(
+            "select an exact frozen trial; repeat to run an auditable subset "
+            "concurrently"
+        ),
+    )
+    container_run.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=None,
+        help=(
+            "maximum concurrent trials; defaults to the portable plan's "
+            "frozen trial-admission slots, cannot exceed them, and must equal "
+            "them for a complete run"
+        ),
+    )
+    container_run.add_argument(
+        "--request-timeout",
+        type=float,
+        default=900.0,
+    )
+    container_run.add_argument("--compact", action="store_true")
+
+    verify_container_run = subcommands.add_parser(
+        "verify-local-container-simulation",
+        help="verify an infrastructure-only container execution ledger offline",
+    )
+    verify_container_run.add_argument("--output-dir", type=Path, required=True)
+    verify_container_run.add_argument("--compact", action="store_true")
+
+    parity = subcommands.add_parser(
+        "evaluate-backend-parity",
+        help=(
+            "descriptively compare two complete backend ledgers under one "
+            "portable plan without making an unregistered parity claim"
+        ),
+    )
+    parity.add_argument("--portable-plan-dir", type=Path, required=True)
+    parity.add_argument("--reference-records", type=Path, required=True)
+    parity.add_argument("--candidate-records", type=Path, required=True)
+    parity.add_argument("--reference-label", required=True)
+    parity.add_argument("--candidate-label", required=True)
+    parity.add_argument(
+        "--comparison-scope",
+        choices=("full", "infrastructure-only"),
+        default="full",
+        help=(
+            "full requires literal task_success on both backends; "
+            "infrastructure-only excludes semantic quality and compares only "
+            "latency, bytes, and resource service/queue metrics"
+        ),
+    )
+    parity.add_argument("--output-dir", type=Path, required=True)
+    parity.add_argument("--compact", action="store_true")
+
+    verify_parity = subcommands.add_parser(
+        "verify-backend-parity",
+        help="verify an immutable descriptive backend-parity evaluation",
+    )
+    verify_parity.add_argument("--output-dir", type=Path, required=True)
+    verify_parity.add_argument("--compact", action="store_true")
+
+    container_calibration = subcommands.add_parser(
+        "calibrate-container-backend",
+        help=(
+            "post-hoc fit only directly identifiable fixture-storage "
+            "parameters from a bound container execution"
+        ),
+    )
+    container_calibration.add_argument("--scenario", type=Path, required=True)
+    container_calibration.add_argument(
+        "--portable-plan-dir", type=Path, required=True
+    )
+    container_calibration.add_argument(
+        "--reference-run-dir", type=Path, required=True
+    )
+    container_calibration.add_argument(
+        "--container-run-dir", type=Path, required=True
+    )
+    container_calibration.add_argument("--output-scenario-id", required=True)
+    container_calibration.add_argument("--output-dir", type=Path, required=True)
+    container_calibration.add_argument("--compact", action="store_true")
+
+    verify_container_calibration = subcommands.add_parser(
+        "verify-container-backend-calibration",
+        help="verify an immutable post-hoc container calibration",
+    )
+    verify_container_calibration.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_container_calibration.add_argument("--compact", action="store_true")
     return parser
 
 
@@ -1118,6 +1440,205 @@ def _print_payload(payload: object, *, compact: bool) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "simulate-flowmesh-infra":
+            from .simulator import run_simulator_scenario
+
+            payload = run_simulator_scenario(
+                args.scenario,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-infra-simulation":
+            from .simulator import verify_simulator_run
+
+            payload = verify_simulator_run(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "import-flowmesh-infra-trace":
+            from .simulator import import_flowmesh_trace
+
+            payload = import_flowmesh_trace(
+                args.records,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-infra-trace-import":
+            from .simulator import verify_flowmesh_trace_import
+
+            payload = verify_flowmesh_trace_import(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "calibrate-flowmesh-infra-scenario":
+            from .simulator import calibrate_simulator_scenario
+
+            payload = calibrate_simulator_scenario(
+                args.scenario,
+                args.calibration_config,
+                workload_manifest_path=args.workload_manifest,
+                representation_manifest_path=args.representation_manifest,
+                frame_bundle_root=args.frame_bundle_root,
+                video_root=args.video_root,
+                output_dir=args.output_dir,
+                retrieval_output_dir=args.retrieval_output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-infra-calibration":
+            from .simulator import verify_simulator_calibration
+
+            payload = verify_simulator_calibration(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-retrieval-cohort":
+            from .simulator import build_simulator_retrieval_cohort
+
+            payload = build_simulator_retrieval_cohort(
+                args.config,
+                args.representation_manifest,
+                answer_observations_path=args.answer_observations,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-retrieval-cohort":
+            from .simulator import verify_simulator_retrieval
+
+            payload = verify_simulator_retrieval(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-flowmesh-infra-evidence":
+            from .simulator import build_simulator_evidence_bundle
+
+            payload = build_simulator_evidence_bundle(
+                args.spec,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-infra-evidence":
+            from .simulator import verify_simulator_evidence_bundle
+
+            payload = verify_simulator_evidence_bundle(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "fit-flowmesh-infra-scenario":
+            from .simulator import fit_simulator_scenario
+
+            payload = fit_simulator_scenario(
+                args.scenario,
+                args.evidence_dir,
+                output_scenario_id=args.output_scenario_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-infra-fit":
+            from .simulator import verify_simulator_fit
+
+            payload = verify_simulator_fit(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-portable-execution-plan":
+            from .simulator import build_portable_execution_plan
+
+            payload = build_portable_execution_plan(
+                args.scenario,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-portable-execution-plan":
+            from .simulator import verify_portable_execution_plan
+
+            payload = verify_portable_execution_plan(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-container-simulation":
+            from .simulator import plan_container_backend
+
+            payload = plan_container_backend(
+                args.scenario,
+                args.portable_plan_dir,
+                args.container_spec,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-container-simulation-plan":
+            from .simulator import verify_container_backend_plan
+
+            payload = verify_container_backend_plan(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-local-container-compose":
+            from .simulator import build_local_container_compose
+
+            payload = build_local_container_compose(
+                args.container_plan_dir,
+                output_dir=args.output_dir,
+                host_port_base=args.host_port_base,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-local-container-compose":
+            from .simulator import verify_local_container_compose
+
+            payload = verify_local_container_compose(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "preflight-local-container-host":
+            from .simulator import preflight_local_container_host
+
+            payload = preflight_local_container_host()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "serve-container-node":
+            from .simulator import serve_container_node
+
+            serve_container_node(
+                args.node_id,
+                args.state_dir,
+                host=args.host,
+                port=args.port,
+                max_operation_bytes=args.max_operation_bytes,
+            )
+            return 0
+        if args.command == "run-local-container-simulation":
+            from .simulator import execute_local_container_plan
+
+            payload = execute_local_container_plan(
+                args.compose_package_dir,
+                args.portable_plan_dir,
+                output_dir=args.output_dir,
+                trial_limit=args.trial_limit,
+                trial_key=args.trial_key,
+                max_concurrency=args.max_concurrency,
+                request_timeout_seconds=args.request_timeout,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-local-container-simulation":
+            from .simulator import verify_container_execution
+
+            payload = verify_container_execution(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "evaluate-backend-parity":
+            from .simulator import evaluate_backend_parity
+
+            payload = evaluate_backend_parity(
+                args.portable_plan_dir,
+                args.reference_records,
+                args.candidate_records,
+                reference_label=args.reference_label,
+                candidate_label=args.candidate_label,
+                output_dir=args.output_dir,
+                comparison_scope=args.comparison_scope,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-backend-parity":
+            from .simulator import verify_backend_parity
+
+            payload = verify_backend_parity(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "calibrate-container-backend":
+            from .simulator import calibrate_container_backend
+
+            payload = calibrate_container_backend(
+                args.scenario,
+                args.portable_plan_dir,
+                args.reference_run_dir,
+                args.container_run_dir,
+                output_scenario_id=args.output_scenario_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-container-backend-calibration":
+            from .simulator import verify_container_backend_calibration
+
+            payload = verify_container_backend_calibration(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
         if args.command == "evaluate-distributed-pilot":
             from .evaluation import evaluate_distributed_pilot
 

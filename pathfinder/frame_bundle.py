@@ -33,7 +33,7 @@ import tarfile
 from dataclasses import dataclass
 from hashlib import sha256
 from importlib import metadata
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from tempfile import mkdtemp
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
@@ -114,10 +114,20 @@ def _contained(root: Path, candidate: str, label: str) -> Path:
         isinstance(candidate, str) and candidate.strip(),
         f"{label} must be a non-empty string",
     )
-    raw = Path(candidate)
-    _require(not raw.is_absolute(), f"{label} must be relative: {candidate}")
+    # Validate both portable path dialects rather than only the host dialect.
+    # For example, Path("/etc/passwd").is_absolute() is false on Windows,
+    # while a drive-qualified or UNC path can be misleading on POSIX.
+    posix_path = PurePosixPath(candidate)
+    windows_path = PureWindowsPath(candidate)
     _require(
-        ".." not in raw.parts,
+        not posix_path.is_absolute()
+        and not windows_path.is_absolute()
+        and not windows_path.drive,
+        f"{label} must be relative: {candidate}",
+    )
+    raw = Path(candidate)
+    _require(
+        ".." not in posix_path.parts and ".." not in windows_path.parts,
         f"{label} must not traverse upwards: {candidate}",
     )
     resolved = (root / raw).resolve()

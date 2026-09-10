@@ -1,0 +1,71 @@
+{
+  "schema_version": "pathfinder.simulator-retrieval-config/v1alpha1",
+  "retrieval_id": "pathfinderbench-existing-36-w4-development-v1",
+  "candidate_corpus": "all-representation-manifest-objects",
+  "independent_unit": "source-object-group",
+  "annotation_status": "ai-drafted-requires-operator-verification",
+  "index": {
+    "kind": "bm25-lexical-v1",
+    "k1": 1.2,
+    "b": 0.75,
+    "top_k": [1, 5]
+  },
+  "queries": [
+    {
+      "query_id": "w4-musicians-woman-guitar",
+      "query_text": "Find the video where two musicians perform while a woman approaches a guitarist.",
+      "relevant_object_ids": ["nextqa-val-4010069381"],
+      "source_object_group": "nextqa-val-4010069381",
+      "split": "train"
+    },
+    {
+      "query_id": "w4-human-pyramid-collapse",
+      "query_text": "Find the video where people form a human pyramid in the ocean and then fall into the water.",
+      "relevant_object_ids": ["nextqa-val-2793260225"],
+      "source_object_group": "nextqa-val-2793260225",
+      "split": "train"
+    },
+    {
+      "query_id": "w4-newborn-bottle-hospital",
+      "query_text": "Find the video where a woman feeds a newborn from a small bottle in a hospital.",
+      "relevant_object_ids": ["nextqa-val-6329077812"],
+      "source_object_group": "nextqa-val-6329077812",
+      "split": "train"
+    },
+    {
+      "query_id": "w4-toddler-drum-controller",
+      "query_text": "Find the video where a toddler plays a drum controller while adults use guitar controllers.",
+      "relevant_object_ids": ["nextqa-val-6582763207"],
+      "source_object_group": "nextqa-val-6582763207",
+      "split": "train"
+    },
+    {
+      "query_id": "w4-stroller-yellow-slide",
+      "query_text": "Find the video where a toddler pushes a toy stroller and later uses a yellow slide.",
+      "relevant_object_ids": ["nextqa-val-6136926089"],
+      "source_object_group": "nextqa-val-6136926089",
+      "split": "train"
+    },
+    {
+      "query_id": "w4-child-toy-trains",
+      "query_text": "Find the video showing a child lying near a line of colorful wooden toy trains.",
+      "relevant_object_ids": ["nextqa-val-6793786769"],
+      "source_object_group": "nextqa-val-6793786769",
+      "split": "validation"
+    },
+    {
+      "query_id": "w4-baby-watches-train",
+      "query_text": "Find the video where a baby in a stroller watches a silver train pass behind a fence.",
+      "relevant_object_ids": ["nextqa-val-3550839192"],
+      "source_object_group": "nextqa-val-3550839192",
+      "split": "test"
+    },
+    {
+      "query_id": "w4-elephant-soccer-ball",
+      "query_text": "Find the video where an elephant kicks a soccer ball toward a goal.",
+      "relevant_object_ids": ["nextqa-val-4984417707"],
+      "source_object_group": "nextqa-val-4984417707",
+      "split": "test"
+    }
+  ]
+}
