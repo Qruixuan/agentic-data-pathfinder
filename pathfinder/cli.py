@@ -31,6 +31,32 @@ DEFAULT_DATA_AGENT_OPERATION_DB = Path(
 )
 
 
+def _node_api_url_mapping(values: Sequence[str]) -> dict[str, str]:
+    """Parse repeatable ``NODE_ID=URL`` command-line bindings.
+
+    A mapping is used instead of a positional URL list so a local reverse
+    tunnel cannot accidentally be associated with a different simulated node.
+    This function validates only the unambiguous command-line shape; the
+    container-DAG planner performs the stricter URL and operation checks.
+    """
+
+    bindings: dict[str, str] = {}
+    for raw in values:
+        node_id, separator, url = raw.partition("=")
+        if not separator or not node_id.strip() or not url.strip():
+            raise ConfigError(
+                "--node-api-url must have the form NODE_ID=http://host:port"
+            )
+        if node_id.strip() in bindings:
+            raise ConfigError(
+                f"duplicate --node-api-url binding for {node_id.strip()}"
+            )
+        bindings[node_id.strip()] = url.strip()
+    if not bindings:
+        raise ConfigError("at least one --node-api-url binding is required")
+    return bindings
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pathfinder",
@@ -1342,6 +1368,78 @@ def _parser() -> argparse.ArgumentParser:
     verify_container_run.add_argument("--output-dir", type=Path, required=True)
     verify_container_run.add_argument("--compact", action="store_true")
 
+    flowmesh_container_dag_candidates = subcommands.add_parser(
+        "list-flowmesh-container-dag-candidates",
+        help=(
+            "list exact frozen read-transfer-compute chains that are safe "
+            "to pin as a small FlowMesh container DAG"
+        ),
+    )
+    flowmesh_container_dag_candidates.add_argument(
+        "--container-operations", type=Path, required=True
+    )
+    flowmesh_container_dag_candidates.add_argument(
+        "--compact", action="store_true"
+    )
+
+    flowmesh_container_dag_plan = subcommands.add_parser(
+        "plan-flowmesh-container-dag",
+        help=(
+            "freeze one existing storage-read, network-transfer, compute "
+            "container chain as a non-submitting FlowMesh DAG input package"
+        ),
+    )
+    flowmesh_container_dag_plan.add_argument(
+        "--container-operations", type=Path, required=True
+    )
+    flowmesh_container_dag_plan.add_argument(
+        "--node-api-url",
+        action="append",
+        required=True,
+        help=(
+            "repeat NODE_ID=http://host:port for every selected execution "
+            "node; use a separate reverse tunnel for each remote local node"
+        ),
+    )
+    flowmesh_container_dag_plan.add_argument("--worker-alias", required=True)
+    flowmesh_container_dag_plan.add_argument("--smoke-id", required=True)
+    flowmesh_container_dag_plan.add_argument("--trial-key")
+    flowmesh_container_dag_plan.add_argument("--owner", default="pathfinder")
+    flowmesh_container_dag_plan.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    flowmesh_container_dag_plan.add_argument("--compact", action="store_true")
+
+    verify_flowmesh_container_dag_plan = subcommands.add_parser(
+        "verify-flowmesh-container-dag-plan",
+        help="verify a frozen non-submitting FlowMesh container-DAG package",
+    )
+    verify_flowmesh_container_dag_plan.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    verify_flowmesh_container_dag_plan.add_argument(
+        "--compact", action="store_true"
+    )
+
+    flowmesh_container_dag_run = subcommands.add_parser(
+        "run-flowmesh-container-dag",
+        help=(
+            "validate, submit, and verify one three-node FlowMesh "
+            "container-operation DAG against already-running services"
+        ),
+    )
+    flowmesh_container_dag_run.add_argument("--plan-dir", type=Path, required=True)
+    flowmesh_container_dag_run.add_argument("--output-dir", type=Path, required=True)
+    flowmesh_container_dag_run.add_argument("--worker-alias", required=True)
+    flowmesh_container_dag_run.add_argument("--flowmesh-base-url")
+    flowmesh_container_dag_run.add_argument(
+        "--task-timeout", type=int, default=600
+    )
+    flowmesh_container_dag_run.add_argument(
+        "--poll-interval", type=float, default=2.0
+    )
+    flowmesh_container_dag_run.add_argument("--compact", action="store_true")
+
     parity = subcommands.add_parser(
         "evaluate-backend-parity",
         help=(
@@ -1603,6 +1701,75 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .simulator import verify_container_execution
 
             payload = verify_container_execution(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "list-flowmesh-container-dag-candidates":
+            from .integrations.flowmesh.container_dag import (
+                list_linear_container_operation_dag_candidates,
+                load_container_operations,
+            )
+
+            candidates = list_linear_container_operation_dag_candidates(
+                load_container_operations(args.container_operations)
+            )
+            payload = {
+                "status": "COMPLETE",
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+                "workflow_submitted": False,
+                "services_started": False,
+                "eligible_for_scientific_claims": False,
+            }
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-flowmesh-container-dag":
+            from .integrations.flowmesh.container_dag import (
+                plan_flowmesh_container_operation_dag,
+            )
+
+            payload = plan_flowmesh_container_operation_dag(
+                container_operations_path=args.container_operations,
+                node_api_urls=_node_api_url_mapping(args.node_api_url),
+                worker_alias=args.worker_alias,
+                smoke_id=args.smoke_id,
+                trial_key=args.trial_key,
+                owner=args.owner,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-dag-plan":
+            from .integrations.flowmesh.container_dag import (
+                verify_flowmesh_container_operation_dag_plan,
+            )
+
+            payload = verify_flowmesh_container_operation_dag_plan(
+                args.plan_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-flowmesh-container-dag":
+            from .integrations.flowmesh import (
+                FlowMeshSettings,
+                SdkFlowMeshClient,
+            )
+            from .integrations.flowmesh.container_dag import (
+                run_flowmesh_container_operation_dag,
+            )
+
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=args.worker_alias,
+                validate_before_submit=True,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_container_operation_dag(
+                    plan_dir=args.plan_dir,
+                    output_dir=args.output_dir,
+                    client=client,
+                    settings=settings,
+                )
+            finally:
+                client.close()
             return _print_payload(payload, compact=args.compact)
         if args.command == "evaluate-backend-parity":
             from .simulator import evaluate_backend_parity
