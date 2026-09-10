@@ -143,15 +143,43 @@ def _validate_operation(value: Mapping[str, Any]) -> dict[str, Any]:
         and all(isinstance(item, str) and item for item in dependencies),
         "dependency_operation_keys must be a list of non-empty strings",
     )
-    _require(
-        operation.get("condition") is None,
-        "conditional container operations are not valid for a linear DAG smoke",
-    )
+    condition = operation.get("condition")
+    if condition is not None:
+        # A conditional operation is a legitimate part of a frozen ledger --
+        # it is one side of a cache hit/miss branch. It is validated here like
+        # any other row; whether it may be *selected* into a smoke chain is a
+        # separate question, answered in the selection functions below.
+        _require(
+            isinstance(condition, Mapping),
+            "container operation condition must be an object or null",
+        )
+        _text(condition.get("cache_operation_key"), "condition.cache_operation_key")
+        _text(condition.get("cache_operation_id"), "condition.cache_operation_id")
+        _require(
+            condition.get("equals") in ("hit", "miss"),
+            "condition.equals must be hit or miss",
+        )
     return operation
 
 
+def _is_unconditional(operation: Mapping[str, Any]) -> bool:
+    """Whether an operation runs unconditionally within its trial.
+
+    The three-node smoke measures one deterministic physical path. An
+    operation gated on a cache hit or miss may simply not run, so it can never
+    be part of that path -- but its presence in the ledger is not an error.
+    """
+    return operation.get("condition") is None
+
+
 def load_container_operations(path: str | Path) -> list[dict[str, Any]]:
-    """Load and validate one frozen ``container_operations.jsonl`` file."""
+    """Load and structurally validate a frozen ``container_operations.jsonl``.
+
+    Every row is validated, including conditional cache-branch rows: a full
+    frozen ledger legitimately contains them, so rejecting the file because it
+    is complete would be wrong. The "must be unconditional" rule belongs to
+    chain selection, not to loading.
+    """
 
     source = Path(path).resolve()
     try:
@@ -192,6 +220,12 @@ def select_linear_container_operation_dag(
     Refusing ambiguity is intentional: the smoke needs a small, inspectable
     dependency graph rather than silently choosing a path through a cache
     branch or a multi-parent operation.
+
+    Conditional operations are skipped as chain members, not treated as an
+    error in the ledger. They stay in ``by_key`` so dependency resolution
+    still sees the complete graph: a chain must be refused because a real
+    predecessor exists, never accepted because that predecessor was filtered
+    out of view.
     """
 
     checked = [_validate_operation(row) for row in operations]
@@ -200,6 +234,8 @@ def select_linear_container_operation_dag(
     candidates: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
     for read in checked:
         if read["operation_kind"] != "storage_read":
+            continue
+        if not _is_unconditional(read):
             continue
         if trial_key is not None and read["trial_key"] != trial_key:
             continue
@@ -220,9 +256,19 @@ def select_linear_container_operation_dag(
             if item is not None
         ):
             continue
+        # An omitted predecessor must also be unconditional. A conditional
+        # scheduling marker means the chain itself is reachable only on one
+        # branch, which is exactly the ambiguity this smoke refuses.
+        if any(
+            not _is_unconditional(item)
+            for item in read_predecessors
+            if item is not None
+        ):
+            continue
         for transfer in checked:
             if (
                 transfer["operation_kind"] != "network_transfer"
+                or not _is_unconditional(transfer)
                 or transfer["trial_key"] != read["trial_key"]
                 or transfer["dependency_operation_keys"] != [read["operation_key"]]
             ):
@@ -230,6 +276,7 @@ def select_linear_container_operation_dag(
             for compute in checked:
                 if (
                     compute["operation_kind"] != "compute"
+                    or not _is_unconditional(compute)
                     or compute["trial_key"] != read["trial_key"]
                     or compute["dependency_operation_keys"]
                     != [transfer["operation_key"]]
@@ -271,6 +318,10 @@ def list_linear_container_operation_dag_candidates(
 
     The response is intentionally small enough to make an operator pin one
     workload/trial before submitting anything to FlowMesh.
+
+    A trial whose only read/transfer/compute path runs behind a cache
+    condition simply yields no candidate; it is not an error, and it does not
+    prevent other trials in the same ledger from being listed.
     """
 
     checked = [_validate_operation(row) for row in operations]
@@ -512,6 +563,12 @@ def _read_plan(plan_dir: str | Path) -> dict[str, Any]:
     _require(isinstance(operations, list), "container DAG plan operations are missing")
     selected = tuple(_validate_operation(row) for row in operations)
     _require(len(selected) == 3, "container DAG plan must contain exactly three operations")
+    # Selection can no longer produce one, but a plan is a file on disk that
+    # may have been written by an older or edited toolchain.
+    _require(
+        all(_is_unconditional(row) for row in selected),
+        "container DAG plan contains a conditional operation",
+    )
     _require(
         tuple(row["operation_kind"] for row in selected) == _STEP_KINDS,
         "container DAG plan operation kinds changed",

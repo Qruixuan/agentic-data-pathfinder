@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from pathfinder.integrations.flowmesh.container_dag import (
     FlowMeshContainerDagError,
+    _document_sha256,
     build_flowmesh_container_operation_workflow,
     list_linear_container_operation_dag_candidates,
     plan_flowmesh_container_operation_dag,
@@ -35,6 +36,7 @@ def _operation(
     *,
     trial_key: str = "smoke-trial",
     logical_bytes: int = 4096,
+    condition: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": CONTAINER_OPERATION_SCHEMA_VERSION,
@@ -45,7 +47,7 @@ def _operation(
         "operation_id": key.rsplit("|", 1)[-1],
         "operation_kind": kind,
         "dependency_operation_keys": dependencies,
-        "condition": None,
+        "condition": condition,
         "object_id": "fixture-001",
         "representation_id": "raw_video",
         "logical_bytes": logical_bytes,
@@ -79,6 +81,247 @@ def _chain() -> list[dict[str, Any]]:
         logical_bytes=0,
     )
     return [read, transfer, compute]
+
+
+def _condition(cache_key: str, equals: str = "hit") -> dict[str, Any]:
+    """A cache hit/miss gate, in the frozen ledger's exact shape."""
+    return {
+        "cache_operation_key": cache_key,
+        "cache_operation_id": cache_key.rsplit("|", 1)[-1],
+        "equals": equals,
+    }
+
+
+def _cache_branch(trial_key: str, *, suffix: str = "") -> list[dict[str, Any]]:
+    """A conditional cache-branch path, as a real D3/D7 trial contains.
+
+    Structurally this is a complete read -> transfer chain; the only thing
+    disqualifying it from a smoke is that every member is gated on a cache
+    lookup result.
+    """
+    lookup = f"{trial_key}|lookup{suffix}"
+    gate = _condition(lookup, "hit")
+    read = _operation(
+        f"{trial_key}|read-local{suffix}",
+        "storage_read",
+        "N5",
+        [lookup],
+        trial_key=trial_key,
+        condition=gate,
+    )
+    transfer = _operation(
+        f"{trial_key}|transfer-remote{suffix}",
+        "network_transfer",
+        "N5",
+        [read["operation_key"]],
+        trial_key=trial_key,
+        condition=gate,
+    )
+    compute = _operation(
+        f"{trial_key}|decode-cached{suffix}",
+        "compute",
+        "N7",
+        [transfer["operation_key"]],
+        trial_key=trial_key,
+        logical_bytes=0,
+        condition=gate,
+    )
+    lookup_row = _operation(
+        lookup, "cache_read", "N5", [], trial_key=trial_key, logical_bytes=0
+    )
+    return [lookup_row, read, transfer, compute]
+
+
+class ConditionalLedgerTest(unittest.TestCase):
+    """A full frozen ledger legitimately contains cache-branch operations.
+
+    Rejecting the whole file because it is complete was the bug. These tests
+    pin the corrected boundary: structural validation applies to every row,
+    while "must be unconditional" applies only to chain selection.
+    """
+
+    def test_a_conditional_branch_beside_a_valid_chain_is_ignored(self) -> None:
+        ledger = _chain() + _cache_branch("cached-trial")
+        read, transfer, compute = select_linear_container_operation_dag(ledger)
+        self.assertEqual("smoke-trial|read", read["operation_key"])
+        self.assertEqual("smoke-trial|transfer", transfer["operation_key"])
+        self.assertEqual("smoke-trial|compute", compute["operation_key"])
+        for row in (read, transfer, compute):
+            self.assertIsNone(row["condition"])
+
+    def test_candidates_list_the_unconditional_trial_only(self) -> None:
+        ledger = _chain() + _cache_branch("cached-trial")
+        candidates = list_linear_container_operation_dag_candidates(ledger)
+        self.assertEqual(
+            ["smoke-trial"], [item["trial_key"] for item in candidates]
+        )
+        self.assertEqual(
+            ["storage_read", "network_transfer", "compute"],
+            candidates[0]["operation_kinds"],
+        )
+
+    def test_a_ledger_of_only_conditional_chains_yields_no_candidate(
+        self,
+    ) -> None:
+        ledger = _cache_branch("cached-trial") + _cache_branch("other-trial")
+        self.assertEqual(
+            [], list_linear_container_operation_dag_candidates(ledger)
+        )
+
+    def test_only_conditional_chains_refuse_planning_clearly(self) -> None:
+        ledger = _cache_branch("cached-trial")
+        with self.assertRaises(FlowMeshContainerDagError) as context:
+            select_linear_container_operation_dag(ledger)
+        self.assertIn("unconditional", str(context.exception))
+
+    def test_a_conditional_member_is_never_selected(self) -> None:
+        # Each member in turn is gated; every case must refuse rather than
+        # silently fall back to the conditional operation.
+        gate = _condition("smoke-trial|lookup")
+        for index, name in enumerate(("read", "transfer", "compute")):
+            with self.subTest(conditional_member=name):
+                ledger = _chain()
+                ledger[index] = dict(ledger[index], condition=gate)
+                with self.assertRaises(FlowMeshContainerDagError):
+                    select_linear_container_operation_dag(ledger)
+
+    def test_a_conditional_omitted_predecessor_disqualifies_the_chain(
+        self,
+    ) -> None:
+        # The read's predecessor is non-physical and would normally just be
+        # disclosed as omitted -- but a conditional marker means the chain
+        # itself only exists on one branch.
+        gate = _condition("smoke-trial|lookup")
+        marker = _operation(
+            "smoke-trial|schedule",
+            "control",
+            "N1",
+            [],
+            logical_bytes=0,
+            condition=gate,
+        )
+        ledger = _chain()
+        ledger[0] = dict(ledger[0], dependency_operation_keys=[marker["operation_key"]])
+        with self.assertRaises(FlowMeshContainerDagError):
+            select_linear_container_operation_dag(ledger + [marker])
+
+    def test_a_conditional_row_still_gets_structural_validation(self) -> None:
+        for broken, reason in (
+            ({"cache_operation_key": "k", "cache_operation_id": "i",
+              "equals": "maybe"}, "hit or miss"),
+            ({"cache_operation_id": "i", "equals": "hit"},
+             "cache_operation_key"),
+            ("hit", "must be an object or null"),
+        ):
+            with self.subTest(condition=broken):
+                ledger = _chain() + [
+                    _operation(
+                        "cached-trial|read-local",
+                        "storage_read",
+                        "N5",
+                        [],
+                        trial_key="cached-trial",
+                        condition=broken,  # type: ignore[arg-type]
+                    )
+                ]
+                with self.assertRaises(FlowMeshContainerDagError) as context:
+                    select_linear_container_operation_dag(ledger)
+                self.assertIn(reason, str(context.exception))
+
+    def test_planning_from_a_mixed_ledger_binds_the_full_source_hash(
+        self,
+    ) -> None:
+        ledger = _chain() + _cache_branch("cached-trial")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "container_operations.jsonl"
+            source.write_text(
+                "".join(json.dumps(row, sort_keys=True) + "\n" for row in ledger),
+                encoding="utf-8",
+            )
+            payload = plan_flowmesh_container_operation_dag(
+                container_operations_path=source,
+                node_api_urls={
+                    "N3": "http://127.0.0.1:19083",
+                    "N7": "http://127.0.0.1:19087",
+                    "N6": "http://127.0.0.1:19086",
+                },
+                worker_alias="fixture-alias",
+                smoke_id="mixed-ledger-smoke",
+                output_dir=root / "plan",
+            )
+            self.assertEqual("FROZEN_WORKFLOW_INPUTS", payload["status"])
+            self.assertEqual("smoke-trial", payload["trial_key"])
+            plan = json.loads(
+                (root / "plan" / "flowmesh-container-dag-plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            # Provenance binds to the intact ledger, conditional rows included,
+            # not to a filtered subset.
+            import hashlib
+
+            self.assertEqual(
+                hashlib.sha256(source.read_bytes()).hexdigest(),
+                plan["container_operations_source_sha256"],
+            )
+            self.assertTrue(
+                all(row["condition"] is None for row in plan["operations"])
+            )
+            self.assertEqual(
+                "VERIFIED",
+                verify_flowmesh_container_operation_dag_plan(
+                    root / "plan"
+                )["status"],
+            )
+
+    def test_a_hand_edited_conditional_plan_fails_verification(self) -> None:
+        ledger = _chain()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "container_operations.jsonl"
+            source.write_text(
+                "".join(json.dumps(row, sort_keys=True) + "\n" for row in ledger),
+                encoding="utf-8",
+            )
+            plan_flowmesh_container_operation_dag(
+                container_operations_path=source,
+                node_api_urls={
+                    "N3": "http://127.0.0.1:19083",
+                    "N7": "http://127.0.0.1:19087",
+                    "N6": "http://127.0.0.1:19086",
+                },
+                worker_alias="fixture-alias",
+                smoke_id="edited-plan",
+                output_dir=root / "plan",
+            )
+            path = root / "plan" / "flowmesh-container-dag-plan.json"
+            plan = json.loads(path.read_text(encoding="utf-8"))
+            plan["operations"][0]["condition"] = _condition("smoke-trial|lookup")
+            # Re-stamp the plan's own self-digest as well, so the forged plan
+            # is internally consistent and only the conditional guard can
+            # reject it.
+            plan["plan_sha256"] = _document_sha256(plan, "plan_sha256")
+            body = json.dumps(
+                plan, indent=2, sort_keys=True, ensure_ascii=False
+            ).encode("utf-8") + b"\n"
+            path.write_bytes(body)
+            # Re-stamp the checksum file, otherwise the digest check fires
+            # first and this proves nothing about the conditional guard.
+            import hashlib
+
+            sums = root / "plan" / "SHA256SUMS"
+            rows = []
+            for line in sums.read_text(encoding="utf-8").splitlines():
+                digest, _, name = line.partition("  ")
+                if name == path.name:
+                    digest = hashlib.sha256(body).hexdigest()
+                rows.append(f"{digest}  {name}")
+            sums.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+            with self.assertRaises(FlowMeshContainerDagError) as context:
+                verify_flowmesh_container_operation_dag_plan(root / "plan")
+            self.assertIn("conditional operation", str(context.exception))
 
 
 class FakeFlowMeshClient:
