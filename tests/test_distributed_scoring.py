@@ -11,6 +11,7 @@ from pathfinder.config import load_config
 from pathfinder.cli import main
 from pathfinder.distributed import (
     ACCEPTED_SUBSTRING_SCORING_RULE,
+    MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
     MULTIPLE_CHOICE_EXACT_SCORING_RULE,
     FlowMeshDistributedSessionExecutor,
     TrialExecution,
@@ -86,6 +87,19 @@ class DistributedScoringTest(unittest.TestCase):
         self.assertTrue(rendered.endswith(
             "Return exactly one option ID and no other text."
         ))
+
+    def test_canonical_option_marker_rule_accepts_only_one_explicit_marker(self) -> None:
+        contract = load_workload_scoring_contract(
+            exact_workload(), MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE
+        )
+        for answer in ("B", " [B] ", "(B)", "［B］", "（B）"):
+            with self.subTest(answer=answer):
+                self.assertIs(True, evaluate_workload_answer(answer, contract))
+        for answer in ("b", "B.", "The answer is B", "[A] or [B]", "[B].", ""):
+            with self.subTest(answer=answer):
+                self.assertIs(False, evaluate_workload_answer(answer, contract))
+        rendered = render_workload_question(exact_workload(), contract)
+        self.assertIn("C or [C] are accepted", rendered)
 
     def test_malformed_exact_labels_fail_closed(self) -> None:
         cases = (

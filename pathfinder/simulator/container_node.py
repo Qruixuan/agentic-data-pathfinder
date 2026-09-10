@@ -1,10 +1,12 @@
 """Small standard-library node service for local container emulation.
 
-The service executes infrastructure operations only.  It never evaluates a
-video answer and reports that semantic quality is unavailable.  Synthetic
-payloads are deterministic, size preserving, bounded, and written beneath a
-dedicated state directory so local smoke tests exercise real file reads and
-HTTP byte transfer without requiring the benchmark dataset or an LLM.
+By default, a node executes infrastructure operations only and reports that
+semantic quality is unavailable.  An explicitly enabled semantic endpoint can
+be added to one executor node; it obtains all LLM configuration at runtime and
+never writes a prompt or credential to the node result.  Synthetic payloads
+remain deterministic, size preserving, bounded, and written beneath a
+dedicated state directory so infrastructure tests need neither a benchmark
+dataset nor an LLM.
 """
 
 from __future__ import annotations
@@ -20,9 +22,11 @@ import time
 import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.request import Request, urlopen
 
 from .container_contract import CONTAINER_OPERATION_SCHEMA_VERSION
 
@@ -31,9 +35,16 @@ CONTAINER_NODE_API_VERSION = "pathfinder.container-node/v1alpha1"
 CONTAINER_NODE_RESULT_SCHEMA_VERSION = (
     "pathfinder.container-node-operation-result/v1alpha1"
 )
+CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION = (
+    "pathfinder.container-node-semantic-request/v1alpha1"
+)
+CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION = (
+    "pathfinder.container-node-semantic-result/v1alpha1"
+)
 
 _CHUNK_BYTES = 64 * 1024
 _MAX_JSON_BYTES = 2 * 1024 * 1024
+_MAX_SEMANTIC_PROMPT_BYTES = 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -128,6 +139,9 @@ class ContainerNodeRuntime:
         *,
         max_operation_bytes: int = 1024 * 1024 * 1024,
         transfer_port: int = 9080,
+        enable_semantic_llm: bool = False,
+        semantic_artifact_root: str | Path | None = None,
+        semantic_allowed_source_containers: tuple[str, ...] = (),
     ) -> None:
         self.node_id = _text(node_id, "node_id")
         self.state_dir = Path(state_dir).resolve()
@@ -139,6 +153,29 @@ class ContainerNodeRuntime:
         _require(self.max_operation_bytes > 0, "max_operation_bytes must be positive")
         self.transfer_port = _integer(transfer_port, "transfer_port")
         _require(0 < self.transfer_port <= 65535, "transfer_port is invalid")
+        _require(
+            type(enable_semantic_llm) is bool,
+            "enable_semantic_llm must be a boolean",
+        )
+        self.enable_semantic_llm = enable_semantic_llm
+        if semantic_artifact_root is None:
+            self.semantic_artifact_root: Path | None = None
+        else:
+            artifact_root = Path(semantic_artifact_root).resolve()
+            _require(
+                artifact_root.is_dir(),
+                "semantic artifact root must be a directory",
+            )
+            self.semantic_artifact_root = artifact_root
+        self.semantic_allowed_source_containers = frozenset(
+            _text(value, "semantic allowed source container")
+            for value in semantic_allowed_source_containers
+        )
+        _require(
+            len(self.semantic_allowed_source_containers)
+            == len(semantic_allowed_source_containers),
+            "semantic allowed source containers contain duplicates",
+        )
         self.runtime_epoch = uuid.uuid4().hex
         self._caches: dict[str, _CacheState] = {}
         self._lock = threading.RLock()
@@ -146,15 +183,393 @@ class ContainerNodeRuntime:
         self._operation_request_sha256: dict[str, str] = {}
         self._operations_in_flight: set[str] = set()
         self._operation_results: dict[str, dict[str, Any]] = {}
+        self._semantic_request_sha256: dict[str, str] = {}
+        self._semantic_requests_in_flight: set[str] = set()
+        self._semantic_results: dict[str, dict[str, Any]] = {}
 
     def health(self) -> dict[str, Any]:
+        configured = all(
+            isinstance(os.environ.get(name), str)
+            and bool(os.environ[name].strip())
+            for name in (
+                "PATHFINDER_SEMANTIC_LLM_BASE_URL",
+                "PATHFINDER_SEMANTIC_LLM_MODEL",
+                "PATHFINDER_SEMANTIC_LLM_API_KEY",
+            )
+        )
         return {
             "api_version": CONTAINER_NODE_API_VERSION,
             "status": "ok",
             "node_id": self.node_id,
             "runtime_epoch": self.runtime_epoch,
             "payload_mode": "deterministic-size-preserving-fixture",
-            "semantic_quality_enabled": False,
+            "semantic_quality_enabled": self.enable_semantic_llm,
+            "semantic_llm_configured": configured,
+            "semantic_artifact_serving": self.semantic_artifact_root is not None,
+            "credentials_recorded": False,
+        }
+
+    def _semantic_artifact_path(self, relative_path: str) -> Path:
+        _require(
+            self.semantic_artifact_root is not None,
+            "semantic artifact endpoint is disabled on this node",
+        )
+        relative = PurePosixPath(
+            _text(relative_path, "representation_path").replace("\\", "/")
+        )
+        _require(not relative.is_absolute(), "representation_path must be relative")
+        _require(
+            ".." not in relative.parts and "." not in relative.parts and bool(relative.parts),
+            "representation_path escapes artifact root",
+        )
+        _require(
+            relative.suffix in {".txt", ".json"},
+            "semantic artifact must be a UTF-8 text representation",
+        )
+        candidate = (self.semantic_artifact_root / Path(*relative.parts)).resolve()
+        try:
+            candidate.relative_to(self.semantic_artifact_root)
+        except ValueError as exc:
+            raise ContainerNodeError("representation_path escapes artifact root") from exc
+        _require(candidate.is_file(), "semantic representation does not exist")
+        _require(
+            candidate.stat().st_size <= _MAX_SEMANTIC_PROMPT_BYTES,
+            "semantic representation exceeds the local safety limit",
+        )
+        return candidate
+
+    def read_semantic_representation(self, relative_path: str) -> tuple[bytes, str]:
+        """Read one bounded immutable text representation for an allowed peer."""
+
+        path = self._semantic_artifact_path(relative_path)
+        try:
+            payload = path.read_bytes()
+            payload.decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ContainerNodeError("semantic representation is not readable UTF-8") from exc
+        _require(bool(payload), "semantic representation is empty")
+        return payload, hashlib.sha256(payload).hexdigest()
+
+    def _fetch_semantic_representation(
+        self,
+        *,
+        source_container_url: str,
+        source_node_id: str,
+        relative_path: str,
+        expected_sha256: str,
+    ) -> tuple[bytes, str]:
+        parsed = urlsplit(_text(source_container_url, "source_container_url"))
+        _require(parsed.scheme == "http", "semantic source URL must use http")
+        _require(parsed.hostname is not None, "semantic source URL must name a container")
+        _require(parsed.path in ("", "/"), "semantic source URL must not include a path")
+        _require(
+            parsed.hostname in self.semantic_allowed_source_containers,
+            "semantic source container is not allowed for this executor",
+        )
+        _require(
+            parsed.port in (None, self.transfer_port),
+            "semantic source URL has an unexpected port",
+        )
+        _require(
+            _SHA256.fullmatch(expected_sha256) is not None,
+            "expected representation digest is invalid",
+        )
+        target = "/v1/semantic/representation/read?" + urlencode({"path": relative_path})
+        connection = http.client.HTTPConnection(
+            parsed.hostname,
+            parsed.port or self.transfer_port,
+            timeout=60,
+        )
+        try:
+            connection.request(
+                "GET",
+                target,
+                headers={"Accept": "application/octet-stream"},
+            )
+            response = connection.getresponse()
+            payload = response.read(_MAX_SEMANTIC_PROMPT_BYTES + 1)
+            _require(
+                response.status == 200,
+                f"semantic source returned HTTP {response.status}",
+            )
+            _require(
+                len(payload) <= _MAX_SEMANTIC_PROMPT_BYTES,
+                "semantic source payload is too large",
+            )
+            digest = response.getheader("X-Pathfinder-Representation-SHA256")
+            source = response.getheader("X-Pathfinder-Source-Node")
+            _require(digest == expected_sha256, "semantic source digest header changed")
+            _require(source == source_node_id, "semantic source node header changed")
+            _require(
+                hashlib.sha256(payload).hexdigest() == expected_sha256,
+                "semantic source payload digest changed",
+            )
+            payload.decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ContainerNodeError(
+                f"semantic source transfer failed: {type(exc).__name__}"
+            ) from exc
+        finally:
+            connection.close()
+        return payload, expected_sha256
+
+    @staticmethod
+    def build_semantic_prompt(
+        representation_id: str,
+        representation_text: str,
+        question: str,
+    ) -> str:
+        return (
+            "You are executing a controlled Pathfinder semantic task.\n"
+            "Use only the supplied precomputed representation. Do not use outside knowledge.\n\n"
+            f"Representation ID: {representation_id}\n"
+            "--- representation begins ---\n"
+            f"{representation_text}\n"
+            "--- representation ends ---\n\n"
+            f"{question}"
+        )
+
+    def _semantic_llm_configuration(self) -> tuple[str, str, str, float]:
+        _require(
+            self.enable_semantic_llm,
+            "semantic LLM endpoint is disabled on this node",
+        )
+        base_url = _text(
+            os.environ.get("PATHFINDER_SEMANTIC_LLM_BASE_URL"),
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL",
+        ).rstrip("/")
+        model = _text(
+            os.environ.get("PATHFINDER_SEMANTIC_LLM_MODEL"),
+            "PATHFINDER_SEMANTIC_LLM_MODEL",
+        )
+        api_key = _text(
+            os.environ.get("PATHFINDER_SEMANTIC_LLM_API_KEY"),
+            "PATHFINDER_SEMANTIC_LLM_API_KEY",
+        )
+        parsed = urlsplit(base_url)
+        _require(parsed.scheme in ("http", "https"), "LLM base URL must be HTTP(S)")
+        _require(parsed.hostname is not None, "LLM base URL must name a host")
+        _require(parsed.username is None and parsed.password is None, "LLM base URL must not embed credentials")
+        _require(
+            parsed.scheme == "https"
+            or parsed.hostname in {"127.0.0.1", "localhost", "::1"},
+            "non-local LLM base URL must use HTTPS",
+        )
+        raw_timeout = os.environ.get("PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS", "180")
+        try:
+            timeout = float(raw_timeout)
+        except ValueError as exc:
+            raise ContainerNodeError("semantic LLM timeout must be numeric") from exc
+        _require(timeout > 0.0, "semantic LLM timeout must be positive")
+        return base_url, model, api_key, timeout
+
+    def _call_semantic_llm(self, prompt: str) -> tuple[str, str]:
+        base_url, model, api_key, timeout = self._semantic_llm_configuration()
+        body = json.dumps(
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+            },
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            base_url + "/chat/completions",
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": "Bearer " + api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                raw = response.read(_MAX_JSON_BYTES + 1)
+        except HTTPError as exc:
+            raise ContainerNodeError(
+                f"semantic LLM request failed with HTTP {exc.code}"
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise ContainerNodeError(
+                f"semantic LLM request failed: {type(exc).__name__}"
+            ) from exc
+        _require(len(raw) <= _MAX_JSON_BYTES, "semantic LLM response is too large")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ContainerNodeError("semantic LLM response is not valid JSON") from exc
+        _require(isinstance(payload, Mapping), "semantic LLM response must be an object")
+        choices = payload.get("choices")
+        _require(isinstance(choices, list) and bool(choices), "semantic LLM response has no choices")
+        first = choices[0]
+        _require(isinstance(first, Mapping), "semantic LLM choice must be an object")
+        message = first.get("message")
+        _require(isinstance(message, Mapping), "semantic LLM choice has no message")
+        answer = message.get("content")
+        _require(isinstance(answer, str), "semantic LLM answer must be text")
+        return answer, model
+
+    def semantic_complete(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Run one idempotent, credential-free-recording semantic request.
+
+        Only the request digest and result are retained in node memory.  The
+        prompt and API credential are never written to a node result, ledger,
+        or health response.
+        """
+
+        _require(
+            request.get("schema_version")
+            == CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
+            "unsupported semantic request schema_version",
+        )
+        request_id = _text(request.get("semantic_request_id"), "semantic_request_id")
+        try:
+            request_bytes = json.dumps(
+                request,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ContainerNodeError("semantic request is not canonical JSON") from exc
+        request_sha256 = hashlib.sha256(request_bytes).hexdigest()
+
+        while True:
+            with self._operation_condition:
+                existing_sha256 = self._semantic_request_sha256.get(request_id)
+                _require(
+                    existing_sha256 in (None, request_sha256),
+                    "semantic_request_id was reused with different input",
+                )
+                completed = self._semantic_results.get(request_id)
+                if completed is not None:
+                    replay = dict(completed)
+                    replay["idempotent_replay"] = True
+                    return replay
+                if request_id not in self._semantic_requests_in_flight:
+                    self._semantic_request_sha256[request_id] = request_sha256
+                    self._semantic_requests_in_flight.add(request_id)
+                    break
+                self._operation_condition.wait()
+
+        try:
+            result = self._semantic_complete_once(request, request_sha256)
+        except BaseException:
+            with self._operation_condition:
+                self._semantic_requests_in_flight.discard(request_id)
+                self._operation_condition.notify_all()
+            raise
+        with self._operation_condition:
+            stored = dict(result)
+            stored["idempotent_replay"] = False
+            self._semantic_results[request_id] = stored
+            self._semantic_requests_in_flight.discard(request_id)
+            self._operation_condition.notify_all()
+            return dict(stored)
+
+    def _semantic_complete_once(
+        self,
+        request: Mapping[str, Any],
+        request_sha256: str,
+    ) -> dict[str, Any]:
+        _require(
+            request.get("execution_node_id") == self.node_id,
+            "semantic request is assigned to a different node",
+        )
+        request_id = _text(request.get("semantic_request_id"), "semantic_request_id")
+        representation_sha256 = _text(
+            request.get("representation_sha256"),
+            "representation_sha256",
+        )
+        _require(
+            _SHA256.fullmatch(representation_sha256) is not None,
+            "representation_sha256 must be lowercase SHA-256",
+        )
+        source_node_id: str | None = None
+        representation_delivery_bytes: int | None = None
+        if "prompt" in request:
+            _require(
+                "source_container_url" not in request,
+                "direct semantic prompt cannot name a source container",
+            )
+            prompt = _text(request.get("prompt"), "semantic prompt")
+            route_coupled = False
+        else:
+            source_node_id = _text(request.get("source_node_id"), "source_node_id")
+            source_container_url = _text(
+                request.get("source_container_url"),
+                "source_container_url",
+            )
+            representation_path = _text(
+                request.get("representation_path"),
+                "representation_path",
+            )
+            representation_id = _text(
+                request.get("representation_id"),
+                "representation_id",
+            )
+            question = _text(request.get("question"), "question")
+            payload, observed_sha256 = self._fetch_semantic_representation(
+                source_container_url=source_container_url,
+                source_node_id=source_node_id,
+                relative_path=representation_path,
+                expected_sha256=representation_sha256,
+            )
+            _require(
+                observed_sha256 == representation_sha256,
+                "semantic representation digest changed",
+            )
+            prompt = self.build_semantic_prompt(
+                representation_id,
+                payload.decode("utf-8"),
+                question,
+            )
+            route_coupled = True
+            representation_delivery_bytes = len(payload)
+        prompt_bytes = prompt.encode("utf-8")
+        _require(
+            len(prompt_bytes) <= _MAX_SEMANTIC_PROMPT_BYTES,
+            "semantic prompt exceeds the local safety limit",
+        )
+        prompt_sha256 = request.get("prompt_sha256")
+        if prompt_sha256 is None:
+            prompt_sha256 = hashlib.sha256(prompt_bytes).hexdigest()
+        prompt_sha256 = _text(prompt_sha256, "prompt_sha256")
+        _require(
+            _SHA256.fullmatch(prompt_sha256) is not None,
+            "prompt_sha256 must be lowercase SHA-256",
+        )
+        _require(
+            hashlib.sha256(prompt_bytes).hexdigest() == prompt_sha256,
+            "semantic prompt digest mismatch",
+        )
+        started_ns = time.perf_counter_ns()
+        answer, model = self._call_semantic_llm(prompt)
+        finished_ns = time.perf_counter_ns()
+        return {
+            "schema_version": CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION,
+            "api_version": CONTAINER_NODE_API_VERSION,
+            "status": "completed",
+            "outcome_type": "completed",
+            "telemetry_complete": True,
+            "semantic_request_id": request_id,
+            "execution_node_id": self.node_id,
+            "started_monotonic_ns": started_ns,
+            "finished_monotonic_ns": finished_ns,
+            "service_time_ms": (finished_ns - started_ns) / 1_000_000.0,
+            "request_sha256": request_sha256,
+            "prompt_sha256": prompt_sha256,
+            "representation_sha256": representation_sha256,
+            "data_plane_artifact_delivery_verified": route_coupled,
+            "source_node_id": source_node_id,
+            "representation_delivery_bytes": representation_delivery_bytes,
+            "model": model,
+            "final_answer": answer,
+            "final_answer_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+            "llm_called": True,
             "credentials_recorded": False,
         }
 
@@ -445,11 +860,34 @@ class ContainerNodeRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def _write_representation(self, payload: bytes, digest: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Pathfinder-Representation-SHA256", digest)
+        self.send_header("X-Pathfinder-Source-Node", self.server.runtime.node_id)
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self) -> None:
-        if self.path == "/healthz":
-            self._write_json(200, self.server.runtime.health())
-            return
-        self._write_json(404, {"status": "error", "message": "not found"})
+        try:
+            parsed = urlsplit(self.path)
+            if parsed.path == "/healthz" and not parsed.query:
+                self._write_json(200, self.server.runtime.health())
+                return
+            if parsed.path == "/v1/semantic/representation/read":
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                _require(set(query) == {"path"}, "semantic representation query is invalid")
+                values = query["path"]
+                _require(len(values) == 1, "semantic representation path is invalid")
+                payload, digest = self.server.runtime.read_semantic_representation(
+                    values[0]
+                )
+                self._write_representation(payload, digest)
+                return
+            self._write_json(404, {"status": "error", "message": "not found"})
+        except (ContainerNodeError, ValueError) as exc:
+            self._write_json(400, {"status": "error", "message": str(exc)})
 
     def do_POST(self) -> None:
         try:
@@ -484,6 +922,23 @@ class ContainerNodeRequestHandler(BaseHTTPRequestHandler):
                     "credentials_recorded": False,
                 })
                 return
+            if self.path == "/v1/semantic/chat-completions":
+                _require(
+                    length <= _MAX_SEMANTIC_PROMPT_BYTES + _MAX_JSON_BYTES,
+                    "semantic request exceeds the local safety limit",
+                )
+                raw = self.rfile.read(length)
+                _require(len(raw) == length, "semantic request is truncated")
+                semantic_request = json.loads(raw.decode("utf-8"))
+                _require(
+                    isinstance(semantic_request, Mapping),
+                    "semantic request must be an object",
+                )
+                self._write_json(
+                    200,
+                    self.server.runtime.semantic_complete(semantic_request),
+                )
+                return
             _require(self.path == "/v1/operations/execute", "not found")
             _require(length <= _MAX_JSON_BYTES, "operation request is too large")
             raw = self.rfile.read(length)
@@ -507,6 +962,9 @@ def create_container_node_server(
     host: str = "127.0.0.1",
     port: int = 0,
     max_operation_bytes: int = 1024 * 1024 * 1024,
+    enable_semantic_llm: bool = False,
+    semantic_artifact_root: str | Path | None = None,
+    semantic_allowed_source_containers: tuple[str, ...] = (),
 ) -> ContainerNodeHTTPServer:
     """Create, but do not start, one local container-node HTTP server."""
 
@@ -515,6 +973,9 @@ def create_container_node_server(
         state_dir,
         max_operation_bytes=max_operation_bytes,
         transfer_port=port if port else 9080,
+        enable_semantic_llm=enable_semantic_llm,
+        semantic_artifact_root=semantic_artifact_root,
+        semantic_allowed_source_containers=semantic_allowed_source_containers,
     )
     server = ContainerNodeHTTPServer((host, port), ContainerNodeRequestHandler)
     server.runtime = runtime
@@ -530,6 +991,9 @@ def serve_container_node(
     host: str = "0.0.0.0",
     port: int = 9080,
     max_operation_bytes: int = 1024 * 1024 * 1024,
+    enable_semantic_llm: bool = False,
+    semantic_artifact_root: str | Path | None = None,
+    semantic_allowed_source_containers: tuple[str, ...] = (),
 ) -> None:
     """Run one node service and drain it cleanly on termination signals."""
 
@@ -539,6 +1003,9 @@ def serve_container_node(
         host=host,
         port=port,
         max_operation_bytes=max_operation_bytes,
+        enable_semantic_llm=enable_semantic_llm,
+        semantic_artifact_root=semantic_artifact_root,
+        semantic_allowed_source_containers=semantic_allowed_source_containers,
     )
     shutdown_requested = threading.Event()
     server_loop_finished = threading.Event()

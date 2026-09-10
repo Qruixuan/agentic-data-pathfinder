@@ -4,10 +4,13 @@ import contextlib
 import errno
 import io
 import json
+import os
 import signal
 import tempfile
 import threading
 import time
+from hashlib import sha256
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -19,17 +22,22 @@ from pathfinder.simulator import (
     CONTAINER_NODE_RESULT_SCHEMA_VERSION,
     ContainerExecutionError,
     ContainerNodeError,
+    SemanticExecutionError,
     ContainerNodeRuntime,
     LocalContainerError,
     build_local_container_compose,
+    align_local_container_semantic_scores,
     build_portable_execution_plan,
     create_container_node_server,
     execute_local_container_plan,
+    execute_local_container_semantic_run,
     plan_container_backend,
     preflight_local_container_host,
     serve_container_node,
     verify_local_container_compose,
     verify_container_execution,
+    verify_local_container_semantic_run,
+    verify_local_container_semantic_score_alignment,
 )
 
 
@@ -401,6 +409,42 @@ class LocalComposePackageTest(unittest.TestCase):
         self.assertIn("read_only: true", compose)
         self.assertNotIn("NET_ADMIN", compose)
         self.assertNotIn("token", compose.casefold())
+
+    def test_semantic_executor_is_explicit_and_contains_no_credential_value(self) -> None:
+        output = self.root / "semantic-compose"
+        report = build_local_container_compose(
+            self.container_plan,
+            output_dir=output,
+            semantic_executor_node_id="N6",
+            semantic_artifact_source_node_ids=("N3",),
+        )
+        self.assertTrue(report["semantic_quality_enabled"])
+        self.assertEqual("N6", report["semantic_executor_node_id"])
+        self.assertTrue(report["semantic_runtime_build"])
+        self.assertEqual(
+            "pathfinder-simulator-node:semantic-local",
+            report["semantic_runtime_image"],
+        )
+        self.assertFalse(report["image_pinning_enforced"])
+        self.assertTrue(report["build_context_included"])
+        self.assertFalse(report["semantic_llm_credentials_bound"])
+        self.assertEqual(["N3"], report["semantic_artifact_source_node_ids"])
+        compose = (output / "compose.yaml").read_text(encoding="utf-8")
+        self.assertEqual(1, compose.count('"--enable-semantic-llm"'))
+        self.assertIn("PATHFINDER_SEMANTIC_LLM_API_KEY", compose)
+        self.assertIn("PATHFINDER_SEMANTIC_ARTIFACT_ROOT", compose)
+        self.assertIn('"pathfinder-sim-n3-origin-cold"', compose)
+        self.assertEqual(8, compose.count("    build:"))
+        self.assertEqual(
+            8,
+            compose.count('    image: "pathfinder-simulator-node:semantic-local"'),
+        )
+        self.assertNotIn("not-a-real-secret", compose)
+        verified = verify_local_container_compose(output)
+        self.assertTrue(verified["semantic_quality_enabled"])
+        self.assertTrue(verified["semantic_runtime_build"])
+        self.assertEqual("N6", verified["semantic_executor_node_id"])
+        self.assertEqual(["N3"], verified["semantic_artifact_source_node_ids"])
 
     def test_pinned_images_are_enforced_and_cannot_be_rebuilt(self) -> None:
         digest = "sha256:" + "a" * 64
@@ -987,6 +1031,253 @@ class LocalComposePackageTest(unittest.TestCase):
                 endpoint_override=endpoints,
             )
         self.assertEqual([], live_operations)
+
+
+class _FakeSemanticLLMHandler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def do_POST(self) -> None:
+        length = int(self.headers["Content-Length"])
+        payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        self.server.requests.append({  # type: ignore[attr-defined]
+            "payload": payload,
+            "authorization": self.headers.get("Authorization"),
+        })
+        response = json.dumps({
+            "choices": [{"message": {"content": getattr(self.server, "answer", "B")}}],
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+
+class LocalSemanticExecutionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.portable = self.root / "portable"
+        self.container_plan = self.root / "container-plan"
+        build_portable_execution_plan(SCENARIO, output_dir=self.portable)
+        plan_container_backend(
+            SCENARIO,
+            self.portable,
+            CONTAINER_SPEC,
+            output_dir=self.container_plan,
+        )
+
+    def _start(self, server: ThreadingHTTPServer) -> None:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+    def _semantic_inputs(self) -> tuple[Path, Path]:
+        representations = self.root / "representations"
+        artifact = representations / "objects" / "video-1" / "multimodal_digest.txt"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("Two musicians perform while a woman approaches.", encoding="utf-8")
+        manifest = self.root / "semantic-workloads.json"
+        manifest.write_text(json.dumps({
+            "schema_version": "pathfinder.local-container-semantic-workloads/v1alpha1",
+            "semantic_run_id": "semantic-test-v1",
+            "success_scoring_rule": "multiple-choice-option-id-exact-match-v1",
+            "semantic_executor_node_id": "N6",
+            "workloads": [{
+                "semantic_trial_key": "semantic-test-v1|video-1|D2|r0000",
+                "workload_id": "video-1-question",
+                "object_id": "video-1",
+                "design_id": "D2",
+                "representation_id": "multimodal_digest",
+                "representation_path": "objects/video-1/multimodal_digest.txt",
+                "question": "Which option is correct?",
+                "answer_options": [
+                    {"option_id": "A", "text": "A vehicle crosses a river."},
+                    {"option_id": "B", "text": "Musicians perform."},
+                ],
+                "correct_answer_id": "B",
+            }],
+        }), encoding="utf-8")
+        return representations, manifest
+
+    def test_semantic_runner_calls_container_executor_and_scores_answer(self) -> None:
+        node = create_container_node_server(
+            "N6",
+            self.root / "n6-state",
+            enable_semantic_llm=True,
+        )
+        self._start(node)
+        node_port = int(node.server_address[1])
+        compose = self.root / "semantic-compose"
+        build_local_container_compose(
+            self.container_plan,
+            output_dir=compose,
+            host_port_base=node_port - 6,
+            semantic_executor_node_id="N6",
+        )
+        llm = ThreadingHTTPServer(("127.0.0.1", 0), _FakeSemanticLLMHandler)
+        llm.requests = []  # type: ignore[attr-defined]
+        self._start(llm)
+        representations, manifest = self._semantic_inputs()
+        output = self.root / "semantic-output"
+        with mock.patch.dict(os.environ, {
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL": f"http://127.0.0.1:{llm.server_address[1]}",
+            "PATHFINDER_SEMANTIC_LLM_MODEL": "test-text-model",
+            "PATHFINDER_SEMANTIC_LLM_API_KEY": "not-a-real-secret",
+            "PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS": "10",
+        }, clear=False):
+            report = execute_local_container_semantic_run(
+                compose,
+                manifest,
+                representations,
+                output_dir=output,
+                request_timeout_seconds=10.0,
+            )
+        self.assertEqual("COMPLETE_SEMANTIC_LOCAL", report["status"])
+        self.assertEqual(1, report["semantic_workload_count"])
+        self.assertEqual(1.0, report["task_accuracy"])
+        self.assertTrue(report["llm_called"])
+        self.assertFalse(report["data_plane_artifact_delivery_verified"])
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+        request = llm.requests[0]  # type: ignore[attr-defined]
+        self.assertEqual("Bearer not-a-real-secret", request["authorization"])
+        self.assertIn("multimodal_digest", request["payload"]["messages"][0]["content"])
+        record = json.loads((output / "semantic_records.jsonl").read_text())
+        self.assertEqual("B", record["final_answer"])
+        self.assertTrue(record["task_success"])
+        self.assertNotIn("prompt", record)
+        self.assertNotIn("representation_text", record)
+        output_text = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in output.iterdir()
+            if path.is_file()
+        )
+        self.assertNotIn("not-a-real-secret", output_text)
+        verified = verify_local_container_semantic_run(output)
+        self.assertEqual("VERIFIED_OFFLINE", verified["status"])
+        self.assertEqual(1.0, verified["task_accuracy"])
+
+    def test_semantic_runner_refuses_compose_without_explicit_executor(self) -> None:
+        compose = self.root / "infrastructure-compose"
+        build_local_container_compose(self.container_plan, output_dir=compose)
+        representations, manifest = self._semantic_inputs()
+        with self.assertRaisesRegex(SemanticExecutionError, "no semantic executor"):
+            execute_local_container_semantic_run(
+                compose,
+                manifest,
+                representations,
+                output_dir=self.root / "unexpected-output",
+            )
+
+    def test_score_alignment_recognizes_a_single_bracketed_option_without_replaying(self) -> None:
+        node = create_container_node_server(
+            "N6",
+            self.root / "n6-state",
+            enable_semantic_llm=True,
+        )
+        self._start(node)
+        node_port = int(node.server_address[1])
+        compose = self.root / "semantic-compose"
+        build_local_container_compose(
+            self.container_plan,
+            output_dir=compose,
+            host_port_base=node_port - 6,
+            semantic_executor_node_id="N6",
+        )
+        llm = ThreadingHTTPServer(("127.0.0.1", 0), _FakeSemanticLLMHandler)
+        llm.requests = []  # type: ignore[attr-defined]
+        llm.answer = "[B]"  # type: ignore[attr-defined]
+        self._start(llm)
+        representations, legacy_manifest = self._semantic_inputs()
+        source_output = self.root / "legacy-semantic-output"
+        with mock.patch.dict(os.environ, {
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL": f"http://127.0.0.1:{llm.server_address[1]}",
+            "PATHFINDER_SEMANTIC_LLM_MODEL": "test-text-model",
+            "PATHFINDER_SEMANTIC_LLM_API_KEY": "not-a-real-secret",
+        }, clear=False):
+            legacy_report = execute_local_container_semantic_run(
+                compose,
+                legacy_manifest,
+                representations,
+                output_dir=source_output,
+                request_timeout_seconds=10.0,
+            )
+        self.assertEqual(0.0, legacy_report["task_accuracy"])
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+
+        canonical_manifest = self.root / "canonical-semantic-workloads.json"
+        document = json.loads(legacy_manifest.read_text(encoding="utf-8"))
+        document["success_scoring_rule"] = (
+            "multiple-choice-option-id-canonical-match-v1"
+        )
+        canonical_manifest.write_text(json.dumps(document), encoding="utf-8")
+        alignment_output = self.root / "semantic-score-alignment"
+        aligned = align_local_container_semantic_scores(
+            source_output,
+            canonical_manifest,
+            output_dir=alignment_output,
+        )
+        self.assertEqual(0, aligned["previous_task_success_count"])
+        self.assertEqual(1, aligned["aligned_task_success_count"])
+        self.assertEqual(1.0, aligned["aligned_task_accuracy"])
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+        verified = verify_local_container_semantic_score_alignment(
+            alignment_output
+        )
+        self.assertEqual(1.0, verified["aligned_task_accuracy"])
+
+    def test_executor_fetches_representation_from_allowed_source_node(self) -> None:
+        representations, _ = self._semantic_inputs()
+        source = create_container_node_server(
+            "N3",
+            self.root / "n3-state",
+            semantic_artifact_root=representations,
+        )
+        self._start(source)
+        llm = ThreadingHTTPServer(("127.0.0.1", 0), _FakeSemanticLLMHandler)
+        llm.requests = []  # type: ignore[attr-defined]
+        self._start(llm)
+        representation = (
+            representations / "objects" / "video-1" / "multimodal_digest.txt"
+        ).read_bytes()
+        question = "Which option is correct?\n\nOptions:\n[A] x\n[B] y\n\nReturn exactly one option ID and no other text."
+        prompt = ContainerNodeRuntime.build_semantic_prompt(
+            "multimodal_digest",
+            representation.decode("utf-8"),
+            question,
+        )
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "n6-state",
+            enable_semantic_llm=True,
+            transfer_port=int(source.server_address[1]),
+            semantic_allowed_source_containers=("127.0.0.1",),
+        )
+        with mock.patch.dict(os.environ, {
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL": f"http://127.0.0.1:{llm.server_address[1]}",
+            "PATHFINDER_SEMANTIC_LLM_MODEL": "test-text-model",
+            "PATHFINDER_SEMANTIC_LLM_API_KEY": "not-a-real-secret",
+        }, clear=False):
+            result = runtime.semantic_complete({
+                "schema_version": "pathfinder.container-node-semantic-request/v1alpha1",
+                "semantic_request_id": "route-coupled-test",
+                "execution_node_id": "N6",
+                "source_node_id": "N3",
+                "source_container_url": f"http://127.0.0.1:{source.server_address[1]}",
+                "representation_path": "objects/video-1/multimodal_digest.txt",
+                "representation_id": "multimodal_digest",
+                "representation_sha256": sha256(representation).hexdigest(),
+                "question": question,
+                "prompt_sha256": sha256(prompt.encode("utf-8")).hexdigest(),
+            })
+        self.assertTrue(result["data_plane_artifact_delivery_verified"])
+        self.assertEqual("N3", result["source_node_id"])
+        self.assertEqual(len(representation), result["representation_delivery_bytes"])
+        self.assertEqual("B", result["final_answer"])
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

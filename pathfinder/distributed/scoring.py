@@ -17,12 +17,19 @@ ACCEPTED_SUBSTRING_SCORING_RULE = "accepted-answer-substring-match"
 MULTIPLE_CHOICE_EXACT_SCORING_RULE = (
     "multiple-choice-option-id-exact-match-v1"
 )
+MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE = (
+    "multiple-choice-option-id-canonical-match-v1"
+)
 SUCCESS_SCORING_RULES = (
     ACCEPTED_SUBSTRING_SCORING_RULE,
     MULTIPLE_CHOICE_EXACT_SCORING_RULE,
+    MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
 )
 
 _OPTION_ID = re.compile(r"[A-Z][A-Z0-9_-]{0,15}\Z")
+_CANONICAL_OPTION_MARKER = re.compile(
+    r"(?:([A-Z][A-Z0-9_-]{0,15})|[\[\(［（]\s*([A-Z][A-Z0-9_-]{0,15})\s*[\]\)］）])\Z"
+)
 
 
 class WorkloadScoringError(ValueError):
@@ -176,7 +183,10 @@ def validate_workload_manifest(
             rule,
             name=f"workloads[{workload_id!r}]",
         )
-        if rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE:
+        if rule in (
+            MULTIPLE_CHOICE_EXACT_SCORING_RULE,
+            MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
+        ):
             object_id = str(workload["object_id"]).strip()
             previous = objects.get(object_id)
             if previous is not None:
@@ -203,10 +213,20 @@ def evaluate_workload_answer(
             " ".join(candidate.casefold().split()) in normalized
             for candidate in contract.accepted_answer_substrings
         )
-    # Leading/trailing whitespace is transport formatting.  Everything else,
-    # including case, punctuation, and explanatory prose, makes the response
-    # invalid and therefore incorrect.
-    return answer.strip() == contract.correct_answer_id
+    # Leading/trailing whitespace is transport formatting.  The original rule
+    # remains byte-strict after trimming so existing frozen pilots cannot have
+    # their score semantics changed after the fact.
+    if contract.rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE:
+        return answer.strip() == contract.correct_answer_id
+
+    # The canonical-marker rule treats a lone displayed option token such as
+    # ``[C]`` as the same unambiguous answer as ``C``.  It deliberately does
+    # not extract a token from prose, punctuation, or a multi-option answer.
+    match = _CANONICAL_OPTION_MARKER.fullmatch(answer.strip())
+    if match is None:
+        return False
+    canonical = match.group(1) or match.group(2)
+    return canonical == contract.correct_answer_id
 
 
 def render_workload_question(
@@ -221,7 +241,15 @@ def render_workload_question(
         f"[{option.option_id}] {option.text}"
         for option in contract.answer_options
     )
+    completion_instruction = (
+        "Return exactly one option ID and no other text."
+        if contract.rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE
+        else (
+            "Return exactly one option marker: C or [C] are accepted; "
+            "do not add prose, punctuation, or multiple options."
+        )
+    )
     return (
         f"{question}\n\nOptions:\n{options}\n\n"
-        "Return exactly one option ID and no other text."
+        + completion_instruction
     )

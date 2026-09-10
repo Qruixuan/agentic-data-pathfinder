@@ -22,6 +22,9 @@ from .container_contract import verify_container_backend_plan
 
 
 LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION = (
+    "pathfinder.local-container-compose-package/v1alpha3"
+)
+PREVIOUS_LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION = (
     "pathfinder.local-container-compose-package/v1alpha2"
 )
 LEGACY_LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION = (
@@ -77,7 +80,16 @@ def _compose_bytes(
     nodes: list[Mapping[str, Any]],
     *,
     host_port_base: int,
+    semantic_executor_node_id: str | None,
+    semantic_artifact_source_node_ids: tuple[str, ...],
+    semantic_runtime_build: bool,
 ) -> tuple[bytes, dict[str, Any]]:
+    source_node_ids = set(semantic_artifact_source_node_ids)
+    source_container_names = {
+        str(node["container_name"])
+        for node in nodes
+        if str(node["node_id"]) in source_node_ids
+    }
     endpoints: dict[str, Any] = {}
     lines = [
         'name: "pathfinder-infra-local"',
@@ -88,11 +100,21 @@ def _compose_bytes(
         service = str(node["container_name"])
         image_ref = str(node["image_ref"])
         image_digest = node.get("image_digest")
-        image = (
-            f"{image_ref}@{image_digest}"
-            if isinstance(image_digest, str)
-            else image_ref
-        )
+        if semantic_runtime_build:
+            # The frozen simulator image intentionally contains the
+            # infrastructure-only runtime.  A semantic smoke must rebuild a
+            # local development image from the checked-out source; pretending
+            # that its digest is the frozen image's digest would be false
+            # provenance.
+            image = "pathfinder-simulator-node:semantic-local"
+            needs_build = True
+        else:
+            image = (
+                f"{image_ref}@{image_digest}"
+                if isinstance(image_digest, str)
+                else image_ref
+            )
+            needs_build = image_digest is None
         host_port = host_port_base + offset
         endpoints[node_id] = {
             "container_name": service,
@@ -101,15 +123,18 @@ def _compose_bytes(
             "host_operation_url": (
                 f"http://127.0.0.1:{host_port}/v1/operations/execute"
             ),
+            "host_semantic_url": (
+                f"http://127.0.0.1:{host_port}/v1/semantic/chat-completions"
+            ),
         }
         lines.append(f"  {service}:")
-        if image_digest is None:
+        if needs_build:
             lines.extend([
                 "    build:",
                 '      context: "${PATHFINDER_REPO_ROOT:?set PATHFINDER_REPO_ROOT}"',
                 '      dockerfile: "containers/pathfinder-infra-node/Dockerfile"',
             ])
-        lines.extend([
+        command_lines = [
             f"    image: {_yaml_scalar(image)}",
             f"    container_name: {_yaml_scalar(service)}",
             "    command:",
@@ -124,11 +149,45 @@ def _compose_bytes(
             '      - "9080"',
             '      - "--max-operation-bytes"',
             '      - "1073741824"',
+        ]
+        if node_id == semantic_executor_node_id:
+            command_lines.extend([
+                '      - "--enable-semantic-llm"',
+            ])
+            for container_name in sorted(source_container_names):
+                command_lines.extend([
+                    '      - "--semantic-allowed-source-container"',
+                    f"      - {_yaml_scalar(container_name)}",
+                ])
+        if node_id in source_node_ids:
+            command_lines.extend([
+                '      - "--semantic-artifact-root"',
+                '      - "/artifacts"',
+            ])
+        lines.extend(command_lines)
+        if node_id == semantic_executor_node_id:
+            # Bare environment names deliberately inherit values at `docker
+            # compose up` time.  The generated package contains no secret,
+            # endpoint, or model value.
+            lines.extend([
+                "    environment:",
+                "      - PATHFINDER_SEMANTIC_LLM_BASE_URL",
+                "      - PATHFINDER_SEMANTIC_LLM_MODEL",
+                "      - PATHFINDER_SEMANTIC_LLM_API_KEY",
+                "      - PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS",
+            ])
+        lines.extend([
             "    read_only: true",
             "    tmpfs:",
             '      - "/tmp:rw,noexec,nosuid,size=64m"',
             "    volumes:",
             f"      - {_yaml_scalar(service + '-state:/state')}",
+        ])
+        if node_id in source_node_ids:
+            lines.extend([
+                '      - "${PATHFINDER_SEMANTIC_ARTIFACT_ROOT:?set PATHFINDER_SEMANTIC_ARTIFACT_ROOT}:/artifacts:ro"',
+            ])
+        lines.extend([
             "    security_opt:",
             '      - "no-new-privileges:true"',
             "    pids_limit: 128",
@@ -204,6 +263,8 @@ def build_local_container_compose(
     *,
     output_dir: str | Path,
     host_port_base: int = 19080,
+    semantic_executor_node_id: str | None = None,
+    semantic_artifact_source_node_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Create an eight-service Compose project without invoking Docker."""
 
@@ -220,7 +281,34 @@ def build_local_container_compose(
     )
     nodes = topology.get("nodes")
     _require(isinstance(nodes, list) and len(nodes) == 8, "exactly eight nodes required")
-    compose, endpoint_rows = _compose_bytes(nodes, host_port_base=host_port_base)
+    node_ids = {str(node.get("node_id")) for node in nodes}
+    requested_source_node_ids = tuple(semantic_artifact_source_node_ids)
+    source_node_ids = tuple(sorted(set(requested_source_node_ids)))
+    _require(
+        len(source_node_ids) == len(requested_source_node_ids),
+        "semantic artifact source nodes contain duplicates",
+    )
+    _require(
+        semantic_executor_node_id is None
+        or semantic_executor_node_id in node_ids,
+        "semantic_executor_node_id must name a container node",
+    )
+    _require(
+        set(source_node_ids) <= node_ids,
+        "semantic artifact source node must name a container node",
+    )
+    _require(
+        not source_node_ids or semantic_executor_node_id is not None,
+        "semantic artifact sources require a semantic executor node",
+    )
+    semantic_runtime_build = semantic_executor_node_id is not None
+    compose, endpoint_rows = _compose_bytes(
+        nodes,
+        host_port_base=host_port_base,
+        semantic_executor_node_id=semantic_executor_node_id,
+        semantic_artifact_source_node_ids=source_node_ids,
+        semantic_runtime_build=semantic_runtime_build,
+    )
     endpoints = {
         "schema_version": "pathfinder.local-container-endpoints/v1alpha1",
         "backend_id": verified["backend_id"],
@@ -247,20 +335,34 @@ def build_local_container_compose(
         "planned_trial_count": verified["planned_trial_count"],
         "planned_operation_count": verified["planned_operation_count"],
         "service_count": len(nodes),
-        "pinned_image_count": sum(
-            node.get("image_digest") is not None for node in nodes
+        "pinned_image_count": (
+            0
+            if semantic_runtime_build
+            else sum(node.get("image_digest") is not None for node in nodes)
         ),
-        "image_pinning_enforced": all(
-            node.get("image_digest") is not None for node in nodes
+        "image_pinning_enforced": (
+            False
+            if semantic_runtime_build
+            else all(node.get("image_digest") is not None for node in nodes)
         ),
-        "build_context_included": any(
-            node.get("image_digest") is None for node in nodes
+        "build_context_included": (
+            semantic_runtime_build
+            or any(node.get("image_digest") is None for node in nodes)
         ),
         "host_port_base": host_port_base,
         "docker_probed": False,
         "docker_called": False,
         "container_started": False,
-        "semantic_quality_enabled": False,
+        "semantic_quality_enabled": semantic_executor_node_id is not None,
+        "semantic_runtime_build": semantic_runtime_build,
+        "semantic_runtime_image": (
+            "pathfinder-simulator-node:semantic-local"
+            if semantic_runtime_build
+            else None
+        ),
+        "semantic_executor_node_id": semantic_executor_node_id,
+        "semantic_artifact_source_node_ids": list(source_node_ids),
+        "semantic_llm_credentials_bound": False,
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
         "output_sha256": {
@@ -307,6 +409,7 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
     _require(
         manifest.get("schema_version") in (
             LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION,
+            PREVIOUS_LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION,
             LEGACY_LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION,
         ),
         "unsupported local Compose manifest schema_version",
@@ -314,6 +417,36 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
     _require(manifest.get("status") == "GENERATED_NOT_LAUNCHED", "bad status")
     _require(manifest.get("docker_called") is False, "generator called Docker")
     _require(manifest.get("container_started") is False, "generator launched a container")
+    semantic_quality_enabled = manifest.get("semantic_quality_enabled", False)
+    _require(
+        type(semantic_quality_enabled) is bool,
+        "semantic quality flag is invalid",
+    )
+    semantic_executor_node_id = manifest.get("semantic_executor_node_id")
+    _require(
+        semantic_executor_node_id is None or isinstance(semantic_executor_node_id, str),
+        "semantic executor node is invalid",
+    )
+    raw_source_node_ids = manifest.get("semantic_artifact_source_node_ids", [])
+    _require(
+        isinstance(raw_source_node_ids, list)
+        and all(isinstance(value, str) and bool(value) for value in raw_source_node_ids),
+        "semantic artifact source nodes are invalid",
+    )
+    _require(
+        len(raw_source_node_ids) == len(set(raw_source_node_ids)),
+        "semantic artifact source nodes contain duplicates",
+    )
+    semantic_artifact_source_node_ids = tuple(sorted(raw_source_node_ids))
+    _require(
+        manifest.get("semantic_llm_credentials_bound", False) is False,
+        "Compose package must not bind semantic LLM credentials",
+    )
+    semantic_runtime_build = manifest.get("semantic_runtime_build", False)
+    _require(
+        type(semantic_runtime_build) is bool,
+        "semantic runtime build flag is invalid",
+    )
     _require(
         manifest.get("output_sha256")
         == {
@@ -334,22 +467,46 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
     )
     nodes = topology.get("nodes")
     _require(isinstance(nodes, list) and len(nodes) == 8, "topology node count changed")
+    node_ids = {str(node.get("node_id")) for node in nodes}
+    _require(
+        (semantic_executor_node_id is not None) is semantic_quality_enabled,
+        "semantic quality configuration is inconsistent",
+    )
+    _require(
+        semantic_executor_node_id is None or semantic_executor_node_id in node_ids,
+        "semantic executor node is not in the topology",
+    )
+    _require(
+        set(semantic_artifact_source_node_ids) <= node_ids,
+        "semantic artifact source node is not in the topology",
+    )
+    _require(
+        not semantic_artifact_source_node_ids or semantic_executor_node_id is not None,
+        "semantic artifact sources lack an executor",
+    )
     if manifest["schema_version"] == LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION:
         pinned_count = sum(node.get("image_digest") is not None for node in nodes)
+        expected_pinned_count = 0 if semantic_runtime_build else pinned_count
         _require(
-            manifest.get("pinned_image_count") == pinned_count,
+            manifest.get("pinned_image_count") == expected_pinned_count,
             "pinned image count changed",
         )
         _require(
-            manifest.get("image_pinning_enforced") is (pinned_count == len(nodes)),
+            manifest.get("image_pinning_enforced") is (
+                not semantic_runtime_build and pinned_count == len(nodes)
+            ),
             "image pinning enforcement flag changed",
         )
         _require(
-            manifest.get("build_context_included") is (pinned_count < len(nodes)),
+            manifest.get("build_context_included") is (
+                semantic_runtime_build or pinned_count < len(nodes)
+            ),
             "build context flag changed",
         )
         _require(
-            compose.count("    build:") == len(nodes) - pinned_count,
+            compose.count("    build:") == (
+                len(nodes) if semantic_runtime_build else len(nodes) - pinned_count
+            ),
             "Compose build blocks do not match unpinned nodes",
         )
         compose_lines = compose.splitlines()
@@ -362,9 +519,13 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
             image_ref = str(node["image_ref"])
             image_digest = node.get("image_digest")
             expected_image = (
-                f"{image_ref}@{image_digest}"
-                if isinstance(image_digest, str)
-                else image_ref
+                "pathfinder-simulator-node:semantic-local"
+                if semantic_runtime_build
+                else (
+                    f"{image_ref}@{image_digest}"
+                    if isinstance(image_digest, str)
+                    else image_ref
+                )
             )
             block_end = (
                 service_starts[index + 1]
@@ -377,9 +538,51 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
                 f"Compose image identity changed for {node['node_id']}",
             )
             _require(
-                ("    build:" in service_block) is (image_digest is None),
+                ("    build:" in service_block)
+                is (semantic_runtime_build or image_digest is None),
                 f"Compose build policy changed for {node['node_id']}",
             )
+            semantic_enabled = node["node_id"] == semantic_executor_node_id
+            _require(
+                ('      - "--enable-semantic-llm"' in service_block) is semantic_enabled,
+                f"Compose semantic executor policy changed for {node['node_id']}",
+            )
+            if semantic_enabled:
+                for environment_name in (
+                    "PATHFINDER_SEMANTIC_LLM_BASE_URL",
+                    "PATHFINDER_SEMANTIC_LLM_MODEL",
+                    "PATHFINDER_SEMANTIC_LLM_API_KEY",
+                    "PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS",
+                ):
+                    _require(
+                        f"      - {environment_name}" in service_block,
+                        f"missing semantic runtime environment passthrough: {environment_name}",
+                    )
+                expected_sources = [
+                    str(source["container_name"])
+                    for source in nodes
+                    if str(source["node_id"]) in semantic_artifact_source_node_ids
+                ]
+                for source_name in sorted(expected_sources):
+                    _require(
+                        f"      - {_yaml_scalar(source_name)}" in service_block,
+                        f"missing semantic allowed source container: {source_name}",
+                    )
+            is_artifact_source = node["node_id"] in semantic_artifact_source_node_ids
+            _require(
+                ('      - "--semantic-artifact-root"' in service_block)
+                == is_artifact_source,
+                f"Compose semantic artifact source policy changed for {node['node_id']}",
+            )
+            if is_artifact_source:
+                _require(
+                    any(
+                        "PATHFINDER_SEMANTIC_ARTIFACT_ROOT" in line
+                        and "/artifacts:ro" in line
+                        for line in service_block
+                    ),
+                    f"missing semantic artifact mount for {node['node_id']}",
+                )
     for node_id, endpoint in rows.items():
         container_name = endpoint["container_name"]
         _require(f"  {container_name}:" in compose, f"missing service for {node_id}")
@@ -387,6 +590,20 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
             endpoint["container_url"] == f"http://{container_name}:9080",
             f"bad container endpoint for {node_id}",
         )
+        if "host_semantic_url" in endpoint:
+            _require(
+                endpoint.get("host_semantic_url")
+                == endpoint["host_operation_url"].replace(
+                    "/v1/operations/execute",
+                    "/v1/semantic/chat-completions",
+                ),
+                f"bad semantic endpoint for {node_id}",
+            )
+        else:
+            _require(
+                semantic_executor_node_id is None,
+                f"missing semantic endpoint for {node_id}",
+            )
     return {
         "status": "VERIFIED_NOT_LAUNCHED",
         "backend_id": manifest["backend_id"],
@@ -397,6 +614,10 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
         "build_context_included": manifest.get("build_context_included"),
         "planned_trial_count": manifest["planned_trial_count"],
         "planned_operation_count": manifest["planned_operation_count"],
+        "semantic_quality_enabled": semantic_quality_enabled,
+        "semantic_runtime_build": semantic_runtime_build,
+        "semantic_executor_node_id": semantic_executor_node_id,
+        "semantic_artifact_source_node_ids": list(semantic_artifact_source_node_ids),
         "checked_files": len(_OUTPUT_FILES),
         "docker_called": False,
         "container_started": False,

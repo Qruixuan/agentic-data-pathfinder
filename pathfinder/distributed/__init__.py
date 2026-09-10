@@ -140,6 +140,7 @@ from .routing import (
 )
 from .scoring import (
     ACCEPTED_SUBSTRING_SCORING_RULE,
+    MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
     MULTIPLE_CHOICE_EXACT_SCORING_RULE,
     SUCCESS_SCORING_RULES,
     AnswerOption,
@@ -286,6 +287,7 @@ __all__ = [
     "MEASUREMENT_MANIFEST_SCHEMA_VERSION",
     "MeasurementError",
     "MeasurementProvider",
+    "MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE",
     "MULTIPLE_CHOICE_EXACT_SCORING_RULE",
     "new_run_state",
     "not_applicable_component",

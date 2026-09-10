@@ -1292,6 +1292,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     local_compose.add_argument("--output-dir", type=Path, required=True)
     local_compose.add_argument("--host-port-base", type=int, default=19080)
+    local_compose.add_argument(
+        "--semantic-executor-node",
+        help=(
+            "enable a credential-free-recording OpenAI-compatible semantic "
+            "executor only on this container node; credentials remain runtime "
+            "environment variables"
+        ),
+    )
+    local_compose.add_argument(
+        "--semantic-artifact-source-node",
+        action="append",
+        help=(
+            "repeat a node ID whose container may read frozen text "
+            "representations through the route-coupled semantic path"
+        ),
+    )
     local_compose.add_argument("--compact", action="store_true")
 
     verify_local_compose = subcommands.add_parser(
@@ -1309,7 +1325,7 @@ def _parser() -> argparse.ArgumentParser:
 
     container_node = subcommands.add_parser(
         "serve-container-node",
-        help="serve one bounded infrastructure-only container node",
+        help="serve one bounded container node; semantic LLM support is opt-in",
     )
     container_node.add_argument("--node-id", required=True)
     container_node.add_argument(
@@ -1323,6 +1339,30 @@ def _parser() -> argparse.ArgumentParser:
         "--max-operation-bytes",
         type=int,
         default=1024 * 1024 * 1024,
+    )
+    container_node.add_argument(
+        "--enable-semantic-llm",
+        action="store_true",
+        help=(
+            "expose the bounded semantic completion endpoint; it reads model "
+            "configuration and credentials only from runtime environment"
+        ),
+    )
+    container_node.add_argument(
+        "--semantic-artifact-root",
+        type=Path,
+        help=(
+            "read-only in-container root for bounded UTF-8 semantic "
+            "representations"
+        ),
+    )
+    container_node.add_argument(
+        "--semantic-allowed-source-container",
+        action="append",
+        help=(
+            "repeat one Docker service name this semantic executor may fetch "
+            "a representation from"
+        ),
     )
 
     container_run = subcommands.add_parser(
@@ -1360,6 +1400,63 @@ def _parser() -> argparse.ArgumentParser:
         default=900.0,
     )
     container_run.add_argument("--compact", action="store_true")
+
+    semantic_container_run = subcommands.add_parser(
+        "run-local-container-semantic-execution",
+        help=(
+            "run bounded real text representations through an enabled local "
+            "container LLM executor and score frozen single-option answers"
+        ),
+    )
+    semantic_container_run.add_argument(
+        "--compose-package-dir", type=Path, required=True
+    )
+    semantic_container_run.add_argument(
+        "--semantic-workload-manifest", type=Path, required=True
+    )
+    semantic_container_run.add_argument(
+        "--representation-root", type=Path, required=True
+    )
+    semantic_container_run.add_argument("--output-dir", type=Path, required=True)
+    semantic_container_run.add_argument("--request-timeout", type=float, default=240.0)
+    semantic_container_run.add_argument(
+        "--max-representation-bytes", type=int, default=1024 * 1024
+    )
+    semantic_container_run.add_argument("--compact", action="store_true")
+
+    verify_semantic_container_run = subcommands.add_parser(
+        "verify-local-container-semantic-execution",
+        help="verify a local semantic execution ledger without API access",
+    )
+    verify_semantic_container_run.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_semantic_container_run.add_argument("--compact", action="store_true")
+
+    align_semantic_scores = subcommands.add_parser(
+        "align-local-container-semantic-scores",
+        help=(
+            "derive a separately checksummed canonical-option score from a "
+            "legacy exact-match semantic smoke without calling an LLM"
+        ),
+    )
+    align_semantic_scores.add_argument(
+        "--semantic-output-dir", type=Path, required=True
+    )
+    align_semantic_scores.add_argument(
+        "--canonical-workload-manifest", type=Path, required=True
+    )
+    align_semantic_scores.add_argument("--output-dir", type=Path, required=True)
+    align_semantic_scores.add_argument("--compact", action="store_true")
+
+    verify_semantic_score_alignment = subcommands.add_parser(
+        "verify-local-container-semantic-score-alignment",
+        help="verify a local semantic score-alignment artifact without API access",
+    )
+    verify_semantic_score_alignment.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_semantic_score_alignment.add_argument("--compact", action="store_true")
 
     verify_container_run = subcommands.add_parser(
         "verify-local-container-simulation",
@@ -1661,6 +1758,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.container_plan_dir,
                 output_dir=args.output_dir,
                 host_port_base=args.host_port_base,
+                semantic_executor_node_id=args.semantic_executor_node,
+                semantic_artifact_source_node_ids=(
+                    args.semantic_artifact_source_node or ()
+                ),
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "verify-local-container-compose":
@@ -1682,6 +1783,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host=args.host,
                 port=args.port,
                 max_operation_bytes=args.max_operation_bytes,
+                enable_semantic_llm=args.enable_semantic_llm,
+                semantic_artifact_root=args.semantic_artifact_root,
+                semantic_allowed_source_containers=tuple(
+                    args.semantic_allowed_source_container or ()
+                ),
             )
             return 0
         if args.command == "run-local-container-simulation":
@@ -1695,6 +1801,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 trial_key=args.trial_key,
                 max_concurrency=args.max_concurrency,
                 request_timeout_seconds=args.request_timeout,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-local-container-semantic-execution":
+            from .simulator import execute_local_container_semantic_run
+
+            payload = execute_local_container_semantic_run(
+                args.compose_package_dir,
+                args.semantic_workload_manifest,
+                args.representation_root,
+                output_dir=args.output_dir,
+                request_timeout_seconds=args.request_timeout,
+                max_representation_bytes=args.max_representation_bytes,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-local-container-semantic-execution":
+            from .simulator import verify_local_container_semantic_run
+
+            payload = verify_local_container_semantic_run(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "align-local-container-semantic-scores":
+            from .simulator import align_local_container_semantic_scores
+
+            payload = align_local_container_semantic_scores(
+                args.semantic_output_dir,
+                args.canonical_workload_manifest,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-local-container-semantic-score-alignment":
+            from .simulator import verify_local_container_semantic_score_alignment
+
+            payload = verify_local_container_semantic_score_alignment(
+                args.output_dir
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "verify-local-container-simulation":
