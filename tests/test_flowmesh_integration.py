@@ -31,6 +31,7 @@ from pathfinder.integrations.flowmesh.adapter import (
     FlowMeshPinningError,
     FlowMeshRunError,
     FlowMeshWorkflowFailureError,
+    extract_api_executor_result,
     extract_agent_answer,
 )
 from pathfinder.integrations.flowmesh.client import (
@@ -1514,6 +1515,43 @@ class FlowMeshIntegrationTest(unittest.TestCase):
             {"items": [{"response": "Direct response"}]}
         )
         self.assertEqual("Direct response", answer)
+
+    def test_api_result_parser_accepts_direct_executor_shape(self) -> None:
+        payload = {
+            "executor": "api",
+            "ok": True,
+            "status_code": 200,
+            "text": '{"status":"completed"}',
+        }
+        result = extract_api_executor_result(payload)
+        self.assertEqual(payload, result)
+
+    def test_api_result_parser_accepts_wrapped_executor_shape(self) -> None:
+        payload = {
+            "result": {
+                "executor": "api",
+                "ok": True,
+                "status_code": 204,
+                "text": "",
+            }
+        }
+        result = extract_api_executor_result(payload)
+        self.assertEqual(payload["result"], result)
+
+    def test_api_result_parser_rejects_incomplete_or_failed_results(
+        self,
+    ) -> None:
+        invalid_payloads = (
+            {},
+            {"executor": "agent", "ok": True, "status_code": 200, "text": ""},
+            {"executor": "api", "ok": False, "status_code": 503, "text": ""},
+            {"executor": "api", "ok": True, "status_code": 500, "text": ""},
+            {"executor": "api", "ok": True, "status_code": 200, "text": None},
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                with self.assertRaises(FlowMeshRunError):
+                    extract_api_executor_result(payload)
 
     # ---------------------------------------------------------------- #
     # Worker pinning

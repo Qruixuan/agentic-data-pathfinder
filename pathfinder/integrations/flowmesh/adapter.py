@@ -386,3 +386,34 @@ def extract_agent_answer(payload: dict[str, Any]) -> str:
     if not isinstance(answer, str) or not answer.strip():
         raise FlowMeshRunError("FlowMesh Agent result contains an empty answer")
     return answer
+
+
+def extract_api_executor_result(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a successful FlowMesh API-executor response.
+
+    FlowMesh's result endpoint returns the Agent executor under a ``result``
+    envelope, but v0.1.8-rc.1 returns an API-executor response directly.  The
+    latter is still a complete task result; assuming the Agent envelope turns
+    a completed API operation into a local ``KeyError``.  Accept both shapes
+    deliberately, then validate the API-specific success contract before a
+    caller acts on its response body.
+    """
+    result = payload.get("result", payload)
+    if not isinstance(result, Mapping):
+        raise FlowMeshRunError("FlowMesh API result payload is not an object")
+    if result.get("executor") != "api":
+        raise FlowMeshRunError(
+            "FlowMesh result was not produced by the API executor"
+        )
+    if result.get("ok") is not True:
+        raise FlowMeshRunError("FlowMesh API executor reported an error")
+
+    status_code = result.get("status_code")
+    if type(status_code) is not int or not 200 <= status_code < 300:
+        raise FlowMeshRunError(
+            "FlowMesh API executor returned a non-success HTTP status"
+        )
+
+    if not isinstance(result.get("text"), str):
+        raise FlowMeshRunError("FlowMesh API executor result has no text body")
+    return dict(result)

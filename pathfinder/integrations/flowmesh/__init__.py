@@ -5,6 +5,7 @@ from .adapter import (
     FlowMeshPinningError,
     FlowMeshRunError,
     FlowMeshWorkflowFailureError,
+    extract_api_executor_result,
 )
 from .analysis import (
     ANALYSIS_SCHEMA_VERSION,
@@ -95,6 +96,7 @@ __all__ = [
     "build_trial_plan",
     "describe_pinned_worker",
     "endpoint_fingerprint",
+    "extract_api_executor_result",
     "load_flowmesh_pilot_config",
     "preflight_flowmesh_worker",
     "redact_secrets",
