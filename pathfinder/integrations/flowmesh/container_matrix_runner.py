@@ -67,11 +67,20 @@ FLOWMESH_CONTAINER_MATRIX_JOURNAL_ENTRY_SCHEMA_VERSION = (
 FLOWMESH_CONTAINER_MATRIX_CHECKPOINT_ENTRY_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-trial-checkpoint/v1alpha1"
 )
+FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_CHECKPOINT_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-matrix-trial-checkpoint/v1alpha2"
+)
 FLOWMESH_CONTAINER_MATRIX_TRIAL_RESULT_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-trial-result/v1alpha1"
 )
+FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_TRIAL_RESULT_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-matrix-trial-result/v1alpha2"
+)
 FLOWMESH_CONTAINER_MATRIX_OPERATION_RESULT_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-operation-result/v1alpha1"
+)
+FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_OPERATION_RESULT_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-matrix-operation-result/v1alpha2"
 )
 FLOWMESH_CONTAINER_MATRIX_SUBMISSION_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-submission/v1alpha1"
@@ -81,6 +90,9 @@ FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION = (
 )
 FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-run/v1alpha2"
+)
+FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_RUN_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-matrix-run/v1alpha3"
 )
 FLOWMESH_CONTAINER_MATRIX_FAILURE_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-failure/v1alpha1"
@@ -105,14 +117,28 @@ _FINAL_FILES = {
 }
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _RECOVERY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_ADOPTION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _PHASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 _CONDITIONAL_DESIGNS = frozenset({"D3", "D7"})
 _RECOVERY_STATE = "INFRASTRUCTURE_RECOVERY_AUTHORIZED"
-_RECOVERABLE_FAILURE_CLASS = (
+_REPLAY_ADOPTION_STATE = "REPLAY_RESULTS_ADOPTION_AUTHORIZED"
+_LEGACY_RECOVERABLE_FAILURE_CLASS = (
     "flowmesh-identity-provider-unavailable-before-dispatch"
 )
-_RECOVERY_IMPLEMENTATION_SCHEMA = (
+_LEGACY_RECOVERY_IMPLEMENTATION_SCHEMA = (
     "pathfinder.flowmesh-container-matrix-infrastructure-recovery/v1alpha1"
+)
+_RECOVERABLE_FAILURE_CLASS = (
+    "flowmesh-identity-provider-unavailable-at-safe-schedule-root"
+)
+_RECOVERY_IMPLEMENTATION_SCHEMA = (
+    "pathfinder.flowmesh-container-matrix-infrastructure-recovery/v1alpha2"
+)
+_REPLAY_ADOPTION_IMPLEMENTATION_SCHEMA = (
+    "pathfinder.flowmesh-container-matrix-replay-result-adoption/v1alpha1"
+)
+_REPLAY_ADOPTION_FAILURE_CLASS = (
+    "completed-recovery-workflow-with-idempotent-container-replay"
 )
 _ROOT_ENDPOINT_IDENTITY_SCHEME = (
     "normalized-scheme-host-effective-port-path/v1"
@@ -129,6 +155,83 @@ _MATRIX_RESULT_AUGMENTED_FIELDS = frozenset(
         "executed",
         "skip_reason",
         "telemetry_recorded",
+        "credentials_recorded",
+    }
+)
+_REPLAY_RESULT_PROVENANCE_FIELDS = frozenset(
+    {
+        "result_carrier_task_id",
+        "result_carrier_workflow_id",
+        "measurement_origin",
+        "original_flowmesh_task_id_known",
+        "original_flowmesh_workflow_id_known",
+        "measurement_freshness_established",
+    }
+)
+_CACHE_RESULT_OPERATION_KINDS = frozenset(
+    {"cache_lookup", "cache_read", "cache_insert"}
+)
+_CACHE_RESULT_FIELDS = frozenset(
+    {"cache_result", "cache_scope_id", "cache_evictions"}
+)
+_RAW_MATRIX_OPERATION_RESULT_FIELDS = frozenset(
+    {
+        "task_id",
+        "worker_id",
+        "operation_key",
+        "operation_kind",
+        "execution_node_id",
+        "destination_node_id",
+        "runtime_epoch",
+        "destination_runtime_epoch",
+        "container_result_schema_version",
+        "logical_bytes",
+        "physical_bytes",
+        "service_time_ms",
+        "fixture_materialization_ms_excluded_from_storage_measurement",
+        "application_shaping_target_ms",
+        "network_http_exchange_ms",
+        "application_shaping_sleep_ms",
+        "telemetry_provenance_version",
+        "telemetry_complete",
+        "semantic_task_quality_evaluated",
+        "idempotent_replay",
+        "api_executor",
+        "api_http_status",
+        "container_result_sha256",
+        "task_detail_available",
+        "started_monotonic_ns",
+        "finished_monotonic_ns",
+        "phase",
+    }
+)
+_INACTIVE_MATRIX_OPERATION_RESULT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "sequence_index",
+        "trial_key",
+        "operation_key",
+        "operation_id",
+        "operation_kind",
+        "condition",
+        "frozen_operation_sha256",
+        "planned_logical_bytes",
+        "executed",
+        "skip_reason",
+        "phase",
+        "task_id",
+        "worker_id",
+        "execution_node_id",
+        "destination_node_id",
+        "runtime_epoch",
+        "destination_runtime_epoch",
+        "logical_bytes",
+        "physical_bytes",
+        "service_time_ms",
+        "telemetry_recorded",
+        "telemetry_complete",
+        "semantic_task_quality_evaluated",
+        "idempotent_replay",
         "credentials_recorded",
     }
 )
@@ -161,6 +264,15 @@ def _recovery_identifier(value: Any) -> str:
     return identifier
 
 
+def _adoption_identifier(value: Any) -> str:
+    identifier = _text(value, "adoption_id")
+    _runner_require(
+        _ADOPTION_ID.fullmatch(identifier) is not None,
+        "adoption_id contains unsupported characters",
+    )
+    return identifier
+
+
 def _validated_recovery_reason(value: Any) -> str:
     reason = _text(value, "recovery_reason").strip()
     _runner_require(bool(reason), "recovery_reason must not be empty")
@@ -174,6 +286,21 @@ def _validated_recovery_reason(value: Any) -> str:
 def _recovery_reason(value: Any) -> str:
     reason = _validated_recovery_reason(value)
     return _validated_recovery_reason(redact_secrets(reason, limit=1000))
+
+
+def _validated_adoption_reason(value: Any) -> str:
+    reason = _text(value, "adoption_reason").strip()
+    _runner_require(bool(reason), "adoption_reason must not be empty")
+    _runner_require(
+        len(reason) <= 1000,
+        "adoption_reason must contain at most 1000 characters",
+    )
+    return reason
+
+
+def _adoption_reason(value: Any) -> str:
+    reason = _validated_adoption_reason(value)
+    return _validated_adoption_reason(redact_secrets(reason, limit=1000))
 
 
 def _recovery_runner_module_sha256() -> str:
@@ -212,6 +339,134 @@ def _normalize_recovery_request(
         "recovery_reason": _recovery_reason(recovery_reason),
         "recover_failed_entry_sha256": recover_failed_entry_sha256,
     }
+
+
+def _normalize_replay_adoption_request(
+    adoption_id: str | None,
+    adoption_reason: str | None,
+    adopt_failed_entry_sha256: str | None,
+) -> dict[str, str]:
+    supplied = (adoption_id, adoption_reason, adopt_failed_entry_sha256)
+    _runner_require(
+        all(value is not None for value in supplied),
+        "adoption_id, adoption_reason, and adopt_failed_entry_sha256 "
+        "must be supplied together",
+    )
+    assert adoption_id is not None
+    assert adoption_reason is not None
+    assert adopt_failed_entry_sha256 is not None
+    _runner_require(
+        re.fullmatch(r"[0-9a-f]{64}", adopt_failed_entry_sha256) is not None,
+        "adopt_failed_entry_sha256 must be a lowercase SHA-256 digest",
+    )
+    return {
+        "adoption_id": _adoption_identifier(adoption_id),
+        "adoption_reason": _adoption_reason(adoption_reason),
+        "adopt_failed_entry_sha256": adopt_failed_entry_sha256,
+    }
+
+
+def _replay_adoption_operation_evidence(
+    operation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return and validate the only operation safe for replay adoption.
+
+    This escape hatch is intentionally narrower than the container node's
+    general idempotency contract.  It exists only for a dependency-free,
+    zero-byte scheduling marker; no storage, network, cache, index, or compute
+    result can become canonical through it.
+    """
+
+    evidence = {
+        "operation_key": operation.get("operation_key"),
+        "operation_id": operation.get("operation_id"),
+        "operation_kind": operation.get("operation_kind"),
+        "operation_adapter": operation.get("operation_adapter"),
+        "dependency_operation_keys": operation.get(
+            "dependency_operation_keys"
+        ),
+        "logical_bytes": operation.get("logical_bytes"),
+        "execution_node_id": operation.get("execution_node_id"),
+        "destination_node_id": operation.get("destination_node_id"),
+        "condition": operation.get("condition"),
+        "link_adapter": operation.get("link_adapter"),
+        "cache_adapter": operation.get("cache_adapter"),
+        "cache_scope_id": operation.get("cache_scope_id"),
+        "frozen_operation_sha256": _sha256_bytes(
+            _canonical_bytes(operation)
+        ),
+    }
+    _runner_require(
+        isinstance(evidence["operation_key"], str)
+        and bool(evidence["operation_key"])
+        and evidence["operation_id"] == "schedule"
+        and evidence["operation_kind"] == "control"
+        and evidence["operation_adapter"] == "monotonic-control-v1"
+        and evidence["dependency_operation_keys"] == []
+        and evidence["logical_bytes"] == 0
+        and isinstance(evidence["execution_node_id"], str)
+        and evidence["execution_node_id"]
+        == evidence["destination_node_id"]
+        and evidence["condition"] is None
+        and evidence["link_adapter"] is None
+        and evidence["cache_adapter"] is None
+        and evidence["cache_scope_id"] is None,
+        "only the dependency-free zero-byte schedule control operation "
+        "may be replay-adopted",
+    )
+    return evidence
+
+
+def _validate_replay_adoption_operation_evidence(
+    evidence: Any,
+    *,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    _runner_require(
+        isinstance(evidence, Mapping),
+        "replay adoption operation evidence is invalid",
+    )
+    expected_fields = {
+        "operation_key",
+        "operation_id",
+        "operation_kind",
+        "operation_adapter",
+        "dependency_operation_keys",
+        "logical_bytes",
+        "execution_node_id",
+        "destination_node_id",
+        "condition",
+        "link_adapter",
+        "cache_adapter",
+        "cache_scope_id",
+        "frozen_operation_sha256",
+    }
+    operation_key = evidence.get("operation_key")
+    _runner_require(
+        set(evidence) == expected_fields
+        and isinstance(operation_key, str)
+        and bool(operation_key)
+        and evidence.get("operation_id") == "schedule"
+        and evidence.get("operation_kind") == "control"
+        and evidence.get("operation_adapter") == "monotonic-control-v1"
+        and evidence.get("dependency_operation_keys") == []
+        and evidence.get("logical_bytes") == 0
+        and isinstance(evidence.get("execution_node_id"), str)
+        and evidence.get("execution_node_id")
+        == evidence.get("destination_node_id")
+        and evidence.get("condition") is None
+        and evidence.get("link_adapter") is None
+        and evidence.get("cache_adapter") is None
+        and evidence.get("cache_scope_id") is None
+        and operation_key
+        in contract["planned_operation_sha256_by_operation_key"]
+        and evidence.get("frozen_operation_sha256")
+        == contract["planned_operation_sha256_by_operation_key"][
+            operation_key
+        ],
+        "replay adoption operation evidence changed from the frozen plan",
+    )
+    return dict(evidence)
 
 
 def _phase_identifier(value: Any) -> str:
@@ -1322,6 +1577,174 @@ def _validate_recoverable_task_evidence(
     )
 
 
+def _recovery_schedule_safety_evidence(
+    phase_operations: Sequence[Mapping[str, Any]],
+    *,
+    bound_task_ids: Sequence[str],
+    task_evidence: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Prove that the sole delivery failure is the phase's schedule root."""
+
+    try:
+        checked = [_validate_operation(row) for row in phase_operations]
+    except FlowMeshContainerDagError as exc:
+        raise FlowMeshContainerMatrixRunError(
+            "infrastructure recovery phase operations are invalid"
+        ) from exc
+    operation_keys = [str(row["operation_key"]) for row in checked]
+    _runner_require(
+        bool(checked)
+        and len(checked) == len(bound_task_ids) == len(task_evidence)
+        and len(bound_task_ids) == len(set(bound_task_ids))
+        and [row.get("task_id") for row in task_evidence]
+        == list(bound_task_ids),
+        "infrastructure recovery cannot bind tasks to frozen operations",
+    )
+    primary_rows = [row for row in task_evidence if row.get("attempts", 0) > 0]
+    _runner_require(
+        len(primary_rows) == 1,
+        "infrastructure recovery has no unique primary delivery failure",
+    )
+    primary_task_id = str(primary_rows[0]["task_id"])
+    primary_index = list(bound_task_ids).index(primary_task_id)
+    primary_operation = checked[primary_index]
+    try:
+        schedule_evidence = _replay_adoption_operation_evidence(
+            primary_operation
+        )
+    except FlowMeshContainerMatrixRunError as exc:
+        raise FlowMeshContainerMatrixRunError(
+            "identity-provider recovery requires the attempted task to map "
+            "to the dependency-free zero-byte schedule control root"
+        ) from exc
+    schedule_key = str(primary_operation["operation_key"])
+    schedule_candidates = [
+        row
+        for row in checked
+        if row.get("operation_id") == "schedule"
+        and row.get("operation_kind") == "control"
+        and row.get("logical_bytes") == 0
+        and row.get("dependency_operation_keys") == []
+        and row.get("operation_adapter") == "monotonic-control-v1"
+    ]
+    _runner_require(
+        len(schedule_candidates) == 1
+        and schedule_candidates[0]["operation_key"] == schedule_key,
+        "identity-provider recovery requires one unique schedule control root",
+    )
+
+    dependency_map = {
+        str(row["operation_key"]): [
+            str(value) for value in row["dependency_operation_keys"]
+        ]
+        for row in checked
+    }
+    _runner_require(
+        all(
+            dependency in dependency_map
+            for dependencies in dependency_map.values()
+            for dependency in dependencies
+        ),
+        "infrastructure recovery phase has an external dependency",
+    )
+
+    def descends_from_schedule(operation_key: str) -> bool:
+        pending = list(dependency_map[operation_key])
+        visited: set[str] = set()
+        while pending:
+            dependency = pending.pop()
+            if dependency == schedule_key:
+                return True
+            if dependency not in visited:
+                visited.add(dependency)
+                pending.extend(dependency_map[dependency])
+        return False
+
+    downstream_keys = [key for key in operation_keys if key != schedule_key]
+    _runner_require(
+        all(descends_from_schedule(key) for key in downstream_keys),
+        "identity-provider recovery requires every other phase operation to "
+        "be transitively downstream of the schedule control",
+    )
+    return {
+        # Include the exact frozen rows so an offline verifier can recompute
+        # both their contract digests and the complete dependency proof.
+        "frozen_phase_operations": checked,
+        "phase_operation_keys": operation_keys,
+        "task_to_operation_bindings": [
+            {"task_id": task_id, "operation_key": operation_key}
+            for task_id, operation_key in zip(bound_task_ids, operation_keys)
+        ],
+        "primary_failed_task_id": primary_task_id,
+        "primary_failed_operation_key": schedule_key,
+        "schedule_operation_evidence": schedule_evidence,
+        "transitively_downstream_operation_keys": downstream_keys,
+        "all_other_phase_operations_transitively_downstream": True,
+    }
+
+
+def _validate_recovery_schedule_safety_evidence(
+    evidence: Any,
+    *,
+    contract: Mapping[str, Any],
+    bound_task_ids: Sequence[str],
+    task_evidence: Sequence[Mapping[str, Any]],
+    expected_phase_operation_keys: Sequence[str],
+) -> None:
+    _runner_require(
+        isinstance(evidence, Mapping),
+        "infrastructure recovery schedule-root evidence is invalid",
+    )
+    expected_fields = {
+        "frozen_phase_operations",
+        "phase_operation_keys",
+        "task_to_operation_bindings",
+        "primary_failed_task_id",
+        "primary_failed_operation_key",
+        "schedule_operation_evidence",
+        "transitively_downstream_operation_keys",
+        "all_other_phase_operations_transitively_downstream",
+    }
+    frozen_phase_operations = evidence.get("frozen_phase_operations")
+    bindings = evidence.get("task_to_operation_bindings")
+    _runner_require(
+        isinstance(frozen_phase_operations, list),
+        "infrastructure recovery frozen phase evidence is invalid",
+    )
+    try:
+        checked = [
+            _validate_operation(row) for row in frozen_phase_operations
+        ]
+    except (FlowMeshContainerDagError, TypeError) as exc:
+        raise FlowMeshContainerMatrixRunError(
+            "infrastructure recovery frozen phase evidence is invalid"
+        ) from exc
+    operation_keys = [str(row["operation_key"]) for row in checked]
+    operation_digests = contract[
+        "planned_operation_sha256_by_operation_key"
+    ]
+    _runner_require(
+        set(evidence) == expected_fields
+        and operation_keys == list(expected_phase_operation_keys)
+        and all(
+            _sha256_bytes(_canonical_bytes(operation))
+            == operation_digests.get(operation["operation_key"])
+            for operation in checked
+        )
+        and isinstance(bindings, list),
+        "infrastructure recovery schedule-root evidence is invalid",
+    )
+    expected = _recovery_schedule_safety_evidence(
+        checked,
+        bound_task_ids=bound_task_ids,
+        task_evidence=task_evidence,
+    )
+    _runner_require(
+        dict(evidence) == expected,
+        "infrastructure recovery schedule-root evidence is invalid",
+    )
+
+
 def _validate_recovery_payload(
     payload: Mapping[str, Any],
     *,
@@ -1331,7 +1754,7 @@ def _validate_recovery_payload(
     failure_document: Mapping[str, Any],
     expected_retry_ordinal: int,
 ) -> None:
-    expected_fields = {
+    legacy_fields = {
         "recovery_id",
         "recovery_reason",
         "retry_ordinal",
@@ -1354,18 +1777,38 @@ def _validate_recovery_payload(
         "recovery_evidence_validated",
         "credentials_recorded",
     }
+    schema = payload.get("recovery_implementation_schema")
+    # Historical v1alpha1 entries used an empty Root dispatch snapshot as a
+    # recovery premise.  Keep them readable, but the builder below emits only
+    # v1alpha2 evidence whose safety comes from the frozen DAG structure.
+    legacy = schema == _LEGACY_RECOVERY_IMPLEMENTATION_SCHEMA
+    current = schema == _RECOVERY_IMPLEMENTATION_SCHEMA
+    expected_fields = (
+        legacy_fields
+        if legacy
+        else legacy_fields
+        | {
+            "root_dispatch_history_interpretation",
+            "schedule_root_safety_evidence",
+        }
+    )
     evidence = payload.get("task_evidence")
+    dispatched = payload.get("dispatched_task_ids")
     _runner_require(
-        set(payload) == expected_fields
+        (legacy or current)
+        and set(payload) == expected_fields
         and _recovery_identifier(payload.get("recovery_id"))
         == payload.get("recovery_id")
         and _validated_recovery_reason(payload.get("recovery_reason"))
         == payload.get("recovery_reason")
         and payload.get("retry_ordinal") == expected_retry_ordinal
         and expected_retry_ordinal >= 1
-        and payload.get("failure_class") == _RECOVERABLE_FAILURE_CLASS
-        and payload.get("recovery_implementation_schema")
-        == _RECOVERY_IMPLEMENTATION_SCHEMA
+        and payload.get("failure_class")
+        == (
+            _LEGACY_RECOVERABLE_FAILURE_CLASS
+            if legacy
+            else _RECOVERABLE_FAILURE_CLASS
+        )
         and re.fullmatch(
             r"[0-9a-f]{64}",
             str(payload.get("recovery_runner_module_sha256") or ""),
@@ -1382,7 +1825,20 @@ def _validate_recovery_payload(
         and payload.get("bound_task_ids") == bound_payload.get("task_ids")
         and isinstance(payload.get("failed_task_ids"), list)
         and payload.get("cancelled_task_ids") == []
-        and payload.get("dispatched_task_ids") == []
+        and (
+            dispatched == []
+            if legacy
+            else (
+                dispatched is None
+                or (
+                    isinstance(dispatched, list)
+                    and all(
+                        isinstance(task_id, str) and bool(task_id)
+                        for task_id in dispatched
+                    )
+                )
+            )
+        )
         and isinstance(evidence, list)
         and payload.get("task_evidence_sha256")
         == _sha256_bytes(_canonical_bytes(evidence))
@@ -1402,12 +1858,33 @@ def _validate_recovery_payload(
         failed_task_ids=payload["failed_task_ids"],
         selected_worker_id=str(payload["selected_worker_id"]),
     )
+    if current:
+        trial_key = str(failure_entry.get("trial_key"))
+        phase = str(failure_entry.get("phase"))
+        phase_map = contract[
+            "expected_phase_operation_keys_by_trial_key"
+        ].get(trial_key)
+        _runner_require(
+            isinstance(phase_map, Mapping)
+            and isinstance(phase_map.get(phase), list)
+            and payload.get("root_dispatch_history_interpretation")
+            == "non-historical-diagnostic-only",
+            "matrix infrastructure recovery payload is invalid",
+        )
+        _validate_recovery_schedule_safety_evidence(
+            payload.get("schedule_root_safety_evidence"),
+            contract=contract,
+            bound_task_ids=payload["bound_task_ids"],
+            task_evidence=evidence,
+            expected_phase_operation_keys=phase_map[phase],
+        )
 
 
 def _build_recovery_payload(
     client: FlowMeshClientProtocol,
     *,
     contract: Mapping[str, Any],
+    phase_operations: Sequence[Mapping[str, Any]],
     failure_entry: Mapping[str, Any],
     bound_payload: Mapping[str, Any],
     failure_document: Mapping[str, Any],
@@ -1421,7 +1898,8 @@ def _build_recovery_payload(
     _runner_require(
         isinstance(task_ids, list)
         and bool(task_ids)
-        and all(isinstance(task_id, str) and task_id for task_id in task_ids),
+        and all(isinstance(task_id, str) and task_id for task_id in task_ids)
+        and len(task_ids) == len(set(task_ids)),
         "failed workflow task binding is invalid",
     )
     try:
@@ -1435,12 +1913,10 @@ def _build_recovery_payload(
         isinstance(terminal, TerminalWorkflow)
         and terminal.workflow_id == workflow_id
         and terminal.status == "FAILED"
-        and terminal.dispatched_task_ids == ()
         and not terminal.cancelled_task_ids
         and bool(terminal.failed_task_ids)
         and set(terminal.failed_task_ids).issubset(task_ids),
-        "FlowMesh failure is not an allowlisted undispatched terminal "
-        "workflow",
+        "FlowMesh failure is not an allowlisted terminal workflow",
     )
     evidence: list[dict[str, Any]] = []
     for task_id in task_ids:
@@ -1456,6 +1932,18 @@ def _build_recovery_payload(
             "FlowMesh returned no task evidence for infrastructure recovery",
         )
         evidence.append(_normalize_task_evidence(task_id, detail))
+    _validate_recoverable_task_evidence(
+        evidence,
+        bound_task_ids=task_ids,
+        failed_task_ids=terminal.failed_task_ids,
+        selected_worker_id=str(contract["selected_worker"]["worker_id"]),
+    )
+    safety_evidence = _recovery_schedule_safety_evidence(
+        phase_operations,
+        bound_task_ids=task_ids,
+        task_evidence=evidence,
+    )
+    dispatched = terminal.dispatched_task_ids
     payload: dict[str, Any] = {
         "recovery_id": recovery_request["recovery_id"],
         "recovery_reason": recovery_request["recovery_reason"],
@@ -1472,9 +1960,18 @@ def _build_recovery_payload(
         "bound_task_ids": list(task_ids),
         "failed_task_ids": list(terminal.failed_task_ids),
         "cancelled_task_ids": list(terminal.cancelled_task_ids),
-        "dispatched_task_ids": list(terminal.dispatched_task_ids),
+        # Root dispatch lists are point-in-time diagnostics, not a complete
+        # execution history.  Preserve the nullable snapshot without using it
+        # to authorize recovery.
+        "dispatched_task_ids": (
+            None if dispatched is None else list(dispatched)
+        ),
+        "root_dispatch_history_interpretation": (
+            "non-historical-diagnostic-only"
+        ),
         "task_evidence": evidence,
         "task_evidence_sha256": _sha256_bytes(_canonical_bytes(evidence)),
+        "schedule_root_safety_evidence": safety_evidence,
         "selected_worker_id": contract["selected_worker"]["worker_id"],
         "runtime_epochs_sha256": contract["runtime_epochs_sha256"],
         "root_endpoint_identity_sha256": contract[
@@ -1490,6 +1987,343 @@ def _build_recovery_payload(
         bound_payload=bound_payload,
         failure_document=failure_document,
         expected_retry_ordinal=retry_ordinal,
+    )
+    return payload
+
+
+def _validate_replay_adoption_payload(
+    payload: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any],
+    failure_entry: Mapping[str, Any],
+    intent_entry: Mapping[str, Any],
+    bound_entry: Mapping[str, Any],
+    recovery_entry: Mapping[str, Any],
+    failure_document: Mapping[str, Any],
+    expected_operation_keys: Sequence[str],
+    expected_adoption_ordinal: int,
+) -> None:
+    expected_fields = {
+        "adoption_id",
+        "adoption_reason",
+        "adoption_ordinal",
+        "failure_class",
+        "adoption_implementation_schema",
+        "adoption_runner_module_sha256",
+        "failed_journal_entry_sha256",
+        "initial_failure_sha256",
+        "recovery_id",
+        "recovery_authorization_entry_sha256",
+        "workflow_sha256",
+        "submission_intent_entry_sha256",
+        "workflow_bound_entry_sha256",
+        "workflow_id",
+        "bound_task_ids",
+        "terminal_status",
+        "terminal_failed_task_ids",
+        "terminal_cancelled_task_ids",
+        "terminal_dispatched_task_ids",
+        "selected_worker_id",
+        "runtime_epochs_before",
+        "runtime_epochs_after",
+        "runtime_epochs_sha256",
+        "root_endpoint_identity_sha256",
+        "operation_result_keys",
+        "operation_results",
+        "operation_results_sha256",
+        "task_evidence",
+        "task_evidence_sha256",
+        "adopted_replay_operation_count",
+        "adopted_replay_operation_keys",
+        "adopted_replay_operation_evidence",
+        "root_dispatch_history_interpretation",
+        "prior_before_dispatch_interpretation_superseded",
+        "prior_execution_proven_by_idempotent_replay",
+        "no_workflow_submitted",
+        "credentials_recorded",
+        "eligible_for_scientific_claims",
+    }
+    result_keys = payload.get("operation_result_keys")
+    replay_keys = payload.get("adopted_replay_operation_keys")
+    replay_operation_evidence = payload.get(
+        "adopted_replay_operation_evidence"
+    )
+    task_evidence = payload.get("task_evidence")
+    operation_results = payload.get("operation_results")
+    dispatched = payload.get("terminal_dispatched_task_ids")
+    intent_payload = intent_entry.get("payload", {})
+    bound_payload = bound_entry.get("payload", {})
+    _runner_require(
+        set(payload) == expected_fields
+        and _adoption_identifier(payload.get("adoption_id"))
+        == payload.get("adoption_id")
+        and _validated_adoption_reason(payload.get("adoption_reason"))
+        == payload.get("adoption_reason")
+        and payload.get("adoption_ordinal") == expected_adoption_ordinal
+        and expected_adoption_ordinal >= 1
+        and payload.get("failure_class") == _REPLAY_ADOPTION_FAILURE_CLASS
+        and payload.get("adoption_implementation_schema")
+        == _REPLAY_ADOPTION_IMPLEMENTATION_SCHEMA
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("adoption_runner_module_sha256") or ""),
+        )
+        is not None
+        and payload.get("failed_journal_entry_sha256")
+        == failure_entry.get("entry_sha256")
+        and payload.get("initial_failure_sha256")
+        == failure_document.get("failure_sha256")
+        and payload.get("recovery_id")
+        == recovery_entry.get("payload", {}).get("recovery_id")
+        and payload.get("recovery_authorization_entry_sha256")
+        == recovery_entry.get("entry_sha256")
+        and payload.get("workflow_sha256")
+        == bound_payload.get("workflow_sha256")
+        and payload.get("submission_intent_entry_sha256")
+        == intent_entry.get("entry_sha256")
+        and payload.get("workflow_bound_entry_sha256")
+        == bound_entry.get("entry_sha256")
+        and intent_payload.get("workflow_sha256")
+        == bound_payload.get("workflow_sha256")
+        and payload.get("workflow_id") == bound_payload.get("workflow_id")
+        and payload.get("bound_task_ids") == bound_payload.get("task_ids")
+        and payload.get("terminal_status") == "DONE"
+        and payload.get("terminal_failed_task_ids") == []
+        and payload.get("terminal_cancelled_task_ids") == []
+        and (
+            dispatched is None
+            or (
+                isinstance(dispatched, list)
+                and len(dispatched) == len(set(dispatched))
+                and set(dispatched).issubset(payload["bound_task_ids"])
+            )
+        )
+        and payload.get("selected_worker_id")
+        == contract["selected_worker"]["worker_id"]
+        and payload.get("runtime_epochs_before")
+        == contract["runtime_epochs"]
+        and payload.get("runtime_epochs_after")
+        == contract["runtime_epochs"]
+        and payload.get("runtime_epochs_sha256")
+        == contract["runtime_epochs_sha256"]
+        and payload.get("root_endpoint_identity_sha256")
+        == contract["flowmesh_root_endpoint_identity_sha256"]
+        and isinstance(result_keys, list)
+        and result_keys == list(expected_operation_keys)
+        and len(result_keys) == len(set(result_keys))
+        and isinstance(operation_results, list)
+        and [row.get("operation_key") for row in operation_results]
+        == result_keys
+        and payload.get("operation_results_sha256")
+        == _sha256_bytes(_canonical_bytes(operation_results))
+        and isinstance(replay_keys, list)
+        and len(replay_keys) == len(set(replay_keys)) == 1
+        and all(key in result_keys for key in replay_keys)
+        and payload.get("adopted_replay_operation_count")
+        == len(replay_keys)
+        and isinstance(replay_operation_evidence, list)
+        and len(replay_operation_evidence) == 1
+        and _validate_replay_adoption_operation_evidence(
+            replay_operation_evidence[0], contract=contract
+        )["operation_key"]
+        == replay_keys[0]
+        and payload.get("root_dispatch_history_interpretation")
+        == "non-historical-diagnostic-only"
+        and payload.get("prior_before_dispatch_interpretation_superseded")
+        is True
+        and payload.get("prior_execution_proven_by_idempotent_replay") is True
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("operation_results_sha256") or ""),
+        )
+        is not None
+        and isinstance(task_evidence, list)
+        and len(task_evidence) == len(payload["bound_task_ids"])
+        and len({row.get("task_id") for row in task_evidence})
+        == len(task_evidence)
+        and {row.get("task_id") for row in task_evidence}
+        == set(payload["bound_task_ids"])
+        and [row.get("operation_key") for row in task_evidence]
+        == result_keys
+        and all(
+            set(row)
+            == {
+                "task_id",
+                "task_status",
+                "assigned_worker",
+                "operation_key",
+                "api_http_status",
+                "container_result_sha256",
+                "idempotent_replay",
+            }
+            and row.get("task_status") == "DONE"
+            and row.get("assigned_worker")
+            == contract["selected_worker"]["worker_id"]
+            and row.get("api_http_status") == 200
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(row.get("container_result_sha256") or ""),
+            )
+            is not None
+            and type(row.get("idempotent_replay")) is bool
+            for row in task_evidence
+        )
+        and [
+            row["operation_key"]
+            for row in task_evidence
+            if row["idempotent_replay"] is True
+        ]
+        == replay_keys
+        and payload.get("task_evidence_sha256")
+        == _sha256_bytes(_canonical_bytes(task_evidence))
+        and payload.get("no_workflow_submitted") is True
+        and payload.get("credentials_recorded") is False
+        and payload.get("eligible_for_scientific_claims") is False,
+        "matrix replay-result adoption payload is invalid",
+    )
+    assert isinstance(operation_results, list)
+    assert isinstance(replay_keys, list)
+    for result in operation_results:
+        _runner_require(
+            isinstance(result, Mapping),
+            "matrix replay-result adoption contains a non-object result",
+        )
+        _validate_raw_operation_result_fields(result)
+        if result.get("operation_key") in replay_keys:
+            _validate_replay_result_provenance(
+                result,
+                expected_carrier_task_id=_text(
+                    result.get("task_id"), "replay result task_id"
+                ),
+                expected_carrier_workflow_id=_text(
+                    payload.get("workflow_id"),
+                    "replay result carrier workflow_id",
+                ),
+            )
+        else:
+            _validate_absent_replay_result_provenance(result)
+
+
+def _build_replay_adoption_payload(
+    *,
+    contract: Mapping[str, Any],
+    failure_entry: Mapping[str, Any],
+    intent_entry: Mapping[str, Any],
+    bound_entry: Mapping[str, Any],
+    recovery_entry: Mapping[str, Any],
+    failure_document: Mapping[str, Any],
+    adoption_request: Mapping[str, str],
+    terminal: TerminalWorkflow,
+    records: Sequence[Mapping[str, Any]],
+    replay_operation: Mapping[str, Any],
+    runtime_epochs_before: Mapping[str, str],
+    runtime_epochs_after: Mapping[str, str],
+    adoption_ordinal: int,
+) -> dict[str, Any]:
+    result_keys = [str(row["operation_key"]) for row in records]
+    replay_keys = [
+        str(row["operation_key"])
+        for row in records
+        if row.get("idempotent_replay") is True
+    ]
+    replay_records = [
+        row for row in records if row.get("idempotent_replay") is True
+    ]
+    _runner_require(
+        len(replay_records) == 1
+        and replay_records[0].get("operation_kind") == "control"
+        and replay_records[0].get("logical_bytes") == 0
+        and replay_records[0].get("physical_bytes") == 0,
+        "only one zero-byte control replay can be adopted",
+    )
+    replay_evidence = _replay_adoption_operation_evidence(
+        replay_operation
+    )
+    _runner_require(
+        replay_evidence["operation_key"] == replay_keys[0],
+        "replay result does not identify the frozen schedule operation",
+    )
+    bound_payload = bound_entry["payload"]
+    task_evidence = [
+        {
+            "task_id": row["task_id"],
+            "task_status": "DONE",
+            "assigned_worker": row["worker_id"],
+            "operation_key": row["operation_key"],
+            "api_http_status": row["api_http_status"],
+            "container_result_sha256": row["container_result_sha256"],
+            "idempotent_replay": row["idempotent_replay"],
+        }
+        for row in records
+    ]
+    dispatched = terminal.dispatched_task_ids
+    payload: dict[str, Any] = {
+        "adoption_id": adoption_request["adoption_id"],
+        "adoption_reason": adoption_request["adoption_reason"],
+        "adoption_ordinal": adoption_ordinal,
+        "failure_class": _REPLAY_ADOPTION_FAILURE_CLASS,
+        "adoption_implementation_schema": (
+            _REPLAY_ADOPTION_IMPLEMENTATION_SCHEMA
+        ),
+        "adoption_runner_module_sha256": _recovery_runner_module_sha256(),
+        "failed_journal_entry_sha256": failure_entry["entry_sha256"],
+        "initial_failure_sha256": failure_document["failure_sha256"],
+        "recovery_id": recovery_entry["payload"]["recovery_id"],
+        "recovery_authorization_entry_sha256": recovery_entry[
+            "entry_sha256"
+        ],
+        "workflow_sha256": bound_payload["workflow_sha256"],
+        "submission_intent_entry_sha256": intent_entry["entry_sha256"],
+        "workflow_bound_entry_sha256": bound_entry["entry_sha256"],
+        "workflow_id": bound_payload["workflow_id"],
+        "bound_task_ids": list(bound_payload["task_ids"]),
+        "terminal_status": terminal.status,
+        "terminal_failed_task_ids": list(terminal.failed_task_ids),
+        "terminal_cancelled_task_ids": list(terminal.cancelled_task_ids),
+        # This Root can report an empty/unknown dispatch list even for a DONE
+        # workflow.  Preserve it only as raw diagnostic evidence; it is not
+        # used as evidence that execution did or did not occur.
+        "terminal_dispatched_task_ids": (
+            None if dispatched is None else list(dispatched)
+        ),
+        "selected_worker_id": contract["selected_worker"]["worker_id"],
+        "runtime_epochs_before": dict(runtime_epochs_before),
+        "runtime_epochs_after": dict(runtime_epochs_after),
+        "runtime_epochs_sha256": contract["runtime_epochs_sha256"],
+        "root_endpoint_identity_sha256": contract[
+            "flowmesh_root_endpoint_identity_sha256"
+        ],
+        "operation_result_keys": result_keys,
+        "operation_results": [dict(row) for row in records],
+        "operation_results_sha256": _sha256_bytes(
+            _canonical_bytes(list(records))
+        ),
+        "task_evidence": task_evidence,
+        "task_evidence_sha256": _sha256_bytes(
+            _canonical_bytes(task_evidence)
+        ),
+        "adopted_replay_operation_count": len(replay_keys),
+        "adopted_replay_operation_keys": replay_keys,
+        "adopted_replay_operation_evidence": [replay_evidence],
+        "root_dispatch_history_interpretation": (
+            "non-historical-diagnostic-only"
+        ),
+        "prior_before_dispatch_interpretation_superseded": True,
+        "prior_execution_proven_by_idempotent_replay": True,
+        "no_workflow_submitted": True,
+        "credentials_recorded": False,
+        "eligible_for_scientific_claims": False,
+    }
+    _validate_replay_adoption_payload(
+        payload,
+        contract=contract,
+        failure_entry=failure_entry,
+        intent_entry=intent_entry,
+        bound_entry=bound_entry,
+        recovery_entry=recovery_entry,
+        failure_document=failure_document,
+        expected_operation_keys=result_keys,
+        expected_adoption_ordinal=adoption_ordinal,
     )
     return payload
 
@@ -1541,13 +2375,19 @@ def _validate_journal(
     failed = False
     failure_entry: Mapping[str, Any] | None = None
     recovery_count = 0
+    adoption_count = 0
     current_intent: Mapping[str, Any] | None = None
     current_bound: Mapping[str, Any] | None = None
+    current_intent_entry: Mapping[str, Any] | None = None
+    current_bound_entry: Mapping[str, Any] | None = None
     obtained_payloads: list[Mapping[str, Any]] = []
     seen_workflow_ids: set[str] = set()
     seen_task_ids: set[str] = set()
     seen_recovery_ids: set[str] = set()
     recovered_phases: set[tuple[int, str]] = set()
+    seen_adoption_ids: set[str] = set()
+    adopted_phases: set[tuple[int, str]] = set()
+    current_adoption: Mapping[str, Any] | None = None
     phase_states = (
         "SUBMISSION_INTENT",
         "WORKFLOW_BOUND",
@@ -1601,12 +2441,13 @@ def _validate_journal(
         )
 
         if state == "RUN_FAILED":
-            followed_by_recovery = (
+            followed_by_authorization = (
                 index + 1 < len(entries)
-                and entries[index + 1].get("state") == _RECOVERY_STATE
+                and entries[index + 1].get("state")
+                in {_RECOVERY_STATE, _REPLAY_ADOPTION_STATE}
             )
             _runner_require(
-                (index == len(entries) - 1 or followed_by_recovery)
+                (index == len(entries) - 1 or followed_by_authorization)
                 and completed_count < 64,
                 "matrix journal failure is neither terminal nor recovered",
             )
@@ -1619,6 +2460,64 @@ def _validate_journal(
             )
             failed = True
             failure_entry = row
+            continue
+
+        if state == _REPLAY_ADOPTION_STATE:
+            phases = phases_for(completed_count)
+            recovery_key = (completed_count, phase)
+            recovery_entries = [
+                entry
+                for entry in entries[:index]
+                if entry.get("state") == _RECOVERY_STATE
+                and entry.get("sequence_index") == completed_count
+                and entry.get("phase") == phase
+            ]
+            _runner_require(
+                failed
+                and failure_entry is not None
+                and failure_document is not None
+                and current_intent is not None
+                and current_bound is not None
+                and current_intent_entry is not None
+                and current_bound_entry is not None
+                and phase_index < len(phases)
+                and phase == phases[phase_index]
+                and recovery_key in recovered_phases
+                and len(recovery_entries) == 1
+                and failure_entry.get("payload", {}).get("error")
+                == "container operation was replayed",
+                "matrix replay-result adoption does not follow the sole "
+                "recoverable replay failure",
+            )
+            expected_keys = current_intent["operation_keys"]
+            _validate_replay_adoption_payload(
+                payload,
+                contract=contract,
+                failure_entry=failure_entry,
+                intent_entry=current_intent_entry,
+                bound_entry=current_bound_entry,
+                recovery_entry=recovery_entries[0],
+                failure_document=failure_document,
+                expected_operation_keys=expected_keys,
+                expected_adoption_ordinal=adoption_count + 1,
+            )
+            adoption_id = str(payload["adoption_id"])
+            _runner_require(
+                adoption_id not in seen_adoption_ids
+                and recovery_key not in adopted_phases,
+                "matrix journal reuses an adoption_id or adopts one phase "
+                "more than once",
+            )
+            seen_adoption_ids.add(adoption_id)
+            adopted_phases.add(recovery_key)
+            adoption_count += 1
+            current_adoption = payload
+            failed = False
+            failure_entry = None
+            # Keep the latest recovered submission intent and binding.  The
+            # next durable state must be RESULTS_OBTAINED for that exact DONE
+            # workflow; no new submission state is permitted.
+            state_index = 2
             continue
 
         if state == _RECOVERY_STATE:
@@ -1656,6 +2555,9 @@ def _validate_journal(
             state_index = 0
             current_intent = None
             current_bound = None
+            current_intent_entry = None
+            current_bound_entry = None
+            current_adoption = None
             continue
 
         _runner_require(
@@ -1672,6 +2574,30 @@ def _validate_journal(
                 "matrix journal completes a trial without a checkpoint",
             )
             checkpoint = checkpoints[completed_count]
+            if checkpoint.get("schema_version") == (
+                FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_CHECKPOINT_SCHEMA_VERSION
+            ):
+                matching_adoptions = [
+                    entry
+                    for entry in entries[:index]
+                    if entry.get("state") == _REPLAY_ADOPTION_STATE
+                    and entry.get("sequence_index") == completed_count
+                    and entry.get("payload", {}).get("adoption_id")
+                    == checkpoint.get("replay_result_adoption_id")
+                ]
+                _runner_require(
+                    len(matching_adoptions) == 1
+                    and checkpoint.get(
+                        "replay_result_adoption_entry_sha256"
+                    )
+                    == matching_adoptions[0].get("entry_sha256")
+                    and checkpoint.get("adopted_replay_operation_keys")
+                    == matching_adoptions[0].get("payload", {}).get(
+                        "adopted_replay_operation_keys"
+                    ),
+                    "matrix replay-adopted checkpoint is not bound to its "
+                    "journal authorization",
+                )
             _runner_require(
                 set(payload) == {"checkpoint_entry_sha256"}
                 and payload.get("checkpoint_entry_sha256")
@@ -1724,6 +2650,9 @@ def _validate_journal(
             ready_for_checkpoint = False
             current_intent = None
             current_bound = None
+            current_intent_entry = None
+            current_bound_entry = None
+            current_adoption = None
             obtained_payloads = []
             continue
 
@@ -1759,6 +2688,7 @@ def _validate_journal(
                 "matrix journal submission intent payload is invalid",
             )
             current_intent = payload
+            current_intent_entry = row
         elif state == "WORKFLOW_BOUND":
             task_ids = payload.get("task_ids")
             workflow_id = payload.get("workflow_id")
@@ -1784,6 +2714,7 @@ def _validate_journal(
             seen_workflow_ids.add(workflow_id)
             seen_task_ids.update(task_ids)
             current_bound = payload
+            current_bound_entry = row
         else:
             submission = payload.get("submission")
             operation_results = payload.get("operation_results")
@@ -1810,6 +2741,60 @@ def _validate_journal(
                 and set(result_task_ids) == set(current_bound["task_ids"]),
                 "matrix journal obtained-results payload is invalid",
             )
+            for result in operation_results:
+                _runner_require(
+                    isinstance(result, Mapping),
+                    "matrix journal contains a non-object operation result",
+                )
+                _validate_raw_operation_result_fields(result)
+            if current_adoption is not None:
+                replay_keys = [
+                    result["operation_key"]
+                    for result in operation_results
+                    if result.get("idempotent_replay") is True
+                ]
+                task_evidence = [
+                    {
+                        "task_id": result["task_id"],
+                        "task_status": "DONE",
+                        "assigned_worker": result["worker_id"],
+                        "operation_key": result["operation_key"],
+                        "api_http_status": result["api_http_status"],
+                        "container_result_sha256": result[
+                            "container_result_sha256"
+                        ],
+                        "idempotent_replay": result[
+                            "idempotent_replay"
+                        ],
+                    }
+                    for result in operation_results
+                ]
+                _runner_require(
+                    _sha256_bytes(_canonical_bytes(operation_results))
+                    == current_adoption["operation_results_sha256"]
+                    and replay_keys
+                    == current_adoption["adopted_replay_operation_keys"]
+                    and task_evidence == current_adoption["task_evidence"]
+                    and _sha256_bytes(_canonical_bytes(task_evidence))
+                    == current_adoption["task_evidence_sha256"],
+                    "adopted replay results differ from their durable "
+                    "authorization",
+                )
+                for result in operation_results:
+                    if result.get("operation_key") in replay_keys:
+                        _validate_replay_result_provenance(
+                            result,
+                            expected_carrier_task_id=_text(
+                                result.get("task_id"),
+                                "replay journal task_id",
+                            ),
+                            expected_carrier_workflow_id=_text(
+                                current_adoption.get("workflow_id"),
+                                "replay journal carrier workflow_id",
+                            ),
+                        )
+                    else:
+                        _validate_absent_replay_result_provenance(result)
             if sources is not None:
                 wrappers = sources["wrappers"]
                 source_operations = sources["operations"]
@@ -1865,6 +2850,23 @@ def _validate_journal(
                 for raw_result, operation in zip(
                     operation_results, phase_operations
                 ):
+                    replay_keys = set(
+                        current_adoption.get(
+                            "adopted_replay_operation_keys", []
+                        )
+                        if current_adoption is not None
+                        else []
+                    )
+                    if str(operation["operation_key"]) in replay_keys:
+                        _runner_require(
+                            operation.get("operation_kind") == "control"
+                            and operation.get("logical_bytes") == 0
+                            and operation.get("dependency_operation_keys") == []
+                            and operation.get("operation_adapter")
+                            == "monotonic-control-v1",
+                            "only the dependency-free zero-byte schedule "
+                            "control operation may be replay-adopted",
+                        )
                     wrapped = _executed_operation_result(
                         operation,
                         raw_result,
@@ -1876,12 +2878,24 @@ def _validate_journal(
                         contract=contract,
                         sequence_index=completed_count,
                         expected_phase=phase,
+                        allow_idempotent_replay=(
+                            str(operation["operation_key"]) in replay_keys
+                        ),
+                        expected_carrier_workflow_id=(
+                            str(submission["workflow_id"])
+                            if str(operation["operation_key"])
+                            in replay_keys
+                            else None
+                        ),
                     )
             obtained_payloads.append(payload)
             phase_index += 1
             state_index = 0
             current_intent = None
             current_bound = None
+            current_intent_entry = None
+            current_bound_entry = None
+            current_adoption = None
             ready_for_checkpoint = phase_index == len(phases)
             continue
         state_index += 1
@@ -1987,6 +3001,7 @@ def _authorize_infrastructure_recovery(
     client: FlowMeshClientProtocol,
     *,
     contract: Mapping[str, Any],
+    operations: Sequence[Mapping[str, Any]],
     journal_path: Path,
     journal_entries: list[dict[str, Any]],
     failure_document: Mapping[str, Any],
@@ -2038,9 +3053,25 @@ def _authorize_infrastructure_recovery(
     retry_ordinal = 1 + sum(
         row.get("state") == _RECOVERY_STATE for row in journal_entries
     )
+    trial_key = str(failure_entry["trial_key"])
+    phase_operation_keys = contract[
+        "expected_phase_operation_keys_by_trial_key"
+    ][trial_key][phase]
+    operation_by_key = {
+        str(operation["operation_key"]): operation
+        for operation in operations
+    }
+    _runner_require(
+        all(key in operation_by_key for key in phase_operation_keys),
+        "recovery phase is not covered by the frozen operation ledger",
+    )
+    phase_operations = [
+        operation_by_key[key] for key in phase_operation_keys
+    ]
     payload = _build_recovery_payload(
         client,
         contract=contract,
+        phase_operations=phase_operations,
         failure_entry=failure_entry,
         bound_payload=progress["payload"],
         failure_document=failure_document,
@@ -2169,6 +3200,7 @@ def _collect_results(
     phase: str,
     selected_worker_id: str,
     expected_runtime_epochs: Mapping[str, str],
+    allow_idempotent_replay: bool = False,
 ) -> list[dict[str, Any]]:
     _runner_require(
         len(submitted.task_ids) == len(operations),
@@ -2206,6 +3238,16 @@ def _collect_results(
             "FlowMesh did not return task metadata needed to verify the "
             "worker pin",
         )
+        if allow_idempotent_replay:
+            _runner_require(
+                str(detail.get("task_status") or "").upper() == "DONE"
+                and detail.get("assigned_worker") == selected_worker_id,
+                "replay adoption task is not DONE on the frozen worker",
+            )
+            _runner_require(
+                api.get("status_code") == 200,
+                "replay adoption requires exact API HTTP 200 results",
+            )
         record = _operation_result(
             raw,
             expected[operation_key],
@@ -2213,6 +3255,7 @@ def _collect_results(
             selected_worker_id=selected_worker_id,
             task_detail=detail,
             expected_runtime_epochs=expected_runtime_epochs,
+            allow_idempotent_replay=allow_idempotent_replay,
         )
         _runner_require(
             type(body.get("started_monotonic_ns")) is int
@@ -2222,6 +3265,19 @@ def _collect_results(
         record["started_monotonic_ns"] = body["started_monotonic_ns"]
         record["finished_monotonic_ns"] = body["finished_monotonic_ns"]
         record["phase"] = phase
+        if record.get("idempotent_replay") is True:
+            record.update(
+                {
+                    "result_carrier_task_id": task_id,
+                    "result_carrier_workflow_id": submitted.workflow_id,
+                    "measurement_origin": (
+                        "container-node-idempotency-ledger"
+                    ),
+                    "original_flowmesh_task_id_known": False,
+                    "original_flowmesh_workflow_id_known": False,
+                    "measurement_freshness_established": False,
+                }
+            )
         records.append(record)
     _runner_require(
         len(records) == len(expected)
@@ -2485,10 +3541,13 @@ def _executed_operation_result(
     sequence_index: int,
 ) -> dict[str, Any]:
     copied = _copy(record, "matrix operation result")
+    replayed = copied.get("idempotent_replay") is True
     copied.update(
         {
             "schema_version": (
-                FLOWMESH_CONTAINER_MATRIX_OPERATION_RESULT_SCHEMA_VERSION
+                FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_OPERATION_RESULT_SCHEMA_VERSION
+                if replayed
+                else FLOWMESH_CONTAINER_MATRIX_OPERATION_RESULT_SCHEMA_VERSION
             ),
             "sequence_index": sequence_index,
             "trial_key": operation["trial_key"],
@@ -2505,6 +3564,59 @@ def _executed_operation_result(
         }
     )
     return copied
+
+
+def _validate_replay_result_provenance(
+    result: Mapping[str, Any],
+    *,
+    expected_carrier_task_id: str,
+    expected_carrier_workflow_id: str,
+) -> None:
+    """Validate the narrow provenance contract for one replayed result."""
+
+    _runner_require(
+        result.get("idempotent_replay") is True
+        and result.get("result_carrier_task_id")
+        == expected_carrier_task_id
+        and result.get("result_carrier_workflow_id")
+        == expected_carrier_workflow_id
+        and result.get("measurement_origin")
+        == "container-node-idempotency-ledger"
+        and result.get("original_flowmesh_task_id_known") is False
+        and result.get("original_flowmesh_workflow_id_known") is False
+        and result.get("measurement_freshness_established") is False
+        and _REPLAY_RESULT_PROVENANCE_FIELDS.issubset(result),
+        "replay-adopted result provenance is invalid",
+    )
+
+
+def _validate_absent_replay_result_provenance(
+    result: Mapping[str, Any],
+) -> None:
+    _runner_require(
+        _REPLAY_RESULT_PROVENANCE_FIELDS.isdisjoint(result),
+        "non-replayed result contains replay-only provenance",
+    )
+
+
+def _expected_raw_operation_result_fields(
+    result: Mapping[str, Any],
+) -> frozenset[str]:
+    fields = _RAW_MATRIX_OPERATION_RESULT_FIELDS
+    if result.get("operation_kind") in _CACHE_RESULT_OPERATION_KINDS:
+        fields = fields | _CACHE_RESULT_FIELDS
+    if result.get("idempotent_replay") is True:
+        fields = fields | _REPLAY_RESULT_PROVENANCE_FIELDS
+    return fields
+
+
+def _validate_raw_operation_result_fields(
+    result: Mapping[str, Any],
+) -> None:
+    _runner_require(
+        set(result) == _expected_raw_operation_result_fields(result),
+        "matrix operation result fields changed",
+    )
 
 
 def _build_trial_result(
@@ -2570,6 +3682,7 @@ def _trial_checkpoint(
     observed_cache_outcomes: Mapping[str, str] | None,
     runtime_epochs_before: Mapping[str, str],
     runtime_epochs_after: Mapping[str, str],
+    replay_adoption: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     sequence_index = int(wrapper["sequence_index"])
     result_by_key = {
@@ -2599,9 +3712,51 @@ def _trial_checkpoint(
         expected_cache_outcomes=expected_cache_outcomes,
         observed_cache_outcomes=observed_cache_outcomes,
     )
+    adopted_keys: list[str] = []
+    if replay_adoption is not None:
+        adopted = replay_adoption.get("adopted_replay_operation_keys")
+        _runner_require(
+            isinstance(adopted, list)
+            and bool(adopted)
+            and all(isinstance(key, str) and key for key in adopted)
+            and len(adopted) == len(set(adopted)),
+            "replay adoption checkpoint keys are invalid",
+        )
+        adopted_keys = list(adopted)
+        actual_replays = [
+            str(row["operation_key"])
+            for row in operation_results
+            if row.get("executed") is True
+            and row.get("idempotent_replay") is True
+        ]
+        _runner_require(
+            actual_replays == adopted_keys,
+            "replay adoption checkpoint differs from adopted results",
+        )
+        trial_result.update(
+            {
+                "schema_version": (
+                    FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_TRIAL_RESULT_SCHEMA_VERSION
+                ),
+                "replay_result_adoption_id": replay_adoption["adoption_id"],
+                "adopted_replay_operation_count": len(adopted_keys),
+                "adopted_replay_operation_keys": adopted_keys,
+                "replayed_operation_service_time_in_non_replayed_result_telemetry": False,
+                "non_replayed_result_telemetry": _aggregate_telemetry(
+                    [
+                        row
+                        for row in operation_results
+                        if row.get("executed") is True
+                        and row.get("idempotent_replay") is False
+                    ]
+                ),
+            }
+        )
     checkpoint: dict[str, Any] = {
         "schema_version": (
-            FLOWMESH_CONTAINER_MATRIX_CHECKPOINT_ENTRY_SCHEMA_VERSION
+            FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_CHECKPOINT_SCHEMA_VERSION
+            if replay_adoption is not None
+            else FLOWMESH_CONTAINER_MATRIX_CHECKPOINT_ENTRY_SCHEMA_VERSION
         ),
         "checkpoint_sequence": sequence_index,
         "sequence_index": sequence_index,
@@ -2615,6 +3770,18 @@ def _trial_checkpoint(
         "operation_results": operation_results,
         "submissions": [dict(row) for row in submissions],
     }
+    if replay_adoption is not None:
+        checkpoint.update(
+            {
+                "replay_result_adoption_id": replay_adoption["adoption_id"],
+                "replay_result_adoption_entry_sha256": replay_adoption[
+                    "adoption_entry_sha256"
+                ],
+                "adopted_replay_operation_count": len(adopted_keys),
+                "adopted_replay_operation_keys": adopted_keys,
+                "replayed_operation_service_time_in_non_replayed_result_telemetry": False,
+            }
+        )
     return checkpoint
 
 
@@ -2625,6 +3792,8 @@ def _revalidate_executed_operation_result(
     contract: Mapping[str, Any],
     sequence_index: int,
     expected_phase: str,
+    allow_idempotent_replay: bool = False,
+    expected_carrier_workflow_id: str | None = None,
 ) -> dict[str, Any]:
     """Re-run the shared v2 result validator over preserved evidence."""
 
@@ -2703,6 +3872,7 @@ def _revalidate_executed_operation_result(
         selected_worker_id=selected_worker_id,
         task_detail={"assigned_worker": result.get("worker_id")},
         expected_runtime_epochs=contract["runtime_epochs"],
+        allow_idempotent_replay=allow_idempotent_replay,
     )
     revalidated["started_monotonic_ns"] = result["started_monotonic_ns"]
     revalidated["finished_monotonic_ns"] = result["finished_monotonic_ns"]
@@ -2712,6 +3882,31 @@ def _revalidate_executed_operation_result(
         revalidated,
         sequence_index=sequence_index,
     )
+    if allow_idempotent_replay:
+        _runner_require(
+            isinstance(expected_carrier_workflow_id, str)
+            and bool(expected_carrier_workflow_id),
+            "replay result has no carrier workflow binding",
+        )
+        expected.update(
+            {
+                "result_carrier_task_id": task_id,
+                "result_carrier_workflow_id": (
+                    expected_carrier_workflow_id
+                ),
+                "measurement_origin": "container-node-idempotency-ledger",
+                "original_flowmesh_task_id_known": False,
+                "original_flowmesh_workflow_id_known": False,
+                "measurement_freshness_established": False,
+            }
+        )
+        _validate_replay_result_provenance(
+            result,
+            expected_carrier_task_id=task_id,
+            expected_carrier_workflow_id=expected_carrier_workflow_id,
+        )
+    else:
+        _validate_absent_replay_result_provenance(result)
     # The original hash covers the complete runtime body, while the offline
     # revalidation body above deliberately contains only whitelisted fields.
     # It remains a correlation value, not a substitute for semantic checks.
@@ -2807,7 +4002,33 @@ def _validate_checkpoint_source_binding(
         for phase, phase_operations, _dependencies in phases
         for operation in phase_operations
     }
+    adopted_replay_keys = (
+        checkpoint.get("adopted_replay_operation_keys", [])
+        if checkpoint.get("schema_version")
+        == FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_CHECKPOINT_SCHEMA_VERSION
+        else []
+    )
+    _runner_require(
+        isinstance(adopted_replay_keys, list),
+        "checkpoint replay adoption keys are invalid",
+    )
+    adopted_replay_key_set = set(adopted_replay_keys)
     operation_results = checkpoint["operation_results"]
+    submissions = checkpoint["submissions"]
+    carrier_workflow_by_task_id: dict[str, str] = {}
+    if isinstance(submissions, list):
+        for submission in submissions:
+            if not isinstance(submission, Mapping):
+                continue
+            workflow_id = submission.get("workflow_id")
+            task_ids = submission.get("task_ids")
+            if not isinstance(workflow_id, str) or not isinstance(
+                task_ids, list
+            ):
+                continue
+            for task_id in task_ids:
+                if isinstance(task_id, str):
+                    carrier_workflow_by_task_id[task_id] = workflow_id
     _runner_require(
         [row.get("operation_key") for row in operation_results]
         == [row["operation_key"] for row in source_rows],
@@ -2831,6 +4052,16 @@ def _validate_checkpoint_source_binding(
                 key in phase_by_key,
                 "executed matrix operation is outside its frozen phase",
             )
+            if key in adopted_replay_key_set:
+                _runner_require(
+                    operation.get("operation_kind") == "control"
+                    and operation.get("logical_bytes") == 0
+                    and operation.get("dependency_operation_keys") == []
+                    and operation.get("operation_adapter")
+                    == "monotonic-control-v1",
+                    "only the dependency-free zero-byte schedule control "
+                    "operation may be replay-adopted",
+                )
             revalidated_results.append(
                 _revalidate_executed_operation_result(
                     result,
@@ -2838,10 +4069,17 @@ def _validate_checkpoint_source_binding(
                     contract=contract,
                     sequence_index=sequence_index,
                     expected_phase=phase_by_key[key],
+                    allow_idempotent_replay=key in adopted_replay_key_set,
+                    expected_carrier_workflow_id=(
+                        carrier_workflow_by_task_id.get(
+                            str(result.get("task_id"))
+                        )
+                        if key in adopted_replay_key_set
+                        else None
+                    ),
                 )
             )
 
-    submissions = checkpoint["submissions"]
     _runner_require(
         len(submissions) == len(phases),
         "checkpoint workflow count differs from the frozen phase protocol",
@@ -2926,6 +4164,28 @@ def _validate_checkpoint_source_binding(
         expected_cache_outcomes=expected_outcomes,
         observed_cache_outcomes=observed_outcomes,
     )
+    if adopted_replay_keys:
+        expected_trial.update(
+            {
+                "schema_version": (
+                    FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_TRIAL_RESULT_SCHEMA_VERSION
+                ),
+                "replay_result_adoption_id": checkpoint[
+                    "replay_result_adoption_id"
+                ],
+                "adopted_replay_operation_count": len(adopted_replay_keys),
+                "adopted_replay_operation_keys": adopted_replay_keys,
+                "replayed_operation_service_time_in_non_replayed_result_telemetry": False,
+                "non_replayed_result_telemetry": _aggregate_telemetry(
+                    [
+                        row
+                        for row in revalidated_results
+                        if row.get("executed") is True
+                        and row.get("idempotent_replay") is False
+                    ]
+                ),
+            }
+        )
     _runner_require(
         checkpoint.get("trial_result") == expected_trial,
         "matrix trial result or telemetry aggregate differs from its evidence",
@@ -2945,26 +4205,43 @@ def _load_checkpoints(
         "matrix checkpoint ledger exceeds the frozen trial count",
     )
     for index, row in enumerate(entries):
+        replay_adopted = (
+            row.get("schema_version")
+            == FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_CHECKPOINT_SCHEMA_VERSION
+        )
+        expected_fields = {
+            "schema_version",
+            "checkpoint_sequence",
+            "sequence_index",
+            "trial_key",
+            "wrapper_sha256",
+            "runtime_epochs_before",
+            "runtime_epochs_after",
+            "trial_result",
+            "operation_results",
+            "submissions",
+            "entry_sha256",
+        }
+        if replay_adopted:
+            expected_fields.update(
+                {
+                    "replay_result_adoption_id",
+                    "replay_result_adoption_entry_sha256",
+                    "adopted_replay_operation_count",
+                    "adopted_replay_operation_keys",
+                    "replayed_operation_service_time_in_non_replayed_result_telemetry",
+                }
+            )
         _runner_require(
-            set(row)
-            == {
-                "schema_version",
-                "checkpoint_sequence",
-                "sequence_index",
-                "trial_key",
-                "wrapper_sha256",
-                "runtime_epochs_before",
-                "runtime_epochs_after",
-                "trial_result",
-                "operation_results",
-                "submissions",
-                "entry_sha256",
-            },
+            set(row) == expected_fields,
             "matrix trial checkpoint fields changed",
         )
         _runner_require(
             row.get("schema_version")
-            == FLOWMESH_CONTAINER_MATRIX_CHECKPOINT_ENTRY_SCHEMA_VERSION,
+            in {
+                FLOWMESH_CONTAINER_MATRIX_CHECKPOINT_ENTRY_SCHEMA_VERSION,
+                FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_CHECKPOINT_SCHEMA_VERSION,
+            },
             "unsupported matrix trial checkpoint schema",
         )
         _runner_require(
@@ -2995,10 +4272,51 @@ def _load_checkpoints(
         trial = row.get("trial_result")
         operations = row.get("operation_results")
         submissions = row.get("submissions")
+        adopted_replay_keys = (
+            row.get("adopted_replay_operation_keys", [])
+            if replay_adopted
+            else []
+        )
+        _runner_require(
+            isinstance(adopted_replay_keys, list)
+            and all(isinstance(key, str) and key for key in adopted_replay_keys)
+            and len(adopted_replay_keys) == len(set(adopted_replay_keys))
+            and (
+                not replay_adopted
+                or (
+                    bool(adopted_replay_keys)
+                    and row.get("adopted_replay_operation_count")
+                    == len(adopted_replay_keys)
+                    and row.get(
+                        "replayed_operation_service_time_in_non_replayed_result_telemetry"
+                    )
+                    is False
+                    and _adoption_identifier(
+                        row.get("replay_result_adoption_id")
+                    )
+                    == row.get("replay_result_adoption_id")
+                    and re.fullmatch(
+                        r"[0-9a-f]{64}",
+                        str(
+                            row.get(
+                                "replay_result_adoption_entry_sha256", ""
+                            )
+                        ),
+                    )
+                    is not None
+                )
+            ),
+            "matrix checkpoint replay adoption metadata is invalid",
+        )
+        adopted_replay_key_set = set(adopted_replay_keys)
         _runner_require(
             isinstance(trial, Mapping)
             and trial.get("schema_version")
-            == FLOWMESH_CONTAINER_MATRIX_TRIAL_RESULT_SCHEMA_VERSION
+            == (
+                FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_TRIAL_RESULT_SCHEMA_VERSION
+                if replay_adopted
+                else FLOWMESH_CONTAINER_MATRIX_TRIAL_RESULT_SCHEMA_VERSION
+            )
             and trial.get("status") == "COMPLETE"
             and trial.get("trial_key") == ordered[index],
             "matrix trial checkpoint result is invalid",
@@ -3018,10 +4336,40 @@ def _load_checkpoints(
             len(operation_keys) == len(set(operation_keys)),
             "matrix trial checkpoint repeats operation keys",
         )
+        carrier_workflow_by_task_id: dict[str, str] = {}
+        for submission in submissions:
+            if not isinstance(submission, Mapping):
+                continue
+            workflow_id = submission.get("workflow_id")
+            task_ids = submission.get("task_ids")
+            if not isinstance(workflow_id, str) or not isinstance(
+                task_ids, list
+            ):
+                continue
+            for task_id in task_ids:
+                if isinstance(task_id, str):
+                    carrier_workflow_by_task_id[task_id] = workflow_id
         for operation in operations:
+            replay_operation = (
+                operation.get("operation_key") in adopted_replay_key_set
+            )
+            expected_operation_fields = (
+                _expected_raw_operation_result_fields(operation)
+                | _MATRIX_RESULT_AUGMENTED_FIELDS
+                if operation.get("executed") is True
+                else _INACTIVE_MATRIX_OPERATION_RESULT_FIELDS
+            )
+            _runner_require(
+                set(operation) == expected_operation_fields,
+                "matrix operation checkpoint fields changed",
+            )
             _runner_require(
                 operation.get("schema_version")
-                == FLOWMESH_CONTAINER_MATRIX_OPERATION_RESULT_SCHEMA_VERSION
+                == (
+                    FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_OPERATION_RESULT_SCHEMA_VERSION
+                    if replay_operation
+                    else FLOWMESH_CONTAINER_MATRIX_OPERATION_RESULT_SCHEMA_VERSION
+                )
                 and operation.get("trial_key") == ordered[index]
                 and type(operation.get("executed")) is bool
                 and operation.get("frozen_operation_sha256")
@@ -3035,10 +4383,27 @@ def _load_checkpoints(
                     operation.get("skip_reason") is None
                     and operation.get("telemetry_recorded") is True
                     and operation.get("telemetry_complete") is True
-                    and operation.get("idempotent_replay") is False,
+                    and operation.get("idempotent_replay")
+                    is (operation.get("operation_key") in adopted_replay_key_set),
                     "executed matrix operation evidence is invalid",
                 )
+                if replay_operation:
+                    replay_task_id = _text(
+                        operation.get("task_id"),
+                        "replay checkpoint task_id",
+                    )
+                    _validate_replay_result_provenance(
+                        operation,
+                        expected_carrier_task_id=replay_task_id,
+                        expected_carrier_workflow_id=_text(
+                            carrier_workflow_by_task_id.get(replay_task_id),
+                            "replay checkpoint carrier workflow_id",
+                        ),
+                    )
+                else:
+                    _validate_absent_replay_result_provenance(operation)
             else:
+                _validate_absent_replay_result_provenance(operation)
                 _runner_require(
                     operation.get("skip_reason")
                     == "inactive-conditional-branch",
@@ -3052,6 +4417,28 @@ def _load_checkpoints(
                     and operation.get("telemetry_complete") is False,
                     "inactive matrix operation invents telemetry",
                 )
+        _runner_require(
+            {
+                str(operation["operation_key"])
+                for operation in operations
+                if operation.get("idempotent_replay") is True
+            }
+            == adopted_replay_key_set,
+            "matrix checkpoint replay adoption coverage changed",
+        )
+        if replay_adopted:
+            replay_operations = [
+                operation
+                for operation in operations
+                if operation.get("idempotent_replay") is True
+            ]
+            _runner_require(
+                len(replay_operations) == 1
+                and replay_operations[0].get("operation_kind") == "control"
+                and replay_operations[0].get("logical_bytes") == 0
+                and replay_operations[0].get("physical_bytes") == 0,
+                "only one zero-byte control replay may appear in a checkpoint",
+            )
         for submission in submissions:
             workflow_id = submission.get("workflow_id")
             task_ids = submission.get("task_ids")
@@ -3162,6 +4549,652 @@ def _write_failure(
     _atomic_write(failure_path, _json_bytes(failure))
 
 
+def _reconcile_durable_replay_adoption(
+    *,
+    contract: Mapping[str, Any],
+    sources: Mapping[str, Any],
+    journal_path: Path,
+    checkpoint_path: Path,
+    journal: list[dict[str, Any]],
+    checkpoints: list[dict[str, Any]],
+    failure_document: Mapping[str, Any],
+    adoption_entry: Mapping[str, Any],
+    adoption_request: Mapping[str, str],
+) -> dict[str, Any]:
+    """Finish a partially persisted adoption without any live FlowMesh call."""
+
+    payload = adoption_entry.get("payload")
+    _runner_require(
+        isinstance(payload, Mapping)
+        and payload.get("adoption_id") == adoption_request["adoption_id"]
+        and payload.get("adoption_reason")
+        == adoption_request["adoption_reason"]
+        and payload.get("failed_journal_entry_sha256")
+        == adoption_request["adopt_failed_entry_sha256"],
+        "replay adoption request differs from its durable authorization",
+    )
+    sequence_index = int(adoption_entry["sequence_index"])
+    trial_key = str(adoption_entry["trial_key"])
+    phase = str(adoption_entry["phase"])
+    _runner_require(
+        phase == "unconditional" and len(checkpoints) in {sequence_index, sequence_index + 1},
+        "durable replay adoption prefix is not safely reconcilable",
+    )
+
+    wrappers = sources["wrappers"]
+    operations = sources["operations"]
+    assert isinstance(wrappers, Sequence)
+    assert isinstance(operations, Sequence)
+    wrapper = wrappers[sequence_index]
+    phase_operations = _operations_by_trial(operations)[trial_key]
+    expected_keys = [str(row["operation_key"]) for row in phase_operations]
+    _runner_require(
+        wrapper.get("trial_key") == trial_key
+        and str(wrapper.get("design_id")) not in _CONDITIONAL_DESIGNS
+        and payload.get("operation_result_keys") == expected_keys,
+        "durable replay adoption differs from the frozen trial",
+    )
+
+    indexed_entries = {
+        str(row.get("entry_sha256")): row
+        for row in journal
+        if isinstance(row.get("entry_sha256"), str)
+    }
+    intent_entry = indexed_entries.get(
+        str(payload.get("submission_intent_entry_sha256"))
+    )
+    bound_entry = indexed_entries.get(str(payload.get("workflow_bound_entry_sha256")))
+    _runner_require(
+        intent_entry is not None
+        and intent_entry.get("state") == "SUBMISSION_INTENT"
+        and bound_entry is not None
+        and bound_entry.get("state") == "WORKFLOW_BOUND",
+        "durable replay adoption lost its submitted-workflow binding",
+    )
+    bound_payload = bound_entry["payload"]
+    worker_id = str(contract["selected_worker"]["worker_id"])
+    dependencies = {
+        str(row["operation_key"]): list(row["dependency_operation_keys"])
+        for row in phase_operations
+    }
+    workflow = build_flowmesh_container_matrix_trial_workflow(
+        phase_operations,
+        dependencies,
+        contract["node_api_urls"],
+        worker_id,
+        str(contract["run_id"]),
+        trial_key,
+        phase,
+        str(contract["owner"]),
+        int(contract["api_task_timeout_seconds"]),
+    )
+    workflow_sha256 = _sha256_bytes(_canonical_bytes(workflow))
+    task_ids = bound_payload.get("task_ids")
+    _runner_require(
+        payload.get("workflow_sha256") == workflow_sha256
+        and bound_payload.get("workflow_sha256") == workflow_sha256
+        and isinstance(task_ids, list)
+        and len(task_ids) == len(expected_keys),
+        "durable replay adoption workflow binding changed",
+    )
+    submitted = SubmittedWorkflow(str(bound_payload["workflow_id"]), tuple(task_ids))
+    submission = _submission_record(
+        submitted,
+        workflow,
+        sequence_index=sequence_index,
+        trial_key=trial_key,
+        phase=phase,
+        selected_worker_id=worker_id,
+    )
+    records_value = payload.get("operation_results")
+    _runner_require(
+        isinstance(records_value, list)
+        and _sha256_bytes(_canonical_bytes(records_value))
+        == payload.get("operation_results_sha256"),
+        "durable replay adoption operation results changed",
+    )
+    records = [dict(row) for row in records_value]
+    expected_results_payload = {
+        "workflow_sha256": workflow_sha256,
+        "submission": submission,
+        "operation_results": records,
+    }
+    adoption_position = journal.index(adoption_entry)
+    obtained_entries = [
+        row
+        for row in journal[adoption_position + 1 :]
+        if row.get("state") == "RESULTS_OBTAINED"
+        and row.get("sequence_index") == sequence_index
+        and row.get("phase") == phase
+    ]
+    _runner_require(
+        len(obtained_entries) <= 1,
+        "durable replay adoption has ambiguous obtained results",
+    )
+    if obtained_entries:
+        _runner_require(
+            obtained_entries[0].get("payload") == expected_results_payload,
+            "durable adopted results differ from their authorization",
+        )
+    else:
+        obtained = _journal_entry(
+            journal_path,
+            run_id=str(contract["run_id"]),
+            state="RESULTS_OBTAINED",
+            sequence_index=sequence_index,
+            trial_key=trial_key,
+            phase=phase,
+            payload=expected_results_payload,
+        )
+        journal.append(obtained)
+
+    if len(checkpoints) == sequence_index:
+        checkpoint = _trial_checkpoint(
+            contract=contract,
+            wrapper=wrapper,
+            operations=phase_operations,
+            active_records=records,
+            submissions=[submission],
+            expected_cache_outcomes=None,
+            observed_cache_outcomes=None,
+            runtime_epochs_before=payload["runtime_epochs_before"],
+            runtime_epochs_after=payload["runtime_epochs_after"],
+            replay_adoption={
+                **payload,
+                "adoption_entry_sha256": adoption_entry["entry_sha256"],
+            },
+        )
+        persisted = _append_digest_entry(
+            checkpoint_path, checkpoint, digest_field="entry_sha256"
+        )
+        checkpoints.append(persisted)
+    else:
+        persisted = checkpoints[sequence_index]
+        _runner_require(
+            persisted.get("replay_result_adoption_id")
+            == payload.get("adoption_id")
+            and persisted.get("replay_result_adoption_entry_sha256")
+            == adoption_entry.get("entry_sha256"),
+            "durable replay-adopted checkpoint binding changed",
+        )
+
+    completion_entries = [
+        row
+        for row in journal[adoption_position + 1 :]
+        if row.get("state") == "TRIAL_COMPLETED"
+        and row.get("sequence_index") == sequence_index
+    ]
+    _runner_require(
+        len(completion_entries) <= 1,
+        "durable replay adoption has duplicate trial completion",
+    )
+    if completion_entries:
+        _runner_require(
+            completion_entries[0].get("payload")
+            == {"checkpoint_entry_sha256": persisted["entry_sha256"]},
+            "durable replay adoption completion binding changed",
+        )
+    else:
+        completed = _journal_entry(
+            journal_path,
+            run_id=str(contract["run_id"]),
+            state="TRIAL_COMPLETED",
+            sequence_index=sequence_index,
+            trial_key=trial_key,
+            phase="trial",
+            payload={"checkpoint_entry_sha256": persisted["entry_sha256"]},
+        )
+        journal.append(completed)
+    _validate_journal(
+        journal,
+        contract,
+        checkpoints,
+        sources=sources,
+        failure_document=failure_document,
+    )
+    return {
+        "status": "REPLAY_RESULTS_ADOPTED",
+        "run_id": contract["run_id"],
+        "trial_key": trial_key,
+        "phase": phase,
+        "workflow_id": payload["workflow_id"],
+        "adoption_id": payload["adoption_id"],
+        "adoption_entry_sha256": adoption_entry["entry_sha256"],
+        "adopted_replay_operation_count": 1,
+        "adopted_replay_operation_keys": payload[
+            "adopted_replay_operation_keys"
+        ],
+        "completed_trial_count": len(checkpoints),
+        "workflow_submitted": False,
+        "workflow_validated": False,
+        "continue_with_normal_resume": True,
+        "eligible_for_scientific_claims": False,
+    }
+
+
+def _adopt_flowmesh_container_matrix_replay_results_exclusive(
+    matrix_plan_dir: str | Path,
+    formal_execution_profile_dir: str | Path,
+    coordinator_plan_dir: str | Path,
+    run_dir: str | Path,
+    run_id: str,
+    client: FlowMeshClientProtocol,
+    settings: FlowMeshSettings,
+    adoption_id: str,
+    adoption_reason: str,
+    adopt_failed_entry_sha256: str,
+    runtime_epoch_probe: Callable[
+        [Mapping[str, str], Sequence[Mapping[str, Any]]], Mapping[str, str]
+    ]
+    | None = None,
+) -> dict[str, Any]:
+    """Adopt one safe replay from an already-submitted DONE workflow.
+
+    This is a deliberately separate, adopt-only transaction.  It never calls
+    workflow validation or submission and it stops after reconciling the one
+    failed phase into a durable trial checkpoint.
+    """
+
+    identifier = _run_identifier(run_id)
+    request = _normalize_replay_adoption_request(
+        adoption_id,
+        adoption_reason,
+        adopt_failed_entry_sha256,
+    )
+    _runner_require(
+        math.isfinite(float(settings.poll_interval_seconds))
+        and float(settings.poll_interval_seconds) > 0.0,
+        "FlowMesh poll_interval_seconds must be finite and positive",
+    )
+    root_identity = _root_endpoint_identity_sha256(settings.base_url)
+    target = Path(run_dir).resolve()
+    _runner_require(
+        target.is_dir() and not (target / "SHA256SUMS").exists(),
+        "replay-result adoption requires an incomplete matrix run directory",
+    )
+    _cleanup_known_atomic_temps(target)
+    _runner_require(
+        _visible_artifact_files(target)
+        <= _FINAL_FILES | {_FAILURE_FILE},
+        "incomplete matrix run directory contains unexpected files",
+    )
+
+    sources = _load_sources(
+        matrix_plan_dir,
+        formal_execution_profile_dir,
+        coordinator_plan_dir,
+    )
+    matrix = sources["matrix"]
+    wrappers = sources["wrappers"]
+    operations = sources["operations"]
+    assert isinstance(matrix, Mapping)
+    assert isinstance(wrappers, Sequence)
+    assert isinstance(operations, Sequence)
+    _runner_require(
+        settings.worker_alias == matrix["worker_alias"]
+        and settings.worker_id is None,
+        "adoption worker alias must exactly match the frozen matrix plan",
+    )
+
+    contract_path = target / _CONTRACT_FILE
+    journal_path = target / _JOURNAL_FILE
+    checkpoint_path = target / _CHECKPOINT_FILE
+    failure_path = target / _FAILURE_FILE
+    _runner_require(
+        all(
+            path.is_file() and not path.is_symlink()
+            for path in (
+                contract_path,
+                journal_path,
+                checkpoint_path,
+                failure_path,
+            )
+        ),
+        "replay-result adoption requires complete durable failure evidence",
+    )
+    contract = _read_json(contract_path, "matrix run contract")
+    _validate_contract(contract)
+    _runner_require(
+        contract["run_id"] == identifier,
+        "adoption run_id differs from the durable contract",
+    )
+    _runner_require(
+        contract["flowmesh_root_endpoint_identity_sha256"] == root_identity,
+        "FlowMesh Root endpoint changed; refusing replay-result adoption",
+    )
+    _static_contract_matches_sources(contract, sources)
+    checkpoints = _load_checkpoints(
+        checkpoint_path,
+        contract,
+        sources=sources,
+    )
+    journal = _read_jsonl(journal_path, "matrix run journal")
+    failure_document = _read_json(
+        failure_path, "matrix run failure document"
+    )
+    _validate_failure_document(
+        failure_document,
+        contract,
+        checkpoints,
+        journal,
+    )
+    _validate_journal(
+        journal,
+        contract,
+        checkpoints,
+        sources=sources,
+        failure_document=failure_document,
+        allow_last_checkpoint_completion_gap=True,
+    )
+    matching_adoptions = [
+        row
+        for row in journal
+        if row.get("state") == _REPLAY_ADOPTION_STATE
+        and row.get("payload", {}).get("adoption_id")
+        == request["adoption_id"]
+    ]
+    _runner_require(
+        len(matching_adoptions) <= 1,
+        "replay adoption_id is ambiguous in the durable journal",
+    )
+    if matching_adoptions:
+        return _reconcile_durable_replay_adoption(
+            contract=contract,
+            sources=sources,
+            journal_path=journal_path,
+            checkpoint_path=checkpoint_path,
+            journal=journal,
+            checkpoints=checkpoints,
+            failure_document=failure_document,
+            adoption_entry=matching_adoptions[0],
+            adoption_request=request,
+        )
+    _runner_require(
+        len(journal) >= 4
+        and [row.get("state") for row in journal[-4:]]
+        == [
+            _RECOVERY_STATE,
+            "SUBMISSION_INTENT",
+            "WORKFLOW_BOUND",
+            "RUN_FAILED",
+        ],
+        "replay-result adoption requires the latest failed post-recovery "
+        "workflow binding",
+    )
+    recovery_entry, intent_entry, bound_entry, failure_entry = journal[-4:]
+    sequence_index = int(failure_entry["sequence_index"])
+    trial_key = str(failure_entry["trial_key"])
+    phase = str(failure_entry["phase"])
+    _runner_require(
+        request["adopt_failed_entry_sha256"]
+        == failure_entry["entry_sha256"]
+        and failure_entry["payload"].get("error")
+        == "container operation was replayed"
+        and phase == "unconditional"
+        and all(
+            row.get("sequence_index") == sequence_index
+            and row.get("trial_key") == trial_key
+            and row.get("phase") == phase
+            for row in journal[-4:]
+        )
+        and len(checkpoints) == sequence_index,
+        "replay-result adoption is not bound to the latest eligible failure",
+    )
+    _runner_require(
+        not any(
+            row.get("state") == _REPLAY_ADOPTION_STATE
+            and (
+                row.get("payload", {}).get("adoption_id")
+                == request["adoption_id"]
+                or (
+                    row.get("sequence_index") == sequence_index
+                    and row.get("phase") == phase
+                )
+            )
+            for row in journal
+        ),
+        "this matrix phase or adoption_id was already replay-adopted",
+    )
+
+    wrapper = wrappers[sequence_index]
+    _runner_require(
+        wrapper.get("trial_key") == trial_key
+        and str(wrapper.get("design_id")) not in _CONDITIONAL_DESIGNS,
+        "replay-result adoption supports only the current unconditional trial",
+    )
+    by_trial = _operations_by_trial(operations)
+    phase_operations = by_trial[trial_key]
+    expected_keys = [str(row["operation_key"]) for row in phase_operations]
+    _runner_require(
+        intent_entry["payload"].get("operation_keys") == expected_keys,
+        "post-recovery workflow does not cover the exact frozen phase",
+    )
+    dependencies = {
+        str(row["operation_key"]): list(row["dependency_operation_keys"])
+        for row in phase_operations
+    }
+    worker = contract["selected_worker"]
+    assert isinstance(worker, Mapping)
+    worker_id = str(worker["worker_id"])
+    workflow = build_flowmesh_container_matrix_trial_workflow(
+        phase_operations,
+        dependencies,
+        contract["node_api_urls"],
+        worker_id,
+        identifier,
+        trial_key,
+        phase,
+        str(contract["owner"]),
+        int(contract["api_task_timeout_seconds"]),
+    )
+    workflow_sha256 = _sha256_bytes(_canonical_bytes(workflow))
+    bound_payload = bound_entry["payload"]
+    _runner_require(
+        intent_entry["payload"].get("workflow_sha256") == workflow_sha256
+        and bound_payload.get("workflow_sha256") == workflow_sha256,
+        "post-recovery workflow differs from the frozen operation request",
+    )
+    workflow_id = _text(
+        bound_payload.get("workflow_id"), "recovered workflow_id"
+    )
+    task_ids = bound_payload.get("task_ids")
+    _runner_require(
+        isinstance(task_ids, list)
+        and len(task_ids) == len(expected_keys)
+        and all(isinstance(task_id, str) and task_id for task_id in task_ids)
+        and len(task_ids) == len(set(task_ids)),
+        "post-recovery task binding is invalid",
+    )
+
+    probe = runtime_epoch_probe or _probe_container_runtime_epochs
+    _assert_current_worker(client, expected_worker=worker)
+    runtime_epochs_before = _probe_all_epochs(
+        probe, matrix=matrix, operations=operations
+    )
+    _assert_runtime_epochs(runtime_epochs_before, contract)
+    terminal = client.wait(workflow_id, settings.poll_interval_seconds)
+    _runner_require(
+        isinstance(terminal, TerminalWorkflow)
+        and terminal.workflow_id == workflow_id
+        and terminal.status == "DONE"
+        and not terminal.failed_task_ids
+        and not terminal.cancelled_task_ids,
+        "replay-result adoption requires the exact bound workflow to be DONE",
+    )
+    submitted = SubmittedWorkflow(workflow_id, tuple(task_ids))
+    records = _collect_results(
+        client,
+        submitted,
+        operations=phase_operations,
+        phase=phase,
+        selected_worker_id=worker_id,
+        expected_runtime_epochs=contract["runtime_epochs"],
+        allow_idempotent_replay=True,
+    )
+    _assert_current_worker(client, expected_worker=worker)
+    runtime_epochs_after = _probe_all_epochs(
+        probe, matrix=matrix, operations=operations
+    )
+    _assert_runtime_epochs(runtime_epochs_after, contract)
+    replay_records = [
+        row for row in records if row.get("idempotent_replay") is True
+    ]
+    _runner_require(
+        len(replay_records) == 1,
+        "replay-result adoption requires exactly one replayed operation",
+    )
+    replay_key = str(replay_records[0]["operation_key"])
+    replay_operation = next(
+        row
+        for row in phase_operations
+        if str(row["operation_key"]) == replay_key
+    )
+    _replay_adoption_operation_evidence(replay_operation)
+
+    adoption_payload = _build_replay_adoption_payload(
+        contract=contract,
+        failure_entry=failure_entry,
+        intent_entry=intent_entry,
+        bound_entry=bound_entry,
+        recovery_entry=recovery_entry,
+        failure_document=failure_document,
+        adoption_request=request,
+        terminal=terminal,
+        records=records,
+        replay_operation=replay_operation,
+        runtime_epochs_before=runtime_epochs_before,
+        runtime_epochs_after=runtime_epochs_after,
+        adoption_ordinal=(
+            1
+            + sum(
+                row.get("state") == _REPLAY_ADOPTION_STATE
+                for row in journal
+            )
+        ),
+    )
+    adoption_entry = _journal_entry(
+        journal_path,
+        run_id=identifier,
+        state=_REPLAY_ADOPTION_STATE,
+        sequence_index=sequence_index,
+        trial_key=trial_key,
+        phase=phase,
+        payload=adoption_payload,
+    )
+    journal.append(adoption_entry)
+    submission = _submission_record(
+        submitted,
+        workflow,
+        sequence_index=sequence_index,
+        trial_key=trial_key,
+        phase=phase,
+        selected_worker_id=worker_id,
+    )
+    obtained = _journal_entry(
+        journal_path,
+        run_id=identifier,
+        state="RESULTS_OBTAINED",
+        sequence_index=sequence_index,
+        trial_key=trial_key,
+        phase=phase,
+        payload={
+            "workflow_sha256": workflow_sha256,
+            "submission": submission,
+            "operation_results": records,
+        },
+    )
+    journal.append(obtained)
+    checkpoint = _trial_checkpoint(
+        contract=contract,
+        wrapper=wrapper,
+        operations=phase_operations,
+        active_records=records,
+        submissions=[submission],
+        expected_cache_outcomes=None,
+        observed_cache_outcomes=None,
+        runtime_epochs_before=runtime_epochs_before,
+        runtime_epochs_after=runtime_epochs_after,
+        replay_adoption={
+            **adoption_payload,
+            "adoption_entry_sha256": adoption_entry["entry_sha256"],
+        },
+    )
+    persisted = _append_digest_entry(
+        checkpoint_path,
+        checkpoint,
+        digest_field="entry_sha256",
+    )
+    checkpoints.append(persisted)
+    completed = _journal_entry(
+        journal_path,
+        run_id=identifier,
+        state="TRIAL_COMPLETED",
+        sequence_index=sequence_index,
+        trial_key=trial_key,
+        phase="trial",
+        payload={"checkpoint_entry_sha256": persisted["entry_sha256"]},
+    )
+    journal.append(completed)
+    _validate_journal(
+        journal,
+        contract,
+        checkpoints,
+        sources=sources,
+        failure_document=failure_document,
+    )
+    return {
+        "status": "REPLAY_RESULTS_ADOPTED",
+        "run_id": identifier,
+        "trial_key": trial_key,
+        "phase": phase,
+        "workflow_id": workflow_id,
+        "adoption_id": request["adoption_id"],
+        "adoption_entry_sha256": adoption_entry["entry_sha256"],
+        "adopted_replay_operation_count": 1,
+        "adopted_replay_operation_keys": [replay_key],
+        "completed_trial_count": len(checkpoints),
+        "workflow_submitted": False,
+        "workflow_validated": False,
+        "continue_with_normal_resume": True,
+        "eligible_for_scientific_claims": False,
+    }
+
+
+def adopt_flowmesh_container_matrix_replay_results(
+    matrix_plan_dir: str | Path,
+    formal_execution_profile_dir: str | Path,
+    coordinator_plan_dir: str | Path,
+    run_dir: str | Path,
+    run_id: str,
+    client: FlowMeshClientProtocol,
+    settings: FlowMeshSettings,
+    adoption_id: str,
+    adoption_reason: str,
+    adopt_failed_entry_sha256: str,
+    runtime_epoch_probe: Callable[
+        [Mapping[str, str], Sequence[Mapping[str, Any]]], Mapping[str, str]
+    ]
+    | None = None,
+) -> dict[str, Any]:
+    """Safely adopt the sole replayed schedule result without resubmission."""
+
+    target = Path(run_dir).resolve()
+    with _exclusive_run_lock(target):
+        return _adopt_flowmesh_container_matrix_replay_results_exclusive(
+            matrix_plan_dir=matrix_plan_dir,
+            formal_execution_profile_dir=formal_execution_profile_dir,
+            coordinator_plan_dir=coordinator_plan_dir,
+            run_dir=target,
+            run_id=run_id,
+            client=client,
+            settings=settings,
+            adoption_id=adoption_id,
+            adoption_reason=adoption_reason,
+            adopt_failed_entry_sha256=adopt_failed_entry_sha256,
+            runtime_epoch_probe=runtime_epoch_probe,
+        )
+
+
 def _finalize(
     target: Path,
     *,
@@ -3189,16 +5222,23 @@ def _finalize(
     recovery_entries = [
         row for row in journal_entries if row.get("state") == _RECOVERY_STATE
     ]
+    adoption_entries = [
+        row
+        for row in journal_entries
+        if row.get("state") == _REPLAY_ADOPTION_STATE
+    ]
     failure_entries = [
         row for row in journal_entries if row.get("state") == "RUN_FAILED"
     ]
     recovered = bool(recovery_entries)
+    replay_adopted = bool(adoption_entries)
     _runner_require(
         (not recovered and failure_document is None)
         or (
             recovered
             and failure_document is not None
-            and len(failure_entries) == len(recovery_entries)
+            and len(failure_entries)
+            == len(recovery_entries) + len(adoption_entries)
         ),
         "completed matrix recovery evidence is inconsistent",
     )
@@ -3207,9 +5247,13 @@ def _finalize(
     )
     summary: dict[str, Any] = {
         "schema_version": (
-            FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION
-            if recovered
-            else FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION
+            FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_RUN_SCHEMA_VERSION
+            if replay_adopted
+            else (
+                FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION
+                if recovered
+                else FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION
+            )
         ),
         "status": "COMPLETE",
         "run_id": contract["run_id"],
@@ -3266,9 +5310,48 @@ def _finalize(
                 "initial_failure_sha256": failure_document[
                     "failure_sha256"
                 ],
-                "failed_infrastructure_attempts_in_canonical_results": False,
             }
         )
+        if replay_adopted:
+            replayed_operations = [
+                row
+                for row in executed
+                if row.get("idempotent_replay") is True
+            ]
+            summary.update(
+                {
+                    "replay_result_adoption_count": len(adoption_entries),
+                    "replay_result_adoption_ids": [
+                        row["payload"]["adoption_id"]
+                        for row in adoption_entries
+                    ],
+                    "adoption_runner_module_sha256_by_adoption_id": {
+                        row["payload"]["adoption_id"]: row["payload"][
+                            "adoption_runner_module_sha256"
+                        ]
+                        for row in adoption_entries
+                    },
+                    "adopted_replay_operation_count": len(
+                        replayed_operations
+                    ),
+                    "adopted_replay_operation_keys": [
+                        row["operation_key"] for row in replayed_operations
+                    ],
+                    "failed_flowmesh_task_records_in_canonical_results": False,
+                    "adopted_prior_node_measurements_in_canonical_results": True,
+                    "original_flowmesh_task_ids_known_for_adopted_replays": False,
+                    "original_flowmesh_workflow_ids_known_for_adopted_replays": False,
+                    "measurement_freshness_established_for_adopted_replays": False,
+                    "root_dispatch_history_interpretation": (
+                        "non-historical-diagnostic-only"
+                    ),
+                    "prior_before_dispatch_interpretation_superseded": True,
+                }
+            )
+        else:
+            summary[
+                "failed_infrastructure_attempts_in_canonical_results"
+            ] = False
     summary["run_sha256"] = _document_sha256(summary, "run_sha256")
     documents = {
         _CONTRACT_FILE: (target / _CONTRACT_FILE).read_bytes(),
@@ -3553,6 +5636,19 @@ def _run_flowmesh_container_matrix_exclusive(
             failure_document=preflight_failure,
             allow_last_checkpoint_completion_gap=True,
         )
+        pending_adoptions = [
+            row
+            for row in preflight_journal
+            if row.get("state") == _REPLAY_ADOPTION_STATE
+            and int(row.get("sequence_index", -1))
+            >= len(preflight_checkpoints)
+        ]
+        _runner_require(
+            not pending_adoptions,
+            "matrix run has an incomplete replay-result adoption; resume it "
+            "with adopt-flowmesh-container-matrix-replay-results before "
+            "normal execution",
+        )
         preflight_unresolved = _unresolved_failure(preflight_journal)
         if preflight_unresolved is not None:
             _runner_require(
@@ -3677,6 +5773,7 @@ def _run_flowmesh_container_matrix_exclusive(
         _authorize_infrastructure_recovery(
             client,
             contract=contract,
+            operations=operations,
             journal_path=journal_path,
             journal_entries=journal_entries,
             failure_document=failure_document,
@@ -4081,13 +6178,20 @@ def verify_flowmesh_container_matrix_run(
     recovery_entries = [
         row for row in journal if row.get("state") == _RECOVERY_STATE
     ]
+    adoption_entries = [
+        row
+        for row in journal
+        if row.get("state") == _REPLAY_ADOPTION_STATE
+    ]
     failure_entries = [
         row for row in journal if row.get("state") == "RUN_FAILED"
     ]
     recovered = bool(recovery_entries)
+    replay_adopted = bool(adoption_entries)
     _runner_require(
         recovered == has_failure_document
-        and len(failure_entries) == len(recovery_entries),
+        and len(failure_entries)
+        == len(recovery_entries) + len(adoption_entries),
         "completed matrix recovery evidence is inconsistent",
     )
     summary = _read_json(root / _RUN_FILE, "matrix run summary")
@@ -4126,9 +6230,13 @@ def verify_flowmesh_container_matrix_run(
     _runner_require(
         summary.get("schema_version")
         == (
-            FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION
-            if recovered
-            else FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION
+            FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_RUN_SCHEMA_VERSION
+            if replay_adopted
+            else (
+                FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION
+                if recovered
+                else FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION
+            )
         )
         and summary.get("status") == "COMPLETE"
         and summary.get("run_sha256")
@@ -4212,13 +6320,77 @@ def verify_flowmesh_container_matrix_run(
                 for row in recovery_entries
             }
             and summary.get("initial_failure_sha256")
-            == failure_document["failure_sha256"]
-            and summary.get(
-                "failed_infrastructure_attempts_in_canonical_results"
-            )
-            is False,
+            == failure_document["failure_sha256"],
             "recovered matrix run summary is invalid",
         )
+        if replay_adopted:
+            replayed_operations = [
+                row
+                for row in operation_results
+                if row.get("executed") is True
+                and row.get("idempotent_replay") is True
+            ]
+            expected_adoption_ids = [
+                row["payload"]["adoption_id"] for row in adoption_entries
+            ]
+            expected_replay_keys = [
+                row["operation_key"] for row in replayed_operations
+            ]
+            _runner_require(
+                summary.get("replay_result_adoption_count")
+                == len(adoption_entries)
+                and summary.get("replay_result_adoption_ids")
+                == expected_adoption_ids
+                and summary.get(
+                    "adoption_runner_module_sha256_by_adoption_id"
+                )
+                == {
+                    row["payload"]["adoption_id"]: row["payload"][
+                        "adoption_runner_module_sha256"
+                    ]
+                    for row in adoption_entries
+                }
+                and summary.get("adopted_replay_operation_count")
+                == len(replayed_operations)
+                and summary.get("adopted_replay_operation_keys")
+                == expected_replay_keys
+                and len(replayed_operations) == len(adoption_entries)
+                and summary.get(
+                    "failed_flowmesh_task_records_in_canonical_results"
+                )
+                is False
+                and summary.get(
+                    "adopted_prior_node_measurements_in_canonical_results"
+                )
+                is True
+                and summary.get(
+                    "original_flowmesh_task_ids_known_for_adopted_replays"
+                )
+                is False
+                and summary.get(
+                    "original_flowmesh_workflow_ids_known_for_adopted_replays"
+                )
+                is False
+                and summary.get(
+                    "measurement_freshness_established_for_adopted_replays"
+                )
+                is False
+                and summary.get("root_dispatch_history_interpretation")
+                == "non-historical-diagnostic-only"
+                and summary.get(
+                    "prior_before_dispatch_interpretation_superseded"
+                )
+                is True,
+                "replay-adopted matrix run summary is invalid",
+            )
+        else:
+            _runner_require(
+                summary.get(
+                    "failed_infrastructure_attempts_in_canonical_results"
+                )
+                is False,
+                "recovered matrix run summary is invalid",
+            )
     _runner_require(
         summary.get("selected_worker") == contract["selected_worker"]
         and summary.get("runtime_epochs") == contract["runtime_epochs"]
@@ -4245,6 +6417,12 @@ def verify_flowmesh_container_matrix_run(
         "workflow_count": len(submissions),
         "flowmesh_workflow_count": total_workflow_count,
         "infrastructure_recovery_count": len(recovery_entries),
+        "replay_result_adoption_count": len(adoption_entries),
+        "adopted_replay_operation_count": sum(
+            row.get("executed") is True
+            and row.get("idempotent_replay") is True
+            for row in operation_results
+        ),
         "abandoned_workflow_count": len(recovery_entries),
         "worker_id": contract["selected_worker"]["worker_id"],
         "source_binding_checked": source_binding_checked,

@@ -1497,6 +1497,7 @@ def _operation_result(
     selected_worker_id: str,
     task_detail: Mapping[str, Any] | None,
     expected_runtime_epochs: Mapping[str, str],
+    allow_idempotent_replay: bool = False,
 ) -> dict[str, Any]:
     api = extract_api_executor_result(raw)
     try:
@@ -1518,7 +1519,12 @@ def _operation_result(
         result.get("semantic_task_quality_evaluated") is False,
         "container result must report semantic_task_quality_evaluated=false",
     )
-    _require(result.get("idempotent_replay") is False, "container operation was replayed")
+    idempotent_replay = result.get("idempotent_replay")
+    _require(
+        idempotent_replay is False
+        or (allow_idempotent_replay is True and idempotent_replay is True),
+        "container operation was replayed",
+    )
     for field in ("operation_key", "operation_kind", "execution_node_id"):
         _require(
             result.get(field) == operation.get(field),
@@ -1591,7 +1597,7 @@ def _operation_result(
         "telemetry_provenance_version": TELEMETRY_PROVENANCE_VERSION,
         "telemetry_complete": True,
         "semantic_task_quality_evaluated": False,
-        "idempotent_replay": False,
+        "idempotent_replay": idempotent_replay,
         "api_executor": "api",
         "api_http_status": api["status_code"],
         "container_result_sha256": _sha256_bytes(_canonical_bytes(result)),

@@ -208,7 +208,12 @@ class FlowMeshClientProtocol(Protocol):
         """
 
     def describe_task_failure(self, task_id: str) -> dict[str, Any] | None:
-        """Return read-only terminal failure detail for one task, if any."""
+        """Return read-only terminal task metadata and failure detail, if any.
+
+        The historical method name is retained for compatibility.  Completed
+        tasks may still return status, attempt, and assigned-worker metadata
+        with a null failure detail.
+        """
 
     def wait(
         self,

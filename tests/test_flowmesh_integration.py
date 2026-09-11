@@ -474,7 +474,24 @@ class SdkWorkflowDispatchEvidenceTest(unittest.TestCase):
         )
         terminal = self._wait(response)
         self.assertEqual((), terminal.dispatched_task_ids)
-        self.assertIn("never recorded", terminal.detail or "")
+        self.assertIn("empty dispatched_tasks snapshot", terminal.detail or "")
+        self.assertIn("not historical proof", terminal.detail or "")
+
+    def test_done_workflow_empty_dispatch_list_is_not_negative_proof(
+        self,
+    ) -> None:
+        response = types.SimpleNamespace(
+            workflow_id="wfl-test",
+            status=types.SimpleNamespace(value="DONE"),
+            failed_tasks=[],
+            cancelled_tasks=[],
+            dispatched_tasks=[],
+        )
+        terminal = self._wait(response)
+        self.assertEqual("DONE", terminal.status)
+        self.assertEqual((), terminal.dispatched_task_ids)
+        self.assertIn("empty dispatched_tasks snapshot", terminal.detail or "")
+        self.assertNotIn("never recorded", terminal.detail or "")
 
     def test_pydantic_default_empty_list_is_not_proof_of_presence(self) -> None:
         response = types.SimpleNamespace(

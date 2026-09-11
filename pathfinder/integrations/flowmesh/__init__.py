@@ -126,8 +126,10 @@ from .container_matrix_coordinator import (
 )
 from .container_matrix_runner import (
     FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION,
+    FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_RUN_SCHEMA_VERSION,
     FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION,
     FlowMeshContainerMatrixRunError,
+    adopt_flowmesh_container_matrix_replay_results,
     build_flowmesh_container_matrix_trial_workflow,
     run_flowmesh_container_matrix,
     verify_flowmesh_container_matrix_run,
@@ -169,6 +171,7 @@ __all__ = [
     "FLOWMESH_CONTAINER_MATRIX_COORDINATOR_ADMISSION_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_COORDINATOR_PLAN_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION",
+    "FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_RUN_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION",
     "PATHFINDER_GRAPH_NODE_NAME",
     "PREFLIGHT_SCHEMA_VERSION",
@@ -183,6 +186,7 @@ __all__ = [
     "WorkerResolutionError",
     "WorkflowValidation",
     "analyze_flowmesh_pilot",
+    "adopt_flowmesh_container_matrix_replay_results",
     "audit_flowmesh_container_full_chain_calibration",
     "artifact_handle_fingerprint",
     "audit_pilot_records",

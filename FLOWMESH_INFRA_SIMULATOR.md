@@ -491,13 +491,19 @@ later trials are never skipped over.
 
 A narrow terminal-failure recovery path is supported without restarting the
 containers. Each trial phase may use it at most once. It applies only when
-the Root explicitly reports an empty
-`dispatched_tasks` list and the complete task evidence shows exactly one HTTP
-503 delivery failure with the body `{"detail":"Identity provider
-unavailable"}`; dependency fallout must be pristine and no task may have run.
-The worker identity, Root endpoint, all frozen inputs, and all eight runtime
-epochs must still match the original run contract. Missing dispatch evidence,
-another error, or a second recovery of the same trial phase is refused.
+the complete task evidence shows exactly one attempted HTTP 503 delivery
+failure with the body `{"detail":"Identity provider unavailable"}` and all
+other task evidence is pristine dependency fallout or pending. The failed task
+ID is bound by position to the exact frozen phase operation and must be the
+unique dependency-free, zero-byte `schedule` control root. Every other phase
+operation must be transitively downstream of that root, so no physical
+operation can be duplicated by the replacement submission. The Root's
+nullable `dispatched_tasks` snapshot is preserved only as diagnostic evidence;
+an empty value is not interpreted as proof that nothing executed. The worker
+identity, Root endpoint, all frozen inputs, and all eight runtime epochs must
+still match the original run contract. A different attempted operation,
+another independent phase root, another error, or a second recovery of the
+same trial phase is refused.
 
 Recovery is never automatic. First read the digest of the terminal failure:
 
@@ -535,6 +541,56 @@ abandoned attempt. A recovered final summary separately reports canonical
 workflows, all FlowMesh workflow attempts, abandoned workflows, and recovery
 count. This is an audited continuation of the same run, not evidence that the
 failed attempt succeeded.
+
+If that one replacement workflow reaches `DONE` but result collection stops
+only because the dependency-free, zero-byte `schedule` marker is an
+idempotent replay, do not authorize another recovery or submit a third
+workflow. Use the dedicated adoption command against the latest
+`RUN_FAILED` digest:
+
+```bash
+export PF_REPLAY_FAILED_ENTRY_SHA256="$(
+  python - "$PF_MATRIX_RUN/flowmesh-container-matrix-journal.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+rows = [
+    json.loads(line)
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+latest = rows[-1]
+assert latest["state"] == "RUN_FAILED"
+assert latest["payload"]["error"] == "container operation was replayed"
+print(latest["entry_sha256"])
+PY
+)"
+
+PYTHONPATH=. python -m pathfinder \
+  adopt-flowmesh-container-matrix-replay-results \
+  --matrix-plan-dir "$PF_MATRIX_PLAN" \
+  --formal-execution-profile-dir "$PF_FORMAL_PROFILE" \
+  --coordinator-plan-dir "$PF_COORDINATOR_PLAN" \
+  --run-dir "$PF_MATRIX_RUN" \
+  --run-id "flowmesh-infra-4x8-formal-run-v1" \
+  --worker-alias "$PF_FLOWMESH_WORKER_ALIAS" \
+  --flowmesh-base-url "$FLOWMESH_BASE_URL" \
+  --adoption-id "schedule-replay-adoption-001" \
+  --adoption-reason "Adopt the completed recovery workflow without resubmission" \
+  --adopt-failed-entry-sha256 "$PF_REPLAY_FAILED_ENTRY_SHA256"
+```
+
+This path never validates or submits a workflow. It accepts exactly one
+replayed result, and only when that result is the frozen safe schedule root;
+any replayed storage, network, cache, index, or compute result is refused.
+The non-replayed physical results remain fresh observations from the bound
+recovery workflow. The schedule measurement is retained but marked as
+originating in the node idempotency ledger: its original FlowMesh task and
+workflow are unknown, and measurement freshness is not established. The
+adoption transaction is crash-resumable from each durable write and stops
+after completing that trial checkpoint. Resume the remaining trials with the
+ordinary matrix run command and no recovery or adoption arguments.
 
 Because recovery support can be newer than the already-frozen matrix plan,
 each authorization also records the SHA-256 of the exact runner module that

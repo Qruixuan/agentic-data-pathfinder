@@ -87,9 +87,10 @@ class SdkFlowMeshClient:
             interval=poll_interval_seconds,
         )
         status = getattr(response.status, "value", response.status)
-        # A terminal workflow carries no free-text error, but which tasks the
-        # Root considers failed or cancelled is the difference between "the
-        # task ran and failed" and "the task was never dispatched at all".
+        # A terminal workflow carries no free-text error.  Preserve the
+        # Root's task-list snapshots for diagnostics, but do not interpret
+        # them as a complete dispatch history: an API operation can execute
+        # before the control plane records or returns that history.
         failed = tuple(
             str(value)
             for value in (getattr(response, "failed_tasks", None) or [])
@@ -125,7 +126,9 @@ class SdkFlowMeshClient:
             )
         if dispatched == ():
             notes.append(
-                "the Root never recorded a dispatched task for this workflow"
+                "the Root reported an empty dispatched_tasks snapshot for "
+                "this workflow; this is not historical proof that no task "
+                "executed"
             )
         return TerminalWorkflow(
             workflow_id=response.workflow_id,
@@ -140,7 +143,7 @@ class SdkFlowMeshClient:
         return self._client.results.retrieve(task_id)
 
     def describe_task_failure(self, task_id: str) -> dict[str, Any] | None:
-        """Return read-only terminal failure detail for one task.
+        """Return read-only terminal task metadata and failure detail.
 
         Uses the public ``tasks.retrieve`` resource, which on flowmesh-sdk
         0.1.8rc1 is a plain ``GET /tasks/{id}``: it never stops, retries, or

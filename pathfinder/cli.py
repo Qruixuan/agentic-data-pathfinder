@@ -1847,8 +1847,9 @@ def _parser() -> argparse.ArgumentParser:
     matrix_run.add_argument(
         "--recovery-reason",
         help=(
-            "operator rationale for retrying an allowlisted, undispatched "
-            "FlowMesh identity-provider failure"
+            "operator rationale for retrying an allowlisted FlowMesh "
+            "identity-provider failure at a structurally proven safe "
+            "schedule root"
         ),
     )
     matrix_run.add_argument(
@@ -1859,6 +1860,40 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     matrix_run.add_argument("--compact", action="store_true")
+
+    matrix_replay_adoption = subcommands.add_parser(
+        "adopt-flowmesh-container-matrix-replay-results",
+        help=(
+            "adopt one safe schedule replay from an already-bound DONE "
+            "recovery workflow without validating or submitting a workflow"
+        ),
+    )
+    matrix_replay_adoption.add_argument(
+        "--matrix-plan-dir", type=Path, required=True
+    )
+    matrix_replay_adoption.add_argument(
+        "--formal-execution-profile-dir", type=Path, required=True
+    )
+    matrix_replay_adoption.add_argument(
+        "--coordinator-plan-dir", type=Path, required=True
+    )
+    matrix_replay_adoption.add_argument("--run-dir", type=Path, required=True)
+    matrix_replay_adoption.add_argument("--run-id", required=True)
+    matrix_replay_adoption.add_argument("--worker-alias", required=True)
+    matrix_replay_adoption.add_argument("--flowmesh-base-url")
+    matrix_replay_adoption.add_argument(
+        "--poll-interval", type=_positive_finite_float, default=2.0
+    )
+    matrix_replay_adoption.add_argument("--adoption-id", required=True)
+    matrix_replay_adoption.add_argument("--adoption-reason", required=True)
+    matrix_replay_adoption.add_argument(
+        "--adopt-failed-entry-sha256",
+        required=True,
+        help=(
+            "exact digest of the latest replay-only RUN_FAILED journal entry"
+        ),
+    )
+    matrix_replay_adoption.add_argument("--compact", action="store_true")
 
     verify_matrix_run = subcommands.add_parser(
         "verify-flowmesh-container-matrix-run",
@@ -2580,6 +2615,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                     recovery_reason=args.recovery_reason,
                     recover_failed_entry_sha256=(
                         args.recover_failed_entry_sha256
+                    ),
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "adopt-flowmesh-container-matrix-replay-results":
+            from .integrations.flowmesh import FlowMeshSettings, SdkFlowMeshClient
+            from .integrations.flowmesh.container_matrix_runner import (
+                adopt_flowmesh_container_matrix_replay_results,
+            )
+
+            if not args.worker_alias.strip():
+                raise ValueError("worker alias must be a non-empty string")
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=args.worker_alias,
+                validate_before_submit=False,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = adopt_flowmesh_container_matrix_replay_results(
+                    matrix_plan_dir=args.matrix_plan_dir,
+                    formal_execution_profile_dir=(
+                        args.formal_execution_profile_dir
+                    ),
+                    coordinator_plan_dir=args.coordinator_plan_dir,
+                    run_dir=args.run_dir,
+                    run_id=args.run_id,
+                    client=client,
+                    settings=settings,
+                    adoption_id=args.adoption_id,
+                    adoption_reason=args.adoption_reason,
+                    adopt_failed_entry_sha256=(
+                        args.adopt_failed_entry_sha256
                     ),
                 )
             finally:
