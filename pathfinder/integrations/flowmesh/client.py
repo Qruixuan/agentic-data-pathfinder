@@ -98,9 +98,23 @@ class SdkFlowMeshClient:
             str(value)
             for value in (getattr(response, "cancelled_tasks", None) or [])
         )
-        dispatched = tuple(
-            str(value)
-            for value in (getattr(response, "dispatched_tasks", None) or [])
+        fields_set = getattr(response, "model_fields_set", None)
+        if fields_set is None:
+            fields_set = getattr(response, "__fields_set__", None)
+        dispatched_present = (
+            "dispatched_tasks" in fields_set
+            if fields_set is not None
+            else hasattr(response, "dispatched_tasks")
+        )
+        dispatched_raw = (
+            getattr(response, "dispatched_tasks", None)
+            if dispatched_present
+            else None
+        )
+        dispatched = (
+            tuple(str(value) for value in dispatched_raw)
+            if dispatched_raw is not None
+            else None
         )
         notes: list[str] = []
         if failed:
@@ -109,7 +123,7 @@ class SdkFlowMeshClient:
             notes.append(
                 "root-reported cancelled tasks: " + ", ".join(cancelled)
             )
-        if not dispatched:
+        if dispatched == ():
             notes.append(
                 "the Root never recorded a dispatched task for this workflow"
             )
@@ -119,6 +133,7 @@ class SdkFlowMeshClient:
             failed_task_ids=failed,
             cancelled_task_ids=cancelled,
             detail="; ".join(notes) or None,
+            dispatched_task_ids=dispatched,
         )
 
     def retrieve_result(self, task_id: str) -> dict[str, Any]:

@@ -4,6 +4,7 @@ import hashlib
 import io
 import itertools
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -236,6 +237,8 @@ class FakeMatrixFlowMeshClient:
         interrupt_submit_trial: str | None = None,
         interrupt_wait_trial: str | None = None,
         terminal_failure_trial: str | None = None,
+        recoverable_terminal_failure_trial: str | None = None,
+        recoverable_dispatched_task_ids: tuple[str, ...] | None = (),
         replay_operation_key: str | None = None,
         wrong_epoch_operation_key: str | None = None,
         wrong_assigned_worker_operation_key: str | None = None,
@@ -249,6 +252,12 @@ class FakeMatrixFlowMeshClient:
         self.interrupt_submit_trial = interrupt_submit_trial
         self.interrupt_wait_trial = interrupt_wait_trial
         self.terminal_failure_trial = terminal_failure_trial
+        self.recoverable_terminal_failure_trial = (
+            recoverable_terminal_failure_trial
+        )
+        self.recoverable_dispatched_task_ids = (
+            recoverable_dispatched_task_ids
+        )
         self.replay_operation_key = replay_operation_key
         self.wrong_epoch_operation_key = wrong_epoch_operation_key
         self.wrong_assigned_worker_operation_key = (
@@ -259,6 +268,9 @@ class FakeMatrixFlowMeshClient:
         self.results: dict[str, dict[str, Any]] = {}
         self.task_workers: dict[str, str] = {}
         self.workflow_trials: dict[str, str] = {}
+        self.workflow_task_ids: dict[str, tuple[str, ...]] = {}
+        self.recoverable_terminals: dict[str, TerminalWorkflow] = {}
+        self.failure_details: dict[str, dict[str, Any]] = {}
         self.submit_attempts: list[str] = []
         self.wait_calls: list[str] = []
         self.retrieve_calls: list[str] = []
@@ -267,6 +279,7 @@ class FakeMatrixFlowMeshClient:
         self._interrupted = False
         self._submit_interrupted = False
         self._wait_interrupted = False
+        self._recoverable_failure_emitted = False
 
     @staticmethod
     def _workflow_operations(
@@ -409,6 +422,7 @@ class FakeMatrixFlowMeshClient:
         )
         self.workflows.append(copied)
         self.workflow_trials[workflow_id] = trial_key
+        self.workflow_task_ids[workflow_id] = task_ids
         self.active_workflow = workflow_id
         self.maximum_active_workflows = max(
             self.maximum_active_workflows,
@@ -437,6 +451,8 @@ class FakeMatrixFlowMeshClient:
         poll_interval_seconds: float,
     ) -> TerminalWorkflow:
         self.wait_calls.append(workflow_id)
+        if workflow_id in self.recoverable_terminals:
+            return self.recoverable_terminals[workflow_id]
         if workflow_id != self.active_workflow:
             raise AssertionError("wait did not target the active workflow")
         trial_key = self.workflow_trials[workflow_id]
@@ -453,6 +469,55 @@ class FakeMatrixFlowMeshClient:
                 "FAILED",
                 detail="Bearer secret-must-be-redacted",
             )
+        if (
+            trial_key == self.recoverable_terminal_failure_trial
+            and not self._recoverable_failure_emitted
+        ):
+            self._recoverable_failure_emitted = True
+            task_ids = self.workflow_task_ids[workflow_id]
+            primary = task_ids[0]
+            failed_ids = [primary]
+            self.failure_details[primary] = {
+                "task_status": "FAILED",
+                "attempts": 1,
+                "max_attempts": 3,
+                "assigned_worker": self.worker_id,
+                "last_failed_worker": self.worker_id,
+                "detail": (
+                    f"HTTP delivery for task {primary} returned status 503: "
+                    '{"detail":"Identity provider unavailable"}'
+                ),
+            }
+            for index, task_id in enumerate(task_ids[1:], start=1):
+                if index == 1:
+                    failed_ids.append(task_id)
+                    self.failure_details[task_id] = {
+                        "task_status": "FAILED",
+                        "attempts": 0,
+                        "max_attempts": 3,
+                        "assigned_worker": None,
+                        "last_failed_worker": None,
+                        "detail": f"Dependency {primary} failed",
+                    }
+                else:
+                    self.failure_details[task_id] = {
+                        "task_status": "PENDING",
+                        "attempts": 0,
+                        "max_attempts": 3,
+                        "assigned_worker": None,
+                        "last_failed_worker": None,
+                        "detail": None,
+                    }
+            terminal = TerminalWorkflow(
+                workflow_id=workflow_id,
+                status="FAILED",
+                failed_task_ids=tuple(failed_ids),
+                cancelled_task_ids=(),
+                detail="root-reported undispatched identity failure",
+                dispatched_task_ids=self.recoverable_dispatched_task_ids,
+            )
+            self.recoverable_terminals[workflow_id] = terminal
+            return terminal
         return TerminalWorkflow(workflow_id, "DONE")
 
     def retrieve_result(self, task_id: str) -> dict[str, Any]:
@@ -460,6 +525,8 @@ class FakeMatrixFlowMeshClient:
         return self.results[task_id]
 
     def describe_task_failure(self, task_id: str) -> dict[str, Any]:
+        if task_id in self.failure_details:
+            return dict(self.failure_details[task_id])
         return {
             "task_status": "DONE",
             "assigned_worker": self.task_workers[task_id],
@@ -590,6 +657,9 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
         output: Path | None = None,
         probe: _EpochProbe | None = None,
         run_id: str = "formal-matrix-runner-test-v1",
+        recovery_id: str | None = None,
+        recovery_reason: str | None = None,
+        recover_failed_entry_sha256: str | None = None,
     ) -> dict[str, Any]:
         return run_flowmesh_container_matrix(
             matrix_plan_dir=self.matrix,
@@ -600,10 +670,29 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
             client=client,
             settings=self.settings,
             runtime_epoch_probe=probe or _EpochProbe(client.epochs),
+            recovery_id=recovery_id,
+            recovery_reason=recovery_reason,
+            recover_failed_entry_sha256=recover_failed_entry_sha256,
         )
 
     def _completed_run_copy(self, name: str) -> Path:
         return _copy_tree(self.golden_run, self.root / name)
+
+    def _fresh_recovery_client(
+        self,
+        failed_client: FakeMatrixFlowMeshClient,
+    ) -> FakeMatrixFlowMeshClient:
+        client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes
+        )
+        client.recoverable_terminals = dict(
+            failed_client.recoverable_terminals
+        )
+        client.failure_details = {
+            key: dict(value)
+            for key, value in failed_client.failure_details.items()
+        }
+        return client
 
     @staticmethod
     def _workflow_operation_keys(
@@ -878,6 +967,446 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
             [row["trial_key"] for row in self.wrappers[:2]],
             [row["trial_key"] for row in checkpoints],
         )
+
+    def test_explicit_identity_provider_recovery_continues_same_run(
+        self,
+    ) -> None:
+        target_wrapper = next(
+            row
+            for row in self.wrappers[2:]
+            if row["design_id"] not in {"D3", "D7"}
+        )
+        target_trial = target_wrapper["trial_key"]
+        output = self.root / "recover-idp-failure"
+        first_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=target_trial,
+        )
+        with self.assertRaises(Exception):
+            self._run(first_client, output=output)
+
+        failure_path = (
+            output / "flowmesh-container-matrix-failure.json"
+        )
+        original_failure_bytes = failure_path.read_bytes()
+        failed_journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        self.assertEqual("RUN_FAILED", failed_journal[-1]["state"])
+        failed_entry_sha256 = failed_journal[-1]["entry_sha256"]
+        failed_workflow_id = next(
+            reversed(first_client.recoverable_terminals)
+        )
+
+        recovery_client = self._fresh_recovery_client(first_client)
+        recovery_reason = "environment-sensitive-verification-sentinel"
+        with mock.patch.dict(os.environ, {"FLOWMESH_API_KEY": ""}):
+            result = self._run(
+                recovery_client,
+                output=output,
+                recovery_id="idp-recovery-001",
+                recovery_reason=recovery_reason,
+                recover_failed_entry_sha256=failed_entry_sha256,
+            )
+
+        self.assertEqual("COMPLETE", result["status"])
+        self.assertEqual(1, result["infrastructure_recovery_count"])
+        self.assertEqual(1, result["abandoned_workflow_count"])
+        self.assertEqual(80, result["canonical_workflow_count"])
+        self.assertEqual(81, result["flowmesh_workflow_count"])
+        implementation_bindings = result[
+            "recovery_runner_module_sha256_by_recovery_id"
+        ]
+        self.assertEqual({"idp-recovery-001"}, set(implementation_bindings))
+        self.assertRegex(
+            implementation_bindings["idp-recovery-001"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertEqual(original_failure_bytes, failure_path.read_bytes())
+        self.assertNotIn(
+            failed_workflow_id,
+            {
+                row["workflow_id"]
+                for row in _read_jsonl(
+                    output / "flowmesh-container-matrix-submissions.jsonl"
+                )
+            },
+        )
+        self.assertEqual(
+            target_trial,
+            recovery_client.submit_attempts[0],
+        )
+        earlier_trials = {
+            row["trial_key"]
+            for row in self.wrappers[: target_wrapper["sequence_index"]]
+        }
+        self.assertTrue(
+            earlier_trials.isdisjoint(recovery_client.submit_attempts)
+        )
+        checksums = (
+            output / "SHA256SUMS"
+        ).read_text(encoding="utf-8")
+        self.assertIn("flowmesh-container-matrix-failure.json", checksums)
+        journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        failure_index = next(
+            index
+            for index, row in enumerate(journal)
+            if row["entry_sha256"] == failed_entry_sha256
+        )
+        self.assertEqual(
+            "INFRASTRUCTURE_RECOVERY_AUTHORIZED",
+            journal[failure_index + 1]["state"],
+        )
+        # Offline verification must depend only on frozen evidence.  A later
+        # process may have different credential-shaped environment values,
+        # which must not cause stored recovery prose to be re-redacted and
+        # rejected.
+        with mock.patch.dict(
+            os.environ,
+            {"FLOWMESH_API_KEY": recovery_reason},
+        ):
+            verified = verify_flowmesh_container_matrix_run(
+                output,
+                matrix_plan_dir=self.matrix,
+                formal_execution_profile_dir=self.profile,
+                coordinator_plan_dir=self.coordinator,
+            )
+        self.assertEqual("VERIFIED", verified["status"])
+        self.assertEqual(1, verified["infrastructure_recovery_count"])
+
+    def test_durable_failure_requires_exact_explicit_authorization(self) -> None:
+        target_trial = next(
+            row["trial_key"]
+            for row in self.wrappers[1:]
+            if row["design_id"] not in {"D3", "D7"}
+        )
+        output = self.root / "recovery-authorization"
+        first_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=target_trial,
+        )
+        with self.assertRaises(Exception):
+            self._run(first_client, output=output)
+        failed_digest = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )[-1]["entry_sha256"]
+
+        without_authorization = self._fresh_recovery_client(first_client)
+        with self.assertRaisesRegex(Exception, "explicit audited recovery"):
+            self._run(without_authorization, output=output)
+        self.assertEqual([], without_authorization.wait_calls)
+        self.assertEqual([], without_authorization.workflows)
+
+        wrong_digest_client = self._fresh_recovery_client(first_client)
+        probe = _EpochProbe(wrong_digest_client.epochs)
+        with self.assertRaisesRegex(Exception, "does not bind"):
+            self._run(
+                wrong_digest_client,
+                output=output,
+                probe=probe,
+                recovery_id="idp-recovery-wrong-digest",
+                recovery_reason="Attempt with a deliberately wrong digest.",
+                recover_failed_entry_sha256="0" * 64,
+            )
+        self.assertNotEqual("0" * 64, failed_digest)
+        self.assertEqual([], probe.calls)
+        self.assertEqual([], wrong_digest_client.wait_calls)
+        self.assertEqual([], wrong_digest_client.workflows)
+
+    def test_recovery_rejects_missing_root_dispatch_evidence(self) -> None:
+        target_trial = next(
+            row["trial_key"]
+            for row in self.wrappers[1:]
+            if row["design_id"] not in {"D3", "D7"}
+        )
+        output = self.root / "missing-dispatch-evidence"
+        first_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=target_trial,
+            recoverable_dispatched_task_ids=None,
+        )
+        with self.assertRaises(Exception):
+            self._run(first_client, output=output)
+        failed_digest = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )[-1]["entry_sha256"]
+        recovery_client = self._fresh_recovery_client(first_client)
+        with self.assertRaisesRegex(Exception, "allowlisted undispatched"):
+            self._run(
+                recovery_client,
+                output=output,
+                recovery_id="idp-recovery-missing-dispatch",
+                recovery_reason="Dispatch evidence is deliberately absent.",
+                recover_failed_entry_sha256=failed_digest,
+            )
+        self.assertEqual([], recovery_client.workflows)
+
+    def test_crash_after_recovery_authorization_resumes_without_reauthorization(
+        self,
+    ) -> None:
+        target_trial = next(
+            row["trial_key"]
+            for row in self.wrappers[1:]
+            if row["design_id"] not in {"D3", "D7"}
+        )
+        output = self.root / "authorized-crash-resume"
+        first_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=target_trial,
+        )
+        with self.assertRaises(Exception):
+            self._run(first_client, output=output)
+        failed_digest = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )[-1]["entry_sha256"]
+
+        recovery_client = self._fresh_recovery_client(first_client)
+        real_journal_entry = matrix_runner_module._journal_entry
+
+        def interrupt_after_authorization(*args: Any, **kwargs: Any) -> Any:
+            entry = real_journal_entry(*args, **kwargs)
+            if kwargs.get("state") == "INFRASTRUCTURE_RECOVERY_AUTHORIZED":
+                raise KeyboardInterrupt("injected post-authorization crash")
+            return entry
+
+        with (
+            mock.patch.object(
+                matrix_runner_module,
+                "_journal_entry",
+                side_effect=interrupt_after_authorization,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self._run(
+                recovery_client,
+                output=output,
+                recovery_id="idp-recovery-crash-window",
+                recovery_reason="Test the durable authorization crash window.",
+                recover_failed_entry_sha256=failed_digest,
+            )
+        journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        self.assertEqual(
+            "INFRASTRUCTURE_RECOVERY_AUTHORIZED",
+            journal[-1]["state"],
+        )
+
+        resumed_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes
+        )
+        result = self._run(resumed_client, output=output)
+        self.assertEqual("COMPLETE", result["status"])
+        self.assertEqual(1, result["infrastructure_recovery_count"])
+        final_journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        self.assertEqual(
+            1,
+            sum(
+                row["state"] == "INFRASTRUCTURE_RECOVERY_AUTHORIZED"
+                for row in final_journal
+            ),
+        )
+
+    def test_same_phase_cannot_be_recovered_twice(self) -> None:
+        target_trial = next(
+            row["trial_key"]
+            for row in self.wrappers[1:]
+            if row["design_id"] not in {"D3", "D7"}
+        )
+        output = self.root / "one-recovery-per-phase"
+        first_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=target_trial,
+        )
+        with self.assertRaises(Exception):
+            self._run(first_client, output=output)
+        first_failed_digest = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )[-1]["entry_sha256"]
+        original_failure_bytes = (
+            output / "flowmesh-container-matrix-failure.json"
+        ).read_bytes()
+
+        retry_client = self._fresh_recovery_client(first_client)
+        retry_client.terminal_failure_trial = target_trial
+        with self.assertRaises(Exception):
+            self._run(
+                retry_client,
+                output=output,
+                recovery_id="idp-recovery-only-once",
+                recovery_reason="Authorize the sole retry for this phase.",
+                recover_failed_entry_sha256=first_failed_digest,
+            )
+        second_failed_digest = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )[-1]["entry_sha256"]
+
+        second_retry_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes
+        )
+        with self.assertRaisesRegex(Exception, "at most one"):
+            self._run(
+                second_retry_client,
+                output=output,
+                recovery_id="idp-recovery-disallowed-second",
+                recovery_reason="A second retry must be refused.",
+                recover_failed_entry_sha256=second_failed_digest,
+            )
+        self.assertEqual([], second_retry_client.wait_calls)
+        self.assertEqual([], second_retry_client.workflows)
+        self.assertEqual(
+            original_failure_bytes,
+            (
+                output / "flowmesh-container-matrix-failure.json"
+            ).read_bytes(),
+        )
+
+    def test_recovery_id_cannot_be_reused_for_a_later_phase(self) -> None:
+        unconditional = [
+            row
+            for row in self.wrappers
+            if row["design_id"] not in {"D3", "D7"}
+        ]
+        first_target = unconditional[1]["trial_key"]
+        second_target = unconditional[2]["trial_key"]
+        output = self.root / "unique-recovery-ids"
+        first_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=first_target,
+        )
+        with self.assertRaises(Exception):
+            self._run(first_client, output=output)
+        first_digest = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )[-1]["entry_sha256"]
+
+        first_retry = self._fresh_recovery_client(first_client)
+        first_retry.recoverable_terminal_failure_trial = second_target
+        with self.assertRaises(Exception):
+            self._run(
+                first_retry,
+                output=output,
+                recovery_id="idp-recovery-unique-001",
+                recovery_reason="Authorize recovery of the first phase.",
+                recover_failed_entry_sha256=first_digest,
+            )
+        second_digest = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )[-1]["entry_sha256"]
+
+        duplicate_id_client = self._fresh_recovery_client(first_retry)
+        probe = _EpochProbe(duplicate_id_client.epochs)
+        with self.assertRaisesRegex(Exception, "recovery_id was already used"):
+            self._run(
+                duplicate_id_client,
+                output=output,
+                probe=probe,
+                recovery_id="idp-recovery-unique-001",
+                recovery_reason="This duplicate ID must be refused.",
+                recover_failed_entry_sha256=second_digest,
+            )
+        self.assertEqual([], probe.calls)
+        self.assertEqual([], duplicate_id_client.wait_calls)
+        self.assertEqual([], duplicate_id_client.workflows)
+
+    def test_recovery_refuses_reused_flowmesh_identifiers_before_binding(
+        self,
+    ) -> None:
+        target_trial = next(
+            row["trial_key"]
+            for row in self.wrappers[1:]
+            if row["design_id"] not in {"D3", "D7"}
+        )
+        for reuse_kind in ("workflow", "task"):
+            with self.subTest(reuse_kind=reuse_kind):
+                output = self.root / f"reused-flowmesh-{reuse_kind}-id"
+                first_client = FakeMatrixFlowMeshClient(
+                    cache_outcomes=self.cache_outcomes,
+                    recoverable_terminal_failure_trial=target_trial,
+                )
+                with self.assertRaises(Exception):
+                    self._run(first_client, output=output)
+                journal_path = (
+                    output / "flowmesh-container-matrix-journal.jsonl"
+                )
+                failed_digest = _read_jsonl(journal_path)[-1][
+                    "entry_sha256"
+                ]
+                old_bound = next(
+                    row
+                    for row in reversed(_read_jsonl(journal_path))
+                    if row["state"] == "WORKFLOW_BOUND"
+                )
+                old_workflow_id = old_bound["payload"]["workflow_id"]
+                old_task_ids = tuple(old_bound["payload"]["task_ids"])
+                original_failure = (
+                    output / "flowmesh-container-matrix-failure.json"
+                ).read_bytes()
+                fresh_task_ids = tuple(
+                    f"tsk-fresh-{reuse_kind}-{index:03d}"
+                    for index in range(len(old_task_ids))
+                )
+                returned_workflow_id = (
+                    old_workflow_id
+                    if reuse_kind == "workflow"
+                    else f"wfl-fresh-{reuse_kind}"
+                )
+                returned_task_ids = (
+                    fresh_task_ids
+                    if reuse_kind == "workflow"
+                    else (old_task_ids[0], *fresh_task_ids[1:])
+                )
+
+                retry_client = self._fresh_recovery_client(first_client)
+
+                def reuse_identifiers(
+                    workflow: Mapping[str, Any],
+                ) -> SubmittedWorkflow:
+                    retry_client.workflows.append(
+                        json.loads(json.dumps(workflow))
+                    )
+                    return SubmittedWorkflow(
+                        returned_workflow_id, returned_task_ids
+                    )
+
+                retry_client.submit = (  # type: ignore[method-assign]
+                    reuse_identifiers
+                )
+                with self.assertRaisesRegex(
+                    Exception, "reused a workflow or task ID"
+                ):
+                    self._run(
+                        retry_client,
+                        output=output,
+                        recovery_id=f"idp-recovery-reused-{reuse_kind}-id",
+                        recovery_reason=(
+                            "Exercise Root identifier reuse refusal."
+                        ),
+                        recover_failed_entry_sha256=failed_digest,
+                    )
+                final_journal = _read_jsonl(journal_path)
+                self.assertEqual("RUN_FAILED", final_journal[-1]["state"])
+                self.assertEqual(
+                    1,
+                    sum(
+                        row["state"] == "WORKFLOW_BOUND"
+                        and row["payload"]["workflow_id"]
+                        == old_workflow_id
+                        for row in final_journal
+                    ),
+                )
+                self.assertEqual([], retry_client.retrieve_calls)
+                self.assertEqual(
+                    original_failure,
+                    (
+                        output
+                        / "flowmesh-container-matrix-failure.json"
+                    ).read_bytes(),
+                )
 
     def test_clean_boundary_interrupt_resumes_only_the_missing_suffix(self) -> None:
         interrupted_trial = self.wrappers[5]["trial_key"]
@@ -1577,6 +2106,12 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
                     "https://flowmesh.test/root",
                     "--poll-interval",
                     "0.25",
+                    "--recovery-id",
+                    "idp-recovery-cli-001",
+                    "--recovery-reason",
+                    "Operator restored the Root identity provider.",
+                    "--recover-failed-entry-sha256",
+                    "a" * 64,
                     "--compact",
                 ]
             )
@@ -1596,6 +2131,16 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
         self.assertEqual("matrix-cli-run-v1", kwargs["run_id"])
         self.assertIs(fake_sdk_client, kwargs["client"])
         self.assertIs(settings, kwargs["settings"])
+        self.assertEqual(
+            "idp-recovery-cli-001", kwargs["recovery_id"]
+        )
+        self.assertEqual(
+            "Operator restored the Root identity provider.",
+            kwargs["recovery_reason"],
+        )
+        self.assertEqual(
+            "a" * 64, kwargs["recover_failed_entry_sha256"]
+        )
         fake_sdk_client.close.assert_called_once_with()
 
     def test_run_cli_rejects_non_finite_poll_interval(self) -> None:

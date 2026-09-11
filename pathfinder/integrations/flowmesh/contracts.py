@@ -157,6 +157,7 @@ class TerminalWorkflow:
     failed_task_ids: tuple[str, ...] = ()
     cancelled_task_ids: tuple[str, ...] = ()
     detail: str | None = None
+    dispatched_task_ids: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)

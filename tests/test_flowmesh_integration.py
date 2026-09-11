@@ -441,6 +441,60 @@ class SdkWorkerResolutionTest(unittest.TestCase):
         self.assertEqual([], client._client.workers.calls)
 
 
+class SdkWorkflowDispatchEvidenceTest(unittest.TestCase):
+    def _wait(self, response: Any) -> TerminalWorkflow:
+        client = SdkFlowMeshClient.__new__(SdkFlowMeshClient)
+        client._client = types.SimpleNamespace(
+            workflows=types.SimpleNamespace(
+                wait=lambda _workflow_id, interval: response
+            )
+        )
+        return client.wait("wfl-test", 0.1)
+
+    def test_missing_dispatch_field_is_not_treated_as_explicitly_empty(
+        self,
+    ) -> None:
+        response = types.SimpleNamespace(
+            workflow_id="wfl-test",
+            status=types.SimpleNamespace(value="FAILED"),
+            failed_tasks=["tsk-test"],
+            cancelled_tasks=[],
+        )
+        terminal = self._wait(response)
+        self.assertIsNone(terminal.dispatched_task_ids)
+        self.assertNotIn("never recorded", terminal.detail or "")
+
+    def test_explicit_empty_dispatch_list_is_preserved(self) -> None:
+        response = types.SimpleNamespace(
+            workflow_id="wfl-test",
+            status=types.SimpleNamespace(value="FAILED"),
+            failed_tasks=["tsk-test"],
+            cancelled_tasks=[],
+            dispatched_tasks=[],
+        )
+        terminal = self._wait(response)
+        self.assertEqual((), terminal.dispatched_task_ids)
+        self.assertIn("never recorded", terminal.detail or "")
+
+    def test_pydantic_default_empty_list_is_not_proof_of_presence(self) -> None:
+        response = types.SimpleNamespace(
+            workflow_id="wfl-test",
+            status=types.SimpleNamespace(value="FAILED"),
+            failed_tasks=["tsk-test"],
+            cancelled_tasks=[],
+            dispatched_tasks=[],
+            model_fields_set={
+                "workflow_id",
+                "status",
+                "failed_tasks",
+                "cancelled_tasks",
+            },
+        )
+        terminal = self._wait(response)
+        self.assertIsNone(terminal.dispatched_task_ids)
+        self.assertNotIn("never recorded", terminal.detail or "")
+
+
 class DeployedSdkCompatibilityTest(unittest.TestCase):
     """Pin what this integration assumes about flowmesh-sdk 0.1.8rc1.
 

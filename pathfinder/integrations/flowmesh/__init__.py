@@ -125,6 +125,7 @@ from .container_matrix_coordinator import (
     verify_flowmesh_container_matrix_coordinator_dry_run,
 )
 from .container_matrix_runner import (
+    FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION,
     FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION,
     FlowMeshContainerMatrixRunError,
     build_flowmesh_container_matrix_trial_workflow,
@@ -167,6 +168,7 @@ __all__ = [
     "FLOWMESH_CONTAINER_MATRIX_PLAN_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_COORDINATOR_ADMISSION_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_COORDINATOR_PLAN_SCHEMA_VERSION",
+    "FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION",
     "PATHFINDER_GRAPH_NODE_NAME",
     "PREFLIGHT_SCHEMA_VERSION",

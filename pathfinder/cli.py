@@ -1837,6 +1837,27 @@ def _parser() -> argparse.ArgumentParser:
     matrix_run.add_argument(
         "--poll-interval", type=_positive_finite_float, default=2.0
     )
+    matrix_run.add_argument(
+        "--recovery-id",
+        help=(
+            "explicit identifier for one audited infrastructure recovery; "
+            "requires the recovery reason and failed-entry digest"
+        ),
+    )
+    matrix_run.add_argument(
+        "--recovery-reason",
+        help=(
+            "operator rationale for retrying an allowlisted, undispatched "
+            "FlowMesh identity-provider failure"
+        ),
+    )
+    matrix_run.add_argument(
+        "--recover-failed-entry-sha256",
+        help=(
+            "SHA-256 of the terminal RUN_FAILED journal entry being "
+            "authorized; this is not a general force/retry option"
+        ),
+    )
     matrix_run.add_argument("--compact", action="store_true")
 
     verify_matrix_run = subcommands.add_parser(
@@ -2555,6 +2576,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     run_id=args.run_id,
                     client=client,
                     settings=settings,
+                    recovery_id=args.recovery_id,
+                    recovery_reason=args.recovery_reason,
+                    recover_failed_entry_sha256=(
+                        args.recover_failed_entry_sha256
+                    ),
                 )
             finally:
                 client.close()

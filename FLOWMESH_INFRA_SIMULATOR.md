@@ -489,6 +489,60 @@ the IDs were not made durable, resume fails closed instead of silently
 submitting a duplicate. The first ordinary failure also stops the matrix;
 later trials are never skipped over.
 
+A narrow terminal-failure recovery path is supported without restarting the
+containers. Each trial phase may use it at most once. It applies only when
+the Root explicitly reports an empty
+`dispatched_tasks` list and the complete task evidence shows exactly one HTTP
+503 delivery failure with the body `{"detail":"Identity provider
+unavailable"}`; dependency fallout must be pristine and no task may have run.
+The worker identity, Root endpoint, all frozen inputs, and all eight runtime
+epochs must still match the original run contract. Missing dispatch evidence,
+another error, or a second recovery of the same trial phase is refused.
+
+Recovery is never automatic. First read the digest of the terminal failure:
+
+```bash
+export PF_FAILED_ENTRY_SHA256="$(
+  python - "$PF_MATRIX_RUN/flowmesh-container-matrix-journal.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+rows = [
+    json.loads(line)
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.strip()
+]
+assert rows[-1]["state"] == "RUN_FAILED"
+print(rows[-1]["entry_sha256"])
+PY
+)"
+```
+
+After the external identity-provider incident is resolved, repeat the original
+run command with these three additional arguments:
+
+```bash
+  --recovery-id "idp-recovery-001" \
+  --recovery-reason "Root identity provider restored by the operator" \
+  --recover-failed-entry-sha256 "$PF_FAILED_ENTRY_SHA256"
+```
+
+The original `RUN_FAILED` entry, failed workflow/task IDs, and immutable
+failure document remain in the evidence. The replacement workflow receives
+new IDs; successful checkpoints and canonical result ledgers exclude the
+abandoned attempt. A recovered final summary separately reports canonical
+workflows, all FlowMesh workflow attempts, abandoned workflows, and recovery
+count. This is an audited continuation of the same run, not evidence that the
+failed attempt succeeded.
+
+Because recovery support can be newer than the already-frozen matrix plan,
+each authorization also records the SHA-256 of the exact runner module that
+made the decision. This separates planning provenance from recovery
+implementation provenance. The recovered artifact remains infrastructure
+conformance evidence (`eligible_for_scientific_claims: false`); archive the
+corresponding clean source revision with any long-lived evidence package.
+
 One operating-system advisory lock covers the whole invocation. A second
 process targeting the same output directory fails before reading or changing
 its checkpoint. The sibling lock file is intentionally retained after exit;

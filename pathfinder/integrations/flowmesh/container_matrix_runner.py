@@ -51,6 +51,7 @@ from .contracts import (
     FlowMeshSettings,
     FlowMeshWorkerIdentity,
     SubmittedWorkflow,
+    TerminalWorkflow,
 )
 from .preflight import describe_pinned_worker
 from .redaction import redact_secrets
@@ -78,6 +79,9 @@ FLOWMESH_CONTAINER_MATRIX_SUBMISSION_SCHEMA_VERSION = (
 FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-run/v1alpha1"
 )
+FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-matrix-run/v1alpha2"
+)
 FLOWMESH_CONTAINER_MATRIX_FAILURE_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-matrix-failure/v1alpha1"
 )
@@ -100,8 +104,16 @@ _FINAL_FILES = {
     _SUBMISSIONS_FILE,
 }
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_RECOVERY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _PHASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
 _CONDITIONAL_DESIGNS = frozenset({"D3", "D7"})
+_RECOVERY_STATE = "INFRASTRUCTURE_RECOVERY_AUTHORIZED"
+_RECOVERABLE_FAILURE_CLASS = (
+    "flowmesh-identity-provider-unavailable-before-dispatch"
+)
+_RECOVERY_IMPLEMENTATION_SCHEMA = (
+    "pathfinder.flowmesh-container-matrix-infrastructure-recovery/v1alpha1"
+)
 _ROOT_ENDPOINT_IDENTITY_SCHEME = (
     "normalized-scheme-host-effective-port-path/v1"
 )
@@ -138,6 +150,68 @@ def _run_identifier(value: Any) -> str:
         "run_id contains unsupported characters",
     )
     return identifier
+
+
+def _recovery_identifier(value: Any) -> str:
+    identifier = _text(value, "recovery_id")
+    _runner_require(
+        _RECOVERY_ID.fullmatch(identifier) is not None,
+        "recovery_id contains unsupported characters",
+    )
+    return identifier
+
+
+def _validated_recovery_reason(value: Any) -> str:
+    reason = _text(value, "recovery_reason").strip()
+    _runner_require(bool(reason), "recovery_reason must not be empty")
+    _runner_require(
+        len(reason) <= 1000,
+        "recovery_reason must contain at most 1000 characters",
+    )
+    return reason
+
+
+def _recovery_reason(value: Any) -> str:
+    reason = _validated_recovery_reason(value)
+    return _validated_recovery_reason(redact_secrets(reason, limit=1000))
+
+
+def _recovery_runner_module_sha256() -> str:
+    """Bind recovery evidence to the exact runner module that authorized it."""
+
+    return _sha256_bytes(Path(__file__).read_bytes())
+
+
+def _normalize_recovery_request(
+    recovery_id: str | None,
+    recovery_reason: str | None,
+    recover_failed_entry_sha256: str | None,
+) -> dict[str, str] | None:
+    supplied = (
+        recovery_id,
+        recovery_reason,
+        recover_failed_entry_sha256,
+    )
+    _runner_require(
+        all(value is None for value in supplied)
+        or all(value is not None for value in supplied),
+        "recovery_id, recovery_reason, and recover_failed_entry_sha256 "
+        "must be supplied together",
+    )
+    if recovery_id is None:
+        return None
+    assert recovery_reason is not None
+    assert recover_failed_entry_sha256 is not None
+    _runner_require(
+        re.fullmatch(r"[0-9a-f]{64}", recover_failed_entry_sha256)
+        is not None,
+        "recover_failed_entry_sha256 must be a lowercase SHA-256 digest",
+    )
+    return {
+        "recovery_id": _recovery_identifier(recovery_id),
+        "recovery_reason": _recovery_reason(recovery_reason),
+        "recover_failed_entry_sha256": recover_failed_entry_sha256,
+    }
 
 
 def _phase_identifier(value: Any) -> str:
@@ -1028,6 +1102,398 @@ def _validate_contract(contract: Mapping[str, Any]) -> None:
     )
 
 
+def _validate_failure_document(
+    failure: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    checkpoints: Sequence[Mapping[str, Any]],
+    journal: Sequence[Mapping[str, Any]],
+) -> None:
+    expected_fields = {
+        "schema_version",
+        "status",
+        "run_id",
+        "matrix_plan_sha256",
+        "sequence_index",
+        "trial_key",
+        "phase",
+        "operation_keys",
+        "completed_trial_count",
+        "error_type",
+        "error",
+        "later_trials_submitted",
+        "credentials_recorded",
+        "eligible_for_scientific_claims",
+        "failure_sha256",
+    }
+    failures = [row for row in journal if row.get("state") == "RUN_FAILED"]
+    _runner_require(bool(failures), "matrix failure document has no journal failure")
+    first = failures[0]
+    operation_keys = failure.get("operation_keys")
+    first_phase = first.get("phase")
+    expected_operation_keys = None
+    if first_phase in {"unconditional", "A", "B"}:
+        expected_operation_keys = contract[
+            "expected_phase_operation_keys_by_trial_key"
+        ][str(first["trial_key"])][str(first_phase)]
+    _runner_require(
+        set(failure) == expected_fields
+        and failure.get("schema_version")
+        == FLOWMESH_CONTAINER_MATRIX_FAILURE_SCHEMA_VERSION
+        and failure.get("status") == "FAILED"
+        and failure.get("failure_sha256")
+        == _document_sha256(failure, "failure_sha256")
+        and failure.get("run_id") == contract["run_id"]
+        and failure.get("matrix_plan_sha256")
+        == contract["source_binding"]["matrix_plan_sha256"]
+        and failure.get("sequence_index") == first.get("sequence_index")
+        and failure.get("trial_key") == first.get("trial_key")
+        and failure.get("phase") == first.get("phase")
+        # The failure document is immutable evidence for the first failure.
+        # A successfully recovered run can later contain more checkpoints.
+        and type(failure.get("completed_trial_count")) is int
+        and failure.get("completed_trial_count") == first.get("sequence_index")
+        and failure["completed_trial_count"] <= len(checkpoints)
+        and isinstance(operation_keys, list)
+        and bool(operation_keys)
+        and all(isinstance(key, str) and key for key in operation_keys)
+        and len(operation_keys) == len(set(operation_keys))
+        and set(operation_keys).issubset(contract["planned_operation_keys"])
+        and (
+            expected_operation_keys is None
+            or operation_keys == expected_operation_keys
+        )
+        and isinstance(failure.get("error_type"), str)
+        and bool(failure["error_type"])
+        and failure.get("error") == first.get("payload", {}).get("error")
+        and failure.get("later_trials_submitted") is False
+        and failure.get("credentials_recorded") is False
+        and failure.get("eligible_for_scientific_claims") is False,
+        "matrix failure document is invalid",
+    )
+
+
+def _normalize_task_evidence(
+    task_id: str,
+    detail: Mapping[str, Any],
+) -> dict[str, Any]:
+    status = str(detail.get("task_status") or "").strip().upper()
+    attempts = detail.get("attempts")
+    maximum = detail.get("max_attempts")
+    assigned = detail.get("assigned_worker")
+    last_failed = detail.get("last_failed_worker")
+    message = detail.get("detail")
+    _runner_require(
+        bool(status)
+        and type(attempts) is int
+        and attempts >= 0
+        and type(maximum) is int
+        and maximum >= attempts
+        and (assigned is None or isinstance(assigned, str))
+        and (last_failed is None or isinstance(last_failed, str))
+        and (message is None or isinstance(message, str)),
+        "FlowMesh task evidence is incomplete for infrastructure recovery",
+    )
+    return {
+        "task_id": task_id,
+        "task_status": status,
+        "attempts": attempts,
+        "max_attempts": maximum,
+        "assigned_worker": assigned,
+        "last_failed_worker": last_failed,
+        "detail": redact_secrets(message) if message else None,
+    }
+
+
+def _validate_recoverable_task_evidence(
+    evidence: Sequence[Mapping[str, Any]],
+    *,
+    bound_task_ids: Sequence[str],
+    failed_task_ids: Sequence[str],
+    selected_worker_id: str,
+) -> None:
+    _runner_require(
+        len(evidence) == len(bound_task_ids)
+        and [row.get("task_id") for row in evidence]
+        == list(bound_task_ids)
+        and bool(failed_task_ids)
+        and len(failed_task_ids) == len(set(failed_task_ids))
+        and set(failed_task_ids).issubset(bound_task_ids),
+        "infrastructure recovery task coverage is invalid",
+    )
+    primary_failures: list[str] = []
+    dependency_failures: list[str] = []
+    successful_states = {
+        "DONE",
+        "COMPLETE",
+        "COMPLETED",
+        "SUCCESS",
+        "SUCCEEDED",
+    }
+    for row in evidence:
+        _runner_require(
+            set(row)
+            == {
+                "task_id",
+                "task_status",
+                "attempts",
+                "max_attempts",
+                "assigned_worker",
+                "last_failed_worker",
+                "detail",
+            },
+            "infrastructure recovery task evidence shape changed",
+        )
+        status = row.get("task_status")
+        attempts = row.get("attempts")
+        maximum = row.get("max_attempts")
+        assigned = row.get("assigned_worker")
+        last_failed = row.get("last_failed_worker")
+        detail = row.get("detail")
+        _runner_require(
+            isinstance(status, str)
+            and bool(status)
+            and status not in successful_states
+            and type(attempts) is int
+            and attempts >= 0
+            and type(maximum) is int
+            and maximum >= attempts
+            and assigned in {None, selected_worker_id}
+            and last_failed in {None, selected_worker_id}
+            and (detail is None or isinstance(detail, str)),
+            "infrastructure recovery task evidence is unsafe",
+        )
+        if attempts > 0:
+            task_id = str(row["task_id"])
+            match = re.fullmatch(
+                rf"HTTP delivery for task {re.escape(task_id)} returned "
+                r"status 503: (.+)",
+                detail or "",
+            )
+            body: Any = None
+            if match is not None:
+                try:
+                    body = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    body = None
+            _runner_require(
+                status == "FAILED"
+                and attempts == 1
+                and task_id in failed_task_ids
+                and assigned == selected_worker_id
+                and last_failed == selected_worker_id
+                and body == {"detail": "Identity provider unavailable"},
+                "an attempted task did not fail solely at the allowlisted "
+                "identity-provider delivery boundary",
+            )
+            primary_failures.append(task_id)
+        elif status == "FAILED":
+            _runner_require(
+                isinstance(detail, str)
+                and re.fullmatch(r"Dependency \S+ failed", detail) is not None
+                and assigned is None
+                and last_failed is None,
+                "an unattempted failed task is not dependency fallout",
+            )
+            dependency_failures.append(str(row["task_id"]))
+        else:
+            _runner_require(
+                status == "PENDING"
+                and detail is None
+                and assigned is None
+                and last_failed is None,
+                "an unattempted task is not pristine and pending",
+            )
+    _runner_require(
+        len(primary_failures) == 1,
+        "infrastructure recovery requires exactly one primary delivery "
+        "failure",
+    )
+    primary = primary_failures[0]
+    for row in evidence:
+        if row["task_id"] in dependency_failures:
+            _runner_require(
+                row["detail"] == f"Dependency {primary} failed",
+                "dependency failure does not bind the primary delivery "
+                "failure",
+            )
+    _runner_require(
+        set(failed_task_ids) == {primary, *dependency_failures},
+        "Root-reported failed tasks differ from the classified failures",
+    )
+
+
+def _validate_recovery_payload(
+    payload: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any],
+    failure_entry: Mapping[str, Any],
+    bound_payload: Mapping[str, Any],
+    failure_document: Mapping[str, Any],
+    expected_retry_ordinal: int,
+) -> None:
+    expected_fields = {
+        "recovery_id",
+        "recovery_reason",
+        "retry_ordinal",
+        "failure_class",
+        "recovery_implementation_schema",
+        "recovery_runner_module_sha256",
+        "failed_journal_entry_sha256",
+        "initial_failure_sha256",
+        "workflow_sha256",
+        "failed_workflow_id",
+        "bound_task_ids",
+        "failed_task_ids",
+        "cancelled_task_ids",
+        "dispatched_task_ids",
+        "task_evidence",
+        "task_evidence_sha256",
+        "selected_worker_id",
+        "runtime_epochs_sha256",
+        "root_endpoint_identity_sha256",
+        "recovery_evidence_validated",
+        "credentials_recorded",
+    }
+    evidence = payload.get("task_evidence")
+    _runner_require(
+        set(payload) == expected_fields
+        and _recovery_identifier(payload.get("recovery_id"))
+        == payload.get("recovery_id")
+        and _validated_recovery_reason(payload.get("recovery_reason"))
+        == payload.get("recovery_reason")
+        and payload.get("retry_ordinal") == expected_retry_ordinal
+        and expected_retry_ordinal >= 1
+        and payload.get("failure_class") == _RECOVERABLE_FAILURE_CLASS
+        and payload.get("recovery_implementation_schema")
+        == _RECOVERY_IMPLEMENTATION_SCHEMA
+        and re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(payload.get("recovery_runner_module_sha256") or ""),
+        )
+        is not None
+        and payload.get("failed_journal_entry_sha256")
+        == failure_entry.get("entry_sha256")
+        and payload.get("initial_failure_sha256")
+        == failure_document.get("failure_sha256")
+        and payload.get("workflow_sha256")
+        == bound_payload.get("workflow_sha256")
+        and payload.get("failed_workflow_id")
+        == bound_payload.get("workflow_id")
+        and payload.get("bound_task_ids") == bound_payload.get("task_ids")
+        and isinstance(payload.get("failed_task_ids"), list)
+        and payload.get("cancelled_task_ids") == []
+        and payload.get("dispatched_task_ids") == []
+        and isinstance(evidence, list)
+        and payload.get("task_evidence_sha256")
+        == _sha256_bytes(_canonical_bytes(evidence))
+        and payload.get("selected_worker_id")
+        == contract["selected_worker"]["worker_id"]
+        and payload.get("runtime_epochs_sha256")
+        == contract["runtime_epochs_sha256"]
+        and payload.get("root_endpoint_identity_sha256")
+        == contract["flowmesh_root_endpoint_identity_sha256"]
+        and payload.get("recovery_evidence_validated") is True
+        and payload.get("credentials_recorded") is False,
+        "matrix infrastructure recovery payload is invalid",
+    )
+    _validate_recoverable_task_evidence(
+        evidence,
+        bound_task_ids=payload["bound_task_ids"],
+        failed_task_ids=payload["failed_task_ids"],
+        selected_worker_id=str(payload["selected_worker_id"]),
+    )
+
+
+def _build_recovery_payload(
+    client: FlowMeshClientProtocol,
+    *,
+    contract: Mapping[str, Any],
+    failure_entry: Mapping[str, Any],
+    bound_payload: Mapping[str, Any],
+    failure_document: Mapping[str, Any],
+    recovery_request: Mapping[str, str],
+    retry_ordinal: int,
+) -> dict[str, Any]:
+    workflow_id = _text(
+        bound_payload.get("workflow_id"), "failed workflow_id"
+    )
+    task_ids = bound_payload.get("task_ids")
+    _runner_require(
+        isinstance(task_ids, list)
+        and bool(task_ids)
+        and all(isinstance(task_id, str) and task_id for task_id in task_ids),
+        "failed workflow task binding is invalid",
+    )
+    try:
+        terminal = client.wait(workflow_id, 0.1)
+    except Exception as exc:
+        raise FlowMeshContainerMatrixRunError(
+            "cannot re-read the failed FlowMesh workflow for recovery: "
+            + redact_secrets(str(exc))
+        ) from exc
+    _runner_require(
+        isinstance(terminal, TerminalWorkflow)
+        and terminal.workflow_id == workflow_id
+        and terminal.status == "FAILED"
+        and terminal.dispatched_task_ids == ()
+        and not terminal.cancelled_task_ids
+        and bool(terminal.failed_task_ids)
+        and set(terminal.failed_task_ids).issubset(task_ids),
+        "FlowMesh failure is not an allowlisted undispatched terminal "
+        "workflow",
+    )
+    evidence: list[dict[str, Any]] = []
+    for task_id in task_ids:
+        try:
+            detail = client.describe_task_failure(task_id)
+        except Exception as exc:
+            raise FlowMeshContainerMatrixRunError(
+                "cannot read complete task evidence for infrastructure "
+                "recovery: " + redact_secrets(str(exc))
+            ) from exc
+        _runner_require(
+            isinstance(detail, Mapping),
+            "FlowMesh returned no task evidence for infrastructure recovery",
+        )
+        evidence.append(_normalize_task_evidence(task_id, detail))
+    payload: dict[str, Any] = {
+        "recovery_id": recovery_request["recovery_id"],
+        "recovery_reason": recovery_request["recovery_reason"],
+        "retry_ordinal": retry_ordinal,
+        "failure_class": _RECOVERABLE_FAILURE_CLASS,
+        "recovery_implementation_schema": _RECOVERY_IMPLEMENTATION_SCHEMA,
+        "recovery_runner_module_sha256": (
+            _recovery_runner_module_sha256()
+        ),
+        "failed_journal_entry_sha256": failure_entry["entry_sha256"],
+        "initial_failure_sha256": failure_document["failure_sha256"],
+        "workflow_sha256": bound_payload["workflow_sha256"],
+        "failed_workflow_id": workflow_id,
+        "bound_task_ids": list(task_ids),
+        "failed_task_ids": list(terminal.failed_task_ids),
+        "cancelled_task_ids": list(terminal.cancelled_task_ids),
+        "dispatched_task_ids": list(terminal.dispatched_task_ids),
+        "task_evidence": evidence,
+        "task_evidence_sha256": _sha256_bytes(_canonical_bytes(evidence)),
+        "selected_worker_id": contract["selected_worker"]["worker_id"],
+        "runtime_epochs_sha256": contract["runtime_epochs_sha256"],
+        "root_endpoint_identity_sha256": contract[
+            "flowmesh_root_endpoint_identity_sha256"
+        ],
+        "recovery_evidence_validated": True,
+        "credentials_recorded": False,
+    }
+    _validate_recovery_payload(
+        payload,
+        contract=contract,
+        failure_entry=failure_entry,
+        bound_payload=bound_payload,
+        failure_document=failure_document,
+        expected_retry_ordinal=retry_ordinal,
+    )
+    return payload
+
+
 def _journal_entry(
     journal_path: Path,
     *,
@@ -1062,6 +1528,7 @@ def _validate_journal(
     checkpoints: Sequence[Mapping[str, Any]],
     *,
     sources: Mapping[str, Any] | None = None,
+    failure_document: Mapping[str, Any] | None = None,
     allow_last_checkpoint_completion_gap: bool = False,
     require_complete: bool = False,
 ) -> None:
@@ -1072,11 +1539,15 @@ def _validate_journal(
     state_index = 0
     ready_for_checkpoint = False
     failed = False
+    failure_entry: Mapping[str, Any] | None = None
+    recovery_count = 0
     current_intent: Mapping[str, Any] | None = None
     current_bound: Mapping[str, Any] | None = None
     obtained_payloads: list[Mapping[str, Any]] = []
     seen_workflow_ids: set[str] = set()
     seen_task_ids: set[str] = set()
+    seen_recovery_ids: set[str] = set()
+    recovered_phases: set[tuple[int, str]] = set()
     phase_states = (
         "SUBMISSION_INTENT",
         "WORKFLOW_BOUND",
@@ -1130,9 +1601,14 @@ def _validate_journal(
         )
 
         if state == "RUN_FAILED":
+            followed_by_recovery = (
+                index + 1 < len(entries)
+                and entries[index + 1].get("state") == _RECOVERY_STATE
+            )
             _runner_require(
-                index == len(entries) - 1 and completed_count < 64,
-                "matrix journal failure is not terminal",
+                (index == len(entries) - 1 or followed_by_recovery)
+                and completed_count < 64,
+                "matrix journal failure is neither terminal nor recovered",
             )
             _runner_require(
                 phase in {"preflight", "unconditional", "A", "B"}
@@ -1142,6 +1618,44 @@ def _validate_journal(
                 "matrix journal failure payload is invalid",
             )
             failed = True
+            failure_entry = row
+            continue
+
+        if state == _RECOVERY_STATE:
+            phases = phases_for(completed_count)
+            _runner_require(
+                failed
+                and failure_entry is not None
+                and failure_document is not None
+                and current_bound is not None
+                and phase_index < len(phases)
+                and phase == phases[phase_index],
+                "matrix recovery does not follow a recoverable bound phase",
+            )
+            _validate_recovery_payload(
+                payload,
+                contract=contract,
+                failure_entry=failure_entry,
+                bound_payload=current_bound,
+                failure_document=failure_document,
+                expected_retry_ordinal=recovery_count + 1,
+            )
+            recovery_id = str(payload["recovery_id"])
+            recovery_key = (completed_count, phase)
+            _runner_require(
+                recovery_id not in seen_recovery_ids
+                and recovery_key not in recovered_phases,
+                "matrix journal reuses a recovery_id or recovers one phase "
+                "more than once",
+            )
+            seen_recovery_ids.add(recovery_id)
+            recovered_phases.add(recovery_key)
+            recovery_count += 1
+            failed = False
+            failure_entry = None
+            state_index = 0
+            current_intent = None
+            current_bound = None
             continue
 
         _runner_require(
@@ -1398,6 +1912,7 @@ def _reconcile_checkpoint_completion(
     contract: Mapping[str, Any],
     *,
     sources: Mapping[str, Any] | None = None,
+    failure_document: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Recover the sole safe two-file crash window after checkpoint append."""
 
@@ -1406,6 +1921,7 @@ def _reconcile_checkpoint_completion(
         contract,
         checkpoints,
         sources=sources,
+        failure_document=failure_document,
         allow_last_checkpoint_completion_gap=True,
     )
     completed_count = sum(
@@ -1426,7 +1942,11 @@ def _reconcile_checkpoint_completion(
         )
         entries.append(completed)
     _validate_journal(
-        entries, contract, checkpoints, sources=sources
+        entries,
+        contract,
+        checkpoints,
+        sources=sources,
+        failure_document=failure_document,
     )
     return entries
 
@@ -1437,15 +1957,130 @@ def _phase_progress(
     sequence_index: int,
     phase: str,
 ) -> Mapping[str, Any] | None:
+    progress: Mapping[str, Any] | None = None
+    for row in entries:
+        if (
+            row.get("sequence_index") != sequence_index
+            or row.get("phase") != phase
+        ):
+            continue
+        if row.get("state") == _RECOVERY_STATE:
+            progress = None
+        elif row.get("state") in {
+            "SUBMISSION_INTENT",
+            "WORKFLOW_BOUND",
+            "RESULTS_OBTAINED",
+        }:
+            progress = row
+    return progress
+
+
+def _unresolved_failure(
+    entries: Sequence[Mapping[str, Any]],
+) -> Mapping[str, Any] | None:
+    if entries and entries[-1].get("state") == "RUN_FAILED":
+        return entries[-1]
+    return None
+
+
+def _authorize_infrastructure_recovery(
+    client: FlowMeshClientProtocol,
+    *,
+    contract: Mapping[str, Any],
+    journal_path: Path,
+    journal_entries: list[dict[str, Any]],
+    failure_document: Mapping[str, Any],
+    recovery_request: Mapping[str, str],
+) -> dict[str, Any]:
+    failure_entry = _unresolved_failure(journal_entries)
+    _runner_require(
+        failure_entry is not None,
+        "matrix run has no unresolved infrastructure failure to recover",
+    )
+    _runner_require(
+        recovery_request["recover_failed_entry_sha256"]
+        == failure_entry.get("entry_sha256"),
+        "recovery authorization does not bind the terminal RUN_FAILED entry",
+    )
+    sequence_index = int(failure_entry["sequence_index"])
+    phase = str(failure_entry["phase"])
+    _runner_require(
+        phase in {"unconditional", "A", "B"},
+        "only a submitted matrix phase can be recovered",
+    )
+    progress = _phase_progress(
+        journal_entries[:-1],
+        sequence_index=sequence_index,
+        phase=phase,
+    )
+    _runner_require(
+        progress is not None and progress.get("state") == "WORKFLOW_BOUND",
+        "the failed matrix phase was not durably bound before failure",
+    )
+    _runner_require(
+        not any(
+            row.get("state") == _RECOVERY_STATE
+            and row.get("sequence_index") == sequence_index
+            and row.get("phase") == phase
+            for row in journal_entries
+        ),
+        "a matrix phase may receive at most one infrastructure recovery",
+    )
+    _runner_require(
+        not any(
+            row.get("state") == _RECOVERY_STATE
+            and row.get("payload", {}).get("recovery_id")
+            == recovery_request["recovery_id"]
+            for row in journal_entries
+        ),
+        "recovery_id was already used by this matrix run",
+    )
+    retry_ordinal = 1 + sum(
+        row.get("state") == _RECOVERY_STATE for row in journal_entries
+    )
+    payload = _build_recovery_payload(
+        client,
+        contract=contract,
+        failure_entry=failure_entry,
+        bound_payload=progress["payload"],
+        failure_document=failure_document,
+        recovery_request=recovery_request,
+        retry_ordinal=retry_ordinal,
+    )
+    authorized = _journal_entry(
+        journal_path,
+        run_id=str(contract["run_id"]),
+        state=_RECOVERY_STATE,
+        sequence_index=sequence_index,
+        trial_key=str(failure_entry["trial_key"]),
+        phase=phase,
+        payload=payload,
+    )
+    journal_entries.append(authorized)
+    return authorized
+
+
+def _validate_repeated_recovery_request(
+    journal_entries: Sequence[Mapping[str, Any]],
+    recovery_request: Mapping[str, str],
+) -> None:
     matches = [
         row
-        for row in entries
-        if row.get("sequence_index") == sequence_index
-        and row.get("phase") == phase
-        and row.get("state")
-        in {"SUBMISSION_INTENT", "WORKFLOW_BOUND", "RESULTS_OBTAINED"}
+        for row in journal_entries
+        if row.get("state") == _RECOVERY_STATE
+        and row.get("payload", {}).get("recovery_id")
+        == recovery_request["recovery_id"]
     ]
-    return matches[-1] if matches else None
+    _runner_require(
+        len(matches) == 1
+        and matches[0].get("payload", {}).get("recovery_reason")
+        == recovery_request["recovery_reason"]
+        and matches[0].get("payload", {}).get(
+            "failed_journal_entry_sha256"
+        )
+        == recovery_request["recover_failed_entry_sha256"],
+        "recovery request does not match a durable authorization",
+    )
 
 
 def _assert_current_worker(
@@ -1698,6 +2333,31 @@ def _execute_phase(
         )
         journal_entries.append(intent)
         submitted = client.submit(workflow)
+        existing_workflow_ids = {
+            str(row["payload"]["workflow_id"])
+            for row in journal_entries
+            if row.get("state") == "WORKFLOW_BOUND"
+        }
+        existing_task_ids = {
+            str(task_id)
+            for row in journal_entries
+            if row.get("state") == "WORKFLOW_BOUND"
+            for task_id in row["payload"]["task_ids"]
+        }
+        _runner_require(
+            isinstance(submitted.workflow_id, str)
+            and bool(submitted.workflow_id)
+            and len(submitted.task_ids) == len(operations)
+            and all(
+                isinstance(task_id, str) and bool(task_id)
+                for task_id in submitted.task_ids
+            )
+            and len(submitted.task_ids) == len(set(submitted.task_ids))
+            and submitted.workflow_id not in existing_workflow_ids
+            and existing_task_ids.isdisjoint(submitted.task_ids),
+            "FlowMesh reused a workflow or task ID; refusing to bind an "
+            "ambiguous submission",
+        )
         bound = _journal_entry(
             journal_path,
             run_id=str(contract["run_id"]),
@@ -2471,6 +3131,13 @@ def _write_failure(
     completed_trial_count: int,
     error: BaseException,
 ) -> None:
+    failure_path = target / _FAILURE_FILE
+    if failure_path.exists():
+        _runner_require(
+            failure_path.is_file() and not failure_path.is_symlink(),
+            "immutable matrix failure evidence is not a regular file",
+        )
+        return
     failure: dict[str, Any] = {
         "schema_version": FLOWMESH_CONTAINER_MATRIX_FAILURE_SCHEMA_VERSION,
         "status": "FAILED",
@@ -2492,7 +3159,7 @@ def _write_failure(
     failure["failure_sha256"] = _document_sha256(
         failure, "failure_sha256"
     )
-    _atomic_write(target / _FAILURE_FILE, _json_bytes(failure))
+    _atomic_write(failure_path, _json_bytes(failure))
 
 
 def _finalize(
@@ -2500,6 +3167,8 @@ def _finalize(
     *,
     contract: Mapping[str, Any],
     checkpoints: Sequence[Mapping[str, Any]],
+    journal_entries: Sequence[Mapping[str, Any]],
+    failure_document: Mapping[str, Any] | None,
     resume_performed: bool,
     reused_trial_count: int,
     executed_this_invocation: int,
@@ -2517,8 +3186,31 @@ def _finalize(
     ]
     executed = [row for row in operation_results if row["executed"] is True]
     inactive = [row for row in operation_results if row["executed"] is False]
+    recovery_entries = [
+        row for row in journal_entries if row.get("state") == _RECOVERY_STATE
+    ]
+    failure_entries = [
+        row for row in journal_entries if row.get("state") == "RUN_FAILED"
+    ]
+    recovered = bool(recovery_entries)
+    _runner_require(
+        (not recovered and failure_document is None)
+        or (
+            recovered
+            and failure_document is not None
+            and len(failure_entries) == len(recovery_entries)
+        ),
+        "completed matrix recovery evidence is inconsistent",
+    )
+    total_workflow_count = sum(
+        row.get("state") == "WORKFLOW_BOUND" for row in journal_entries
+    )
     summary: dict[str, Any] = {
-        "schema_version": FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION,
+        "schema_version": (
+            FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION
+            if recovered
+            else FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION
+        ),
         "status": "COMPLETE",
         "run_id": contract["run_id"],
         "matrix_id": contract["matrix_id"],
@@ -2540,7 +3232,7 @@ def _finalize(
         "executed_operation_count": len(executed),
         "inactive_operation_count": len(inactive),
         "workflow_count": len(submissions),
-        "flowmesh_workflow_count": len(submissions),
+        "flowmesh_workflow_count": total_workflow_count,
         "primary_trial_wrapper_max_concurrency": 1,
         "global_serial_execution_observed": True,
         "resume_performed": resume_performed,
@@ -2553,6 +3245,30 @@ def _finalize(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if recovered:
+        assert failure_document is not None
+        summary.update(
+            {
+                "canonical_workflow_count": len(submissions),
+                "abandoned_workflow_count": len(recovery_entries),
+                "infrastructure_failure_count": len(failure_entries),
+                "infrastructure_recovery_count": len(recovery_entries),
+                "recovery_ids": [
+                    row["payload"]["recovery_id"]
+                    for row in recovery_entries
+                ],
+                "recovery_runner_module_sha256_by_recovery_id": {
+                    row["payload"]["recovery_id"]: row["payload"][
+                        "recovery_runner_module_sha256"
+                    ]
+                    for row in recovery_entries
+                },
+                "initial_failure_sha256": failure_document[
+                    "failure_sha256"
+                ],
+                "failed_infrastructure_attempts_in_canonical_results": False,
+            }
+        )
     summary["run_sha256"] = _document_sha256(summary, "run_sha256")
     documents = {
         _CONTRACT_FILE: (target / _CONTRACT_FILE).read_bytes(),
@@ -2563,6 +3279,8 @@ def _finalize(
         _OPERATION_RESULTS_FILE: _jsonl_bytes(operation_results),
         _SUBMISSIONS_FILE: _jsonl_bytes(submissions),
     }
+    if recovered:
+        documents[_FAILURE_FILE] = (target / _FAILURE_FILE).read_bytes()
     for name, content in documents.items():
         if name in {_CONTRACT_FILE, _JOURNAL_FILE, _CHECKPOINT_FILE}:
             continue
@@ -2674,6 +3392,9 @@ def _run_flowmesh_container_matrix_exclusive(
         [Mapping[str, str], Sequence[Mapping[str, Any]]], Mapping[str, str]
     ]
     | None = None,
+    recovery_id: str | None = None,
+    recovery_reason: str | None = None,
+    recover_failed_entry_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Execute or resume the frozen 64-wrapper matrix, strictly serially."""
 
@@ -2686,7 +3407,18 @@ def _run_flowmesh_container_matrix_exclusive(
     # Reject credential-bearing or route-ambiguous Root URLs before any
     # client lookup or container health probe can cause external I/O.
     _root_endpoint_identity_sha256(settings.base_url)
+    recovery_request = _normalize_recovery_request(
+        recovery_id,
+        recovery_reason,
+        recover_failed_entry_sha256,
+    )
     target = Path(output_dir).resolve()
+    if recovery_request is not None:
+        _runner_require(
+            target.is_dir(),
+            "infrastructure recovery requires an existing failed run "
+            "directory",
+        )
     if target.is_dir() and (target / "SHA256SUMS").is_file():
         completed_contract = _read_json(
             target / _CONTRACT_FILE, "matrix run contract"
@@ -2713,6 +3445,11 @@ def _run_flowmesh_container_matrix_exclusive(
             summary.get("run_id") == identifier,
             "completed matrix output has a different run_id",
         )
+        if recovery_request is not None:
+            _validate_repeated_recovery_request(
+                _read_jsonl(target / _JOURNAL_FILE, "matrix run journal"),
+                recovery_request,
+            )
         return {
             **summary,
             "output_dir": str(target),
@@ -2763,10 +3500,6 @@ def _run_flowmesh_container_matrix_exclusive(
             and checkpoint_path.is_file(),
             "incomplete matrix run is missing durable state",
         )
-        _runner_require(
-            not (target / _FAILURE_FILE).exists(),
-            "matrix run has a durable failure; start a new output directory",
-        )
         existing_contract = _read_json(
             contract_path, "matrix run contract"
         )
@@ -2781,6 +3514,85 @@ def _run_flowmesh_container_matrix_exclusive(
             "FlowMesh Root endpoint changed; refusing matrix resume",
         )
         _static_contract_matches_sources(existing_contract, sources)
+        # Validate the durable recovery request before any Root lookup or
+        # container health probe. A wrong digest must never trigger live I/O.
+        preflight_checkpoints = _load_checkpoints(
+            checkpoint_path,
+            existing_contract,
+            sources=sources,
+        )
+        preflight_journal = _read_jsonl(
+            journal_path, "matrix run journal"
+        )
+        preflight_failure: dict[str, Any] | None = None
+        if (target / _FAILURE_FILE).is_file():
+            preflight_failure = _read_json(
+                target / _FAILURE_FILE,
+                "matrix run failure document",
+            )
+            _validate_failure_document(
+                preflight_failure,
+                existing_contract,
+                preflight_checkpoints,
+                preflight_journal,
+            )
+        else:
+            _runner_require(
+                not any(
+                    row.get("state") == "RUN_FAILED"
+                    for row in preflight_journal
+                ),
+                "matrix journal records a failure but its immutable failure "
+                "document is missing",
+            )
+        _validate_journal(
+            preflight_journal,
+            existing_contract,
+            preflight_checkpoints,
+            sources=sources,
+            failure_document=preflight_failure,
+            allow_last_checkpoint_completion_gap=True,
+        )
+        preflight_unresolved = _unresolved_failure(preflight_journal)
+        if preflight_unresolved is not None:
+            _runner_require(
+                recovery_request is not None,
+                "matrix run has a durable terminal failure; explicit audited "
+                "recovery requires --recovery-id, --recovery-reason, and "
+                "--recover-failed-entry-sha256",
+            )
+            _runner_require(
+                recovery_request["recover_failed_entry_sha256"]
+                == preflight_unresolved.get("entry_sha256"),
+                "recovery authorization does not bind the terminal "
+                "RUN_FAILED entry",
+            )
+            failed_sequence = preflight_unresolved.get("sequence_index")
+            failed_phase = preflight_unresolved.get("phase")
+            _runner_require(
+                not any(
+                    row.get("state") == _RECOVERY_STATE
+                    and row.get("sequence_index") == failed_sequence
+                    and row.get("phase") == failed_phase
+                    for row in preflight_journal
+                ),
+                "a matrix phase may receive at most one infrastructure "
+                "recovery",
+            )
+            _runner_require(
+                not any(
+                    row.get("state") == _RECOVERY_STATE
+                    and row.get("payload", {}).get("recovery_id")
+                    == recovery_request["recovery_id"]
+                    for row in preflight_journal
+                ),
+                "recovery_id was already used by this matrix run",
+            )
+        elif recovery_request is not None:
+            _validate_repeated_recovery_request(
+                preflight_journal,
+                recovery_request,
+            )
 
     identity = describe_pinned_worker(client, settings)
     runtime_epochs = _probe_all_epochs(
@@ -2824,17 +3636,64 @@ def _run_flowmesh_container_matrix_exclusive(
         checkpoint_path, contract, sources=sources
     )
     journal_entries = _read_jsonl(journal_path, "matrix run journal")
+    failure_path = target / _FAILURE_FILE
+    failure_document: dict[str, Any] | None = None
+    if failure_path.is_file():
+        failure_document = _read_json(
+            failure_path, "matrix run failure document"
+        )
+        _validate_failure_document(
+            failure_document,
+            contract,
+            checkpoints,
+            journal_entries,
+        )
+    else:
+        _runner_require(
+            not any(row.get("state") == "RUN_FAILED" for row in journal_entries),
+            "matrix journal records a failure but its immutable failure "
+            "document is missing",
+        )
     journal_entries = _reconcile_checkpoint_completion(
         journal_path,
         journal_entries,
         checkpoints,
         contract,
         sources=sources,
+        failure_document=failure_document,
     )
-    _runner_require(
-        not any(row["state"] == "RUN_FAILED" for row in journal_entries),
-        "matrix journal contains a durable failure",
-    )
+    unresolved_failure = _unresolved_failure(journal_entries)
+    if unresolved_failure is not None:
+        _runner_require(
+            recovery_request is not None,
+            "matrix run has a durable terminal failure; explicit audited "
+            "recovery requires --recovery-id, --recovery-reason, and "
+            "--recover-failed-entry-sha256",
+        )
+        _runner_require(
+            failure_document is not None,
+            "matrix infrastructure recovery evidence is missing",
+        )
+        _authorize_infrastructure_recovery(
+            client,
+            contract=contract,
+            journal_path=journal_path,
+            journal_entries=journal_entries,
+            failure_document=failure_document,
+            recovery_request=recovery_request,
+        )
+        _validate_journal(
+            journal_entries,
+            contract,
+            checkpoints,
+            sources=sources,
+            failure_document=failure_document,
+        )
+    elif recovery_request is not None:
+        _validate_repeated_recovery_request(
+            journal_entries,
+            recovery_request,
+        )
     reused_trial_count = len(checkpoints)
     resume_performed = existing_contract is not None
     executed_this_invocation = 0
@@ -3040,6 +3899,8 @@ def _run_flowmesh_container_matrix_exclusive(
             )
             raise FlowMeshContainerMatrixRunError(
                 redact_secrets(str(exc))
+                + "; durable RUN_FAILED entry_sha256="
+                + str(failed["entry_sha256"])
             ) from None
 
     _runner_require(
@@ -3051,12 +3912,15 @@ def _run_flowmesh_container_matrix_exclusive(
         contract,
         checkpoints,
         sources=sources,
+        failure_document=failure_document,
         require_complete=True,
     )
     summary = _finalize(
         target,
         contract=contract,
         checkpoints=checkpoints,
+        journal_entries=journal_entries,
+        failure_document=failure_document,
         resume_performed=resume_performed,
         reused_trial_count=reused_trial_count,
         executed_this_invocation=executed_this_invocation,
@@ -3086,6 +3950,9 @@ def run_flowmesh_container_matrix(
         [Mapping[str, str], Sequence[Mapping[str, Any]]], Mapping[str, str]
     ]
     | None = None,
+    recovery_id: str | None = None,
+    recovery_reason: str | None = None,
+    recover_failed_entry_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Execute or resume one matrix while holding its process-wide lease."""
 
@@ -3100,13 +3967,15 @@ def run_flowmesh_container_matrix(
             client=client,
             settings=settings,
             runtime_epoch_probe=runtime_epoch_probe,
+            recovery_id=recovery_id,
+            recovery_reason=recovery_reason,
+            recover_failed_entry_sha256=recover_failed_entry_sha256,
         )
 
 
-def _verify_checksum_file(root: Path) -> None:
+def _verify_checksum_file(root: Path, expected: set[str]) -> None:
     checksum_path = root / "SHA256SUMS"
     _runner_require(checksum_path.is_file(), "matrix run SHA256SUMS is missing")
-    expected = _FINAL_FILES
     observed: dict[str, str] = {}
     try:
         lines = checksum_path.read_text(encoding="utf-8").splitlines()
@@ -3147,11 +4016,15 @@ def verify_flowmesh_container_matrix_run(
     root = Path(run_dir).resolve()
     _runner_require(root.is_dir(), "container matrix run directory does not exist")
     actual = _visible_artifact_files(root)
+    has_failure_document = _FAILURE_FILE in actual
+    expected_files = _FINAL_FILES | (
+        {_FAILURE_FILE} if has_failure_document else set()
+    )
     _runner_require(
-        actual == _FINAL_FILES | {"SHA256SUMS"},
+        actual == expected_files | {"SHA256SUMS"},
         "completed matrix run file set is invalid",
     )
-    _verify_checksum_file(root)
+    _verify_checksum_file(root, expected_files)
     contract = _read_json(root / _CONTRACT_FILE, "matrix run contract")
     _validate_contract(contract)
     supplied = (
@@ -3186,12 +4059,36 @@ def verify_flowmesh_container_matrix_run(
         "completed matrix run does not contain 64 checkpoints",
     )
     journal = _read_jsonl(root / _JOURNAL_FILE, "matrix run journal")
+    failure_document: dict[str, Any] | None = None
+    if has_failure_document:
+        failure_document = _read_json(
+            root / _FAILURE_FILE, "matrix run failure document"
+        )
+        _validate_failure_document(
+            failure_document,
+            contract,
+            checkpoints,
+            journal,
+        )
     _validate_journal(
         journal,
         contract,
         checkpoints,
         sources=sources,
+        failure_document=failure_document,
         require_complete=True,
+    )
+    recovery_entries = [
+        row for row in journal if row.get("state") == _RECOVERY_STATE
+    ]
+    failure_entries = [
+        row for row in journal if row.get("state") == "RUN_FAILED"
+    ]
+    recovered = bool(recovery_entries)
+    _runner_require(
+        recovered == has_failure_document
+        and len(failure_entries) == len(recovery_entries),
+        "completed matrix recovery evidence is inconsistent",
     )
     summary = _read_json(root / _RUN_FILE, "matrix run summary")
     trial_results = _read_jsonl(
@@ -3228,7 +4125,11 @@ def verify_flowmesh_container_matrix_run(
     )
     _runner_require(
         summary.get("schema_version")
-        == FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION
+        == (
+            FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION
+            if recovered
+            else FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION
+        )
         and summary.get("status") == "COMPLETE"
         and summary.get("run_sha256")
         == _document_sha256(summary, "run_sha256"),
@@ -3279,10 +4180,45 @@ def verify_flowmesh_container_matrix_run(
         == contract["expected_workflow_count"],
         "matrix run workflow count changed",
     )
+    total_workflow_count = sum(
+        row.get("state") == "WORKFLOW_BOUND" for row in journal
+    )
     _runner_require(
-        summary.get("flowmesh_workflow_count") == len(submissions),
+        summary.get("flowmesh_workflow_count") == total_workflow_count,
         "matrix run FlowMesh workflow count changed",
     )
+    if recovered:
+        assert failure_document is not None
+        _runner_require(
+            summary.get("canonical_workflow_count") == len(submissions)
+            and summary.get("abandoned_workflow_count")
+            == len(recovery_entries)
+            and summary.get("infrastructure_failure_count")
+            == len(failure_entries)
+            and summary.get("infrastructure_recovery_count")
+            == len(recovery_entries)
+            and summary.get("recovery_ids")
+            == [
+                row["payload"]["recovery_id"]
+                for row in recovery_entries
+            ]
+            and summary.get(
+                "recovery_runner_module_sha256_by_recovery_id"
+            )
+            == {
+                row["payload"]["recovery_id"]: row["payload"][
+                    "recovery_runner_module_sha256"
+                ]
+                for row in recovery_entries
+            }
+            and summary.get("initial_failure_sha256")
+            == failure_document["failure_sha256"]
+            and summary.get(
+                "failed_infrastructure_attempts_in_canonical_results"
+            )
+            is False,
+            "recovered matrix run summary is invalid",
+        )
     _runner_require(
         summary.get("selected_worker") == contract["selected_worker"]
         and summary.get("runtime_epochs") == contract["runtime_epochs"]
@@ -3307,7 +4243,9 @@ def verify_flowmesh_container_matrix_run(
         "executed_operation_count": len(executed_keys),
         "inactive_operation_count": len(inactive_keys),
         "workflow_count": len(submissions),
-        "flowmesh_workflow_count": len(submissions),
+        "flowmesh_workflow_count": total_workflow_count,
+        "infrastructure_recovery_count": len(recovery_entries),
+        "abandoned_workflow_count": len(recovery_entries),
         "worker_id": contract["selected_worker"]["worker_id"],
         "source_binding_checked": source_binding_checked,
         "eligible_for_scientific_claims": False,
