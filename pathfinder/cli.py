@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -29,6 +30,16 @@ DEFAULT_DATA_AGENT_MANIFEST = Path("configs/data_agent_manifest.json")
 DEFAULT_DATA_AGENT_OPERATION_DB = Path(
     "outputs/data_agent/operations.sqlite3"
 )
+
+
+def _positive_finite_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise argparse.ArgumentTypeError("must be a finite positive number")
+    return parsed
 
 
 def _node_api_url_mapping(values: Sequence[str]) -> dict[str, str]:
@@ -1798,6 +1809,51 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_matrix_coordinator.add_argument("--compact", action="store_true")
 
+    matrix_run = subcommands.add_parser(
+        "run-flowmesh-container-matrix",
+        help=(
+            "execute or safely resume the frozen, globally serial 64-trial "
+            "FlowMesh container matrix against already-running services"
+        ),
+    )
+    matrix_run.add_argument("--matrix-plan-dir", type=Path, required=True)
+    matrix_run.add_argument(
+        "--formal-execution-profile-dir", type=Path, required=True
+    )
+    matrix_run.add_argument(
+        "--coordinator-plan-dir", type=Path, required=True
+    )
+    matrix_run.add_argument("--output-dir", type=Path, required=True)
+    matrix_run.add_argument(
+        "--run-id",
+        required=True,
+        help=(
+            "stable identifier for this execution; reuse it with the same "
+            "output directory to resume"
+        ),
+    )
+    matrix_run.add_argument("--worker-alias", required=True)
+    matrix_run.add_argument("--flowmesh-base-url")
+    matrix_run.add_argument(
+        "--poll-interval", type=_positive_finite_float, default=2.0
+    )
+    matrix_run.add_argument("--compact", action="store_true")
+
+    verify_matrix_run = subcommands.add_parser(
+        "verify-flowmesh-container-matrix-run",
+        help=(
+            "verify a completed formal matrix run offline; optionally "
+            "re-bind it to all three frozen source packages"
+        ),
+    )
+    verify_matrix_run.add_argument("--run-dir", type=Path, required=True)
+    verify_matrix_run.add_argument("--matrix-plan-dir", type=Path)
+    verify_matrix_run.add_argument(
+        "--formal-execution-profile-dir", type=Path
+    )
+    verify_matrix_run.add_argument("--coordinator-plan-dir", type=Path)
+    verify_matrix_run.add_argument("--compact", action="store_true")
+
     full_chain_candidates = subcommands.add_parser(
         "list-flowmesh-container-full-chain-candidates",
         help=(
@@ -2471,6 +2527,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.plan_dir,
                 matrix_plan_dir=args.matrix_plan_dir,
                 formal_execution_profile_dir=args.formal_execution_profile_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-flowmesh-container-matrix":
+            from .integrations.flowmesh import FlowMeshSettings, SdkFlowMeshClient
+            from .integrations.flowmesh.container_matrix_runner import (
+                run_flowmesh_container_matrix,
+            )
+
+            if not args.worker_alias.strip():
+                raise ValueError("worker alias must be a non-empty string")
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=args.worker_alias,
+                validate_before_submit=True,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_container_matrix(
+                    matrix_plan_dir=args.matrix_plan_dir,
+                    formal_execution_profile_dir=(
+                        args.formal_execution_profile_dir
+                    ),
+                    coordinator_plan_dir=args.coordinator_plan_dir,
+                    output_dir=args.output_dir,
+                    run_id=args.run_id,
+                    client=client,
+                    settings=settings,
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-matrix-run":
+            from .integrations.flowmesh.container_matrix_runner import (
+                verify_flowmesh_container_matrix_run,
+            )
+
+            payload = verify_flowmesh_container_matrix_run(
+                args.run_dir,
+                matrix_plan_dir=args.matrix_plan_dir,
+                formal_execution_profile_dir=(
+                    args.formal_execution_profile_dir
+                ),
+                coordinator_plan_dir=args.coordinator_plan_dir,
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "list-flowmesh-container-full-chain-candidates":
@@ -3820,7 +3920,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
     except (ConfigError, OSError, RuntimeError, ValueError) as exc:
-        print(json.dumps({"status": "error", "message": str(exc)}))
+        from .integrations.flowmesh.redaction import redact_secrets
+
+        print(
+            json.dumps(
+                {"status": "error", "message": redact_secrets(str(exc))}
+            )
+        )
         return 2
 
     return _print_payload(

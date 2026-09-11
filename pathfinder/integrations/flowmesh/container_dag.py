@@ -75,9 +75,9 @@ TELEMETRY_PROVENANCE_LEGACY_VERSION = (
 )
 TELEMETRY_PROVENANCE_VERSION = "pathfinder.container-dag-telemetry/v1alpha2"
 
-#: Exactly the container-result fields that may be preserved. Anything else
-#: the runtime returns -- payload digests, prompts, answers, cache internals
-#: -- stays out of the artifact.
+#: Exactly the timing fields that may be preserved. Payload digests, prompts,
+#: and answers stay out of the artifact. Cache outcome fields are validated
+#: separately and are preserved only for cache operations.
 _TELEMETRY_TIMING_FIELDS = (
     "service_time_ms",
     "fixture_materialization_ms_excluded_from_storage_measurement",
@@ -218,6 +218,12 @@ _RUN_FILES = {
 }
 _STEP_NAMES = ("storage-read", "network-transfer", "compute")
 _STEP_KINDS = ("storage_read", "network_transfer", "compute")
+_PHYSICAL_IO_OPERATION_KINDS = frozenset(
+    {"storage_read", "cache_read", "network_transfer"}
+)
+_CACHE_OPERATION_KINDS = frozenset(
+    {"cache_lookup", "cache_read", "cache_insert"}
+)
 
 
 class FlowMeshContainerDagError(FlowMeshRunError):
@@ -835,6 +841,10 @@ def _validate_node_api_urls(
             parsed.username is None and parsed.password is None,
             f"node API URL for {name} must not contain credentials",
         )
+        _require(
+            not parsed.query and not parsed.fragment,
+            f"node API URL for {name} must not contain a query or fragment",
+        )
         normalized[name] = url
     required = {str(row["execution_node_id"]) for row in operations}
     required.update(
@@ -1327,10 +1337,10 @@ def _operation_telemetry(
             shaping, "application_shaping_target_ms"
         )
 
-    if kind != "storage_read":
-        # Only a fixture-backed read materializes anything; a non-zero value
-        # elsewhere means the record does not describe the operation it
-        # claims to.
+    if kind not in ("storage_read", "cache_read"):
+        # Only a fixture-backed storage or cache read materializes anything;
+        # a non-zero value elsewhere means the record does not describe the
+        # operation it claims to.
         _require(
             telemetry[
                 "fixture_materialization_ms_excluded_from_storage_measurement"
@@ -1391,6 +1401,94 @@ def _operation_telemetry(
     return telemetry
 
 
+def _operation_cache_result(
+    result: Mapping[str, Any],
+    operation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate cache fields and preserve them only for cache operations."""
+
+    kind = operation["operation_kind"]
+    for field in ("cache_result", "cache_scope_id", "cache_evictions"):
+        _require(field in result, f"container result is missing {field}")
+
+    cache_result = result["cache_result"]
+    cache_scope_id = result["cache_scope_id"]
+    cache_evictions = result["cache_evictions"]
+    _require(
+        type(cache_evictions) is list,
+        "container result cache_evictions must be an array",
+    )
+    _require(
+        all(
+            isinstance(value, str) and bool(value.strip())
+            for value in cache_evictions
+        ),
+        "container result cache_evictions must contain non-empty strings",
+    )
+    _require(
+        len(cache_evictions) == len(set(cache_evictions)),
+        "container result cache_evictions must not contain duplicates",
+    )
+
+    if kind not in _CACHE_OPERATION_KINDS:
+        _require(
+            cache_result is None,
+            f"a {kind} operation must report a neutral cache_result",
+        )
+        _require(
+            cache_scope_id is None,
+            f"a {kind} operation must report a neutral cache_scope_id",
+        )
+        _require(
+            cache_evictions == [],
+            f"a {kind} operation must report no cache evictions",
+        )
+        return {}
+
+    expected_scope_id = _text(
+        operation.get("cache_scope_id"),
+        f"{kind} operation cache_scope_id",
+    )
+    actual_scope_id = _text(
+        cache_scope_id,
+        f"{kind} result cache_scope_id",
+    )
+    _require(
+        actual_scope_id == expected_scope_id,
+        f"{kind} result changed cache scope",
+    )
+
+    if kind == "cache_lookup":
+        _require(
+            cache_result in {"hit", "miss"},
+            "cache lookup result must be the literal hit or miss outcome",
+        )
+        _require(
+            cache_evictions == [],
+            "cache lookup result must not report cache evictions",
+        )
+    elif kind == "cache_read":
+        _require(
+            cache_result == "hit",
+            "cache read result must report a live cache hit",
+        )
+        _require(
+            cache_evictions == [],
+            "cache read result must not report cache evictions",
+        )
+    else:
+        _require(
+            cache_result is None,
+            "cache insert result must report a neutral cache_result",
+        )
+
+    return {
+        "cache_result": cache_result,
+        "cache_scope_id": actual_scope_id,
+        "cache_evictions": list(cache_evictions),
+    }
+
+
 def _operation_result(
     raw: Mapping[str, Any],
     operation: Mapping[str, Any],
@@ -1416,6 +1514,10 @@ def _operation_result(
     _require(result.get("outcome_type") == "completed", "container outcome is not completed")
     _require(result.get("telemetry_complete") is True, "container telemetry is incomplete")
     _require(result.get("credentials_recorded") is False, "container result recorded credentials")
+    _require(
+        result.get("semantic_task_quality_evaluated") is False,
+        "container result must report semantic_task_quality_evaluated=false",
+    )
     _require(result.get("idempotent_replay") is False, "container operation was replayed")
     for field in ("operation_key", "operation_kind", "execution_node_id"):
         _require(
@@ -1426,7 +1528,7 @@ def _operation_result(
         result.get("logical_bytes") == operation.get("logical_bytes"),
         "container result changed logical byte count",
     )
-    if operation["operation_kind"] in ("storage_read", "network_transfer"):
+    if operation["operation_kind"] in _PHYSICAL_IO_OPERATION_KINDS:
         _require(
             result.get("physical_bytes") == operation["logical_bytes"],
             "container I/O result did not report exact physical bytes",
@@ -1434,8 +1536,9 @@ def _operation_result(
     else:
         _require(
             result.get("physical_bytes") == 0,
-            "container compute result must not report physical transfer bytes",
+            "container non-I/O result must not report physical transfer bytes",
         )
+    cache_fields = _operation_cache_result(result, operation)
     if task_detail is not None:
         assigned = task_detail.get("assigned_worker")
         _require(
@@ -1483,9 +1586,11 @@ def _operation_result(
         "container_result_schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
         "logical_bytes": result["logical_bytes"],
         "physical_bytes": result["physical_bytes"],
+        **cache_fields,
         **_operation_telemetry(result, operation),
         "telemetry_provenance_version": TELEMETRY_PROVENANCE_VERSION,
         "telemetry_complete": True,
+        "semantic_task_quality_evaluated": False,
         "idempotent_replay": False,
         "api_executor": "api",
         "api_http_status": api["status_code"],
@@ -1507,6 +1612,14 @@ def _aggregate_telemetry(
     shaper rather than the link.
     """
     _telemetry_contract(provenance_version)
+    operation_keys = [
+        _text(row.get("operation_key"), "telemetry operation_key")
+        for row in task_results
+    ]
+    _require(
+        len(operation_keys) == len(set(operation_keys)),
+        "telemetry contains duplicate operation keys",
+    )
     service = [float(row["service_time_ms"]) for row in task_results]
     materialization = [
         float(
@@ -1514,6 +1627,27 @@ def _aggregate_telemetry(
         )
         for row in task_results
     ]
+    service_by_key = {
+        operation_key: round(float(row["service_time_ms"]), 6)
+        for operation_key, row in zip(operation_keys, task_results)
+    }
+    service_sum_by_kind: dict[str, float] = {}
+    for row in task_results:
+        kind = str(row["operation_kind"])
+        service_sum_by_kind[kind] = (
+            service_sum_by_kind.get(kind, 0.0)
+            + float(row["service_time_ms"])
+        )
+    shaping_by_key = {
+        operation_key: row["application_shaping_target_ms"]
+        for operation_key, row in zip(operation_keys, task_results)
+        if row.get("application_shaping_target_ms") is not None
+    }
+
+    # Retain the original kind-keyed views for existing consumers.  They are
+    # lossy when a DAG repeats an operation kind, so the operation-keyed maps
+    # above are the canonical per-operation observations and the kind sums
+    # below are the repeat-safe aggregate view.
     by_kind = {
         str(row["operation_kind"]): round(float(row["service_time_ms"]), 6)
         for row in task_results
@@ -1529,6 +1663,11 @@ def _aggregate_telemetry(
         "telemetry_complete_record_count": sum(
             1 for row in task_results if row.get("telemetry_complete") is True
         ),
+        "service_time_ms_by_operation_key": service_by_key,
+        "service_time_ms_sum_by_operation_kind": {
+            key: round(value, 6)
+            for key, value in sorted(service_sum_by_kind.items())
+        },
         "service_time_ms_by_operation_kind": by_kind,
         "service_time_ms_sum": round(sum(service), 6),
         "service_time_ms_max": round(max(service), 6) if service else 0.0,
@@ -1537,6 +1676,9 @@ def _aggregate_telemetry(
             round(sum(materialization), 6)
         ),
         "configured_application_shaping_target_ms_by_operation_kind": shaping,
+        "configured_application_shaping_target_ms_by_operation_key": (
+            shaping_by_key
+        ),
         "logical_bytes_sum": sum(int(row["logical_bytes"]) for row in task_results),
         "physical_bytes_sum": sum(
             int(row["physical_bytes"]) for row in task_results
@@ -1748,7 +1890,7 @@ def verify_flowmesh_container_operation_dag_run(
             and row["physical_bytes"] >= 0,
             "container DAG task result byte counts are invalid",
         )
-        if row.get("operation_kind") in ("storage_read", "network_transfer"):
+        if row.get("operation_kind") in _PHYSICAL_IO_OPERATION_KINDS:
             _require(
                 row["physical_bytes"] == row["logical_bytes"],
                 "container DAG I/O result did not report exact physical bytes",
@@ -1756,7 +1898,7 @@ def verify_flowmesh_container_operation_dag_run(
         else:
             _require(
                 row["physical_bytes"] == 0,
-                "container DAG compute result must not report transfer bytes",
+                "container DAG non-I/O result must not report transfer bytes",
             )
     _require(
         summary.get("telemetry")

@@ -44,7 +44,13 @@ def redact_secrets(
         result,
     )
     result = re.sub(r"(?i)(bearer\s+)\S+", r"\1<redacted>", result)
+    result = re.sub(
+        r"(?i)(https?://)[^\s/@]+(?::[^\s/@]*)?@",
+        r"\1<redacted>@",
+        result,
+    )
     result = re.sub(r"(https?://[^\s?]+)\?\S+", r"\1?<redacted>", result)
+    result = re.sub(r"(https?://[^\s#]+)#\S+", r"\1#<redacted>", result)
     return result[:limit]
 
 

@@ -610,10 +610,15 @@ class EndpointSanitizationTest(unittest.TestCase):
     def test_bearer_tokens_and_signed_urls_are_redacted(self) -> None:
         redacted = redact_secrets(
             "Authorization: Bearer not-a-real-pat-fixture while fetching "
-            "https://root.invalid/results?sig=private"
+            "https://root.invalid/results?sig=private and "
+            "https://not-a-real-user:not-a-real-password@root.invalid/"
+            "results#not-a-real-fragment"
         )
         self.assertNotIn("not-a-real-pat-fixture", redacted)
         self.assertNotIn("sig=private", redacted)
+        self.assertNotIn("not-a-real-user", redacted)
+        self.assertNotIn("not-a-real-password", redacted)
+        self.assertNotIn("not-a-real-fragment", redacted)
         self.assertIn("<redacted>", redacted)
 
     def test_configured_api_key_value_is_redacted(self) -> None:

@@ -11,7 +11,9 @@ from pathfinder.integrations.flowmesh.container_dag import (
     FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION,
     FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION,
     FlowMeshContainerDagError,
+    _aggregate_telemetry,
     _document_sha256,
+    _operation_result,
     derive_operation_lower_bounds,
     build_flowmesh_container_operation_workflow,
     list_linear_container_operation_dag_candidates,
@@ -44,6 +46,8 @@ def _operation(
     logical_bytes: int = 4096,
     condition: dict[str, Any] | None = None,
     link_adapter: dict[str, Any] | None = None,
+    cache_adapter: dict[str, Any] | None = None,
+    cache_scope_id: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": CONTAINER_OPERATION_SCHEMA_VERSION,
@@ -61,7 +65,8 @@ def _operation(
         "operation_adapter": "fixture-v1",
         "resource_adapter": None,
         "link_adapter": link_adapter,
-        "cache_adapter": None,
+        "cache_adapter": cache_adapter,
+        "cache_scope_id": cache_scope_id,
         "task_executor": {"semantic_quality_enabled": False},
         "execution_node_id": node,
         "execution_container": f"node-{node.lower()}",
@@ -1100,7 +1105,14 @@ class ConditionalLedgerTest(unittest.TestCase):
 
 #: Timings a real ContainerNodeRuntime returns. The monotonic pair is kept
 #: consistent with service_time_ms so the same-record clock check passes.
-_SERVICE_MS = {"storage_read": 12.5, "network_transfer": 96.03, "compute": 3.25}
+_SERVICE_MS = {
+    "storage_read": 12.5,
+    "network_transfer": 96.03,
+    "compute": 3.25,
+    "cache_lookup": 0.05,
+    "cache_read": 7.5,
+    "cache_insert": 0.1,
+}
 
 
 def _container_body(
@@ -1115,6 +1127,7 @@ def _container_body(
         "outcome_type": "completed",
         "telemetry_complete": True,
         "credentials_recorded": False,
+        "semantic_task_quality_evaluated": False,
         "idempotent_replay": False,
         "operation_key": operation["operation_key"],
         "operation_kind": kind,
@@ -1131,7 +1144,11 @@ def _container_body(
         "finished_monotonic_ns": started + int(service_ms * 1_000_000),
         "service_time_ms": service_ms,
         "fixture_materialization_ms_excluded_from_storage_measurement": (
-            4.75 if kind == "storage_read" else 0.0
+            4.75
+            if kind == "storage_read"
+            else 2.5
+            if kind == "cache_read"
+            else 0.0
         ),
         "application_shaping_target_ms": (
             96_000.0 if kind == "network_transfer" else None
@@ -1144,8 +1161,15 @@ def _container_body(
         ),
         # Fields the whitelist must NOT carry into the artifact.
         "payload_sha256": "c" * 64,
-        "cache_result": None,
+        "cache_result": (
+            "hit" if kind in ("cache_lookup", "cache_read") else None
+        ),
         "cache_evictions": [],
+        "cache_scope_id": (
+            operation.get("cache_scope_id")
+            if kind in ("cache_lookup", "cache_read", "cache_insert")
+            else None
+        ),
     }
 
 
@@ -1211,6 +1235,274 @@ class FakeFlowMeshClient:
 
     def describe_task_failure(self, task_id: str) -> dict[str, Any]:
         return {"task_status": "DONE", "assigned_worker": self.assigned_worker}
+
+
+def _cache_operation(kind: str, *, logical_bytes: int = 4096) -> dict[str, Any]:
+    return _operation(
+        f"cache-trial|{kind}",
+        kind,
+        "N5",
+        [],
+        trial_key="cache-trial",
+        logical_bytes=logical_bytes,
+        cache_adapter={
+            "adapter": "bounded-lru-metadata-v1",
+            "cache_id": "cache-n5",
+            "capacity_bytes": 8192,
+        },
+        cache_scope_id="D3|r0000",
+    )
+
+
+def _validate_operation_body(
+    operation: Mapping[str, Any],
+    body: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = {
+        "executor": "api",
+        "ok": True,
+        "status_code": 200,
+        "text": json.dumps(body),
+    }
+    return _operation_result(
+        raw,
+        operation,
+        task_id="tsk-cache",
+        selected_worker_id="wkr-77",
+        task_detail={"assigned_worker": "wkr-77"},
+        expected_runtime_epochs={"N5": _runtime_epoch("N5")},
+    )
+
+
+class ContainerOperationResultValidationTest(unittest.TestCase):
+    def test_cache_read_is_exact_io_and_preserves_materialization(self) -> None:
+        operation = _cache_operation("cache_read")
+        body = _container_body(operation, operation["logical_bytes"])
+
+        record = _validate_operation_body(operation, body)
+
+        self.assertEqual(operation["logical_bytes"], record["physical_bytes"])
+        self.assertEqual(
+            2.5,
+            record[
+                "fixture_materialization_ms_excluded_from_storage_measurement"
+            ],
+        )
+        self.assertEqual("hit", record["cache_result"])
+        self.assertEqual("D3|r0000", record["cache_scope_id"])
+        self.assertEqual([], record["cache_evictions"])
+        self.assertFalse(record["semantic_task_quality_evaluated"])
+
+    def test_cache_read_refuses_a_non_exact_physical_byte_count(self) -> None:
+        operation = _cache_operation("cache_read")
+        body = _container_body(operation, 0)
+
+        with self.assertRaisesRegex(
+            FlowMeshContainerDagError,
+            "exact physical bytes",
+        ):
+            _validate_operation_body(operation, body)
+
+    def test_cache_lookup_preserves_hit_and_miss(self) -> None:
+        operation = _cache_operation("cache_lookup", logical_bytes=0)
+        for outcome in ("hit", "miss"):
+            with self.subTest(outcome=outcome):
+                body = _container_body(operation, 0)
+                body["cache_result"] = outcome
+
+                record = _validate_operation_body(operation, body)
+
+                self.assertEqual(outcome, record["cache_result"])
+                self.assertEqual("D3|r0000", record["cache_scope_id"])
+                self.assertEqual([], record["cache_evictions"])
+
+    def test_cache_insert_preserves_valid_evictions(self) -> None:
+        operation = _cache_operation("cache_insert")
+        body = _container_body(operation, 0)
+        body["cache_evictions"] = ["fixture-old:sampled_frames"]
+
+        record = _validate_operation_body(operation, body)
+
+        self.assertIsNone(record["cache_result"])
+        self.assertEqual("D3|r0000", record["cache_scope_id"])
+        self.assertEqual(
+            ["fixture-old:sampled_frames"], record["cache_evictions"]
+        )
+
+    def test_malformed_cache_fields_are_refused(self) -> None:
+        cases = (
+            (
+                "lookup-outcome",
+                _cache_operation("cache_lookup", logical_bytes=0),
+                lambda body: body.__setitem__("cache_result", "warm"),
+            ),
+            (
+                "read-miss",
+                _cache_operation("cache_read"),
+                lambda body: body.__setitem__("cache_result", "miss"),
+            ),
+            (
+                "changed-scope",
+                _cache_operation("cache_read"),
+                lambda body: body.__setitem__("cache_scope_id", "D3|r0001"),
+            ),
+            (
+                "insert-result",
+                _cache_operation("cache_insert"),
+                lambda body: body.__setitem__("cache_result", "hit"),
+            ),
+            (
+                "insert-evictions-type",
+                _cache_operation("cache_insert"),
+                lambda body: body.__setitem__("cache_evictions", "fixture-old"),
+            ),
+            (
+                "duplicate-eviction",
+                _cache_operation("cache_insert"),
+                lambda body: body.__setitem__(
+                    "cache_evictions", ["fixture-old", "fixture-old"]
+                ),
+            ),
+        )
+        for name, operation, mutate in cases:
+            with self.subTest(case=name):
+                physical_bytes = (
+                    operation["logical_bytes"]
+                    if operation["operation_kind"] == "cache_read"
+                    else 0
+                )
+                body = _container_body(operation, physical_bytes)
+                mutate(body)
+                with self.assertRaises(FlowMeshContainerDagError):
+                    _validate_operation_body(operation, body)
+
+    def test_missing_cache_fields_and_semantic_claim_are_refused(self) -> None:
+        operation = _cache_operation("cache_lookup", logical_bytes=0)
+        for field in ("cache_result", "cache_scope_id", "cache_evictions"):
+            with self.subTest(missing=field):
+                body = _container_body(operation, 0)
+                body.pop(field)
+                with self.assertRaisesRegex(
+                    FlowMeshContainerDagError,
+                    f"missing {field}",
+                ):
+                    _validate_operation_body(operation, body)
+
+        for semantic in (True, None):
+            with self.subTest(semantic=semantic):
+                body = _container_body(operation, 0)
+                body["semantic_task_quality_evaluated"] = semantic
+                with self.assertRaisesRegex(
+                    FlowMeshContainerDagError,
+                    "semantic_task_quality_evaluated=false",
+                ):
+                    _validate_operation_body(operation, body)
+
+    def test_non_cache_operations_require_neutral_cache_fields(self) -> None:
+        operation = _chain()[2]
+        cases = (
+            ("cache_result", "hit"),
+            ("cache_scope_id", "D3|r0000"),
+            ("cache_evictions", ["fixture-old"]),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                body = _container_body(operation, 0)
+                body[field] = value
+                with self.assertRaises(FlowMeshContainerDagError):
+                    _validate_operation_body(operation, body)
+
+
+class ContainerTelemetryAggregationTest(unittest.TestCase):
+    @staticmethod
+    def _record(
+        operation_key: str,
+        *,
+        service_time_ms: float,
+        shaping_target_ms: float | None,
+    ) -> dict[str, Any]:
+        return {
+            "operation_key": operation_key,
+            "operation_kind": "network_transfer",
+            "service_time_ms": service_time_ms,
+            "fixture_materialization_ms_excluded_from_storage_measurement": 0.0,
+            "application_shaping_target_ms": shaping_target_ms,
+            "network_http_exchange_ms": 0.1,
+            "application_shaping_sleep_ms": 0.2,
+            "logical_bytes": 4096,
+            "physical_bytes": 4096,
+            "telemetry_complete": True,
+        }
+
+    def test_repeated_kinds_preserve_every_operation_observation(self) -> None:
+        rows = [
+            self._record(
+                "trial|transfer-a",
+                service_time_ms=3.25,
+                shaping_target_ms=2.0,
+            ),
+            self._record(
+                "trial|transfer-b",
+                service_time_ms=7.5,
+                shaping_target_ms=6.0,
+            ),
+        ]
+
+        telemetry = _aggregate_telemetry(rows)
+
+        self.assertEqual(
+            {
+                "trial|transfer-a": 3.25,
+                "trial|transfer-b": 7.5,
+            },
+            telemetry["service_time_ms_by_operation_key"],
+        )
+        self.assertEqual(
+            {"network_transfer": 10.75},
+            telemetry["service_time_ms_sum_by_operation_kind"],
+        )
+        self.assertEqual(
+            {
+                "trial|transfer-a": 2.0,
+                "trial|transfer-b": 6.0,
+            },
+            telemetry[
+                "configured_application_shaping_target_ms_by_operation_key"
+            ],
+        )
+        # Existing kind-keyed fields remain present for old consumers.
+        self.assertEqual(
+            7.5,
+            telemetry["service_time_ms_by_operation_kind"][
+                "network_transfer"
+            ],
+        )
+        self.assertEqual(
+            6.0,
+            telemetry[
+                "configured_application_shaping_target_ms_by_operation_kind"
+            ]["network_transfer"],
+        )
+
+    def test_duplicate_operation_keys_are_refused(self) -> None:
+        rows = [
+            self._record(
+                "trial|transfer",
+                service_time_ms=3.25,
+                shaping_target_ms=2.0,
+            ),
+            self._record(
+                "trial|transfer",
+                service_time_ms=7.5,
+                shaping_target_ms=6.0,
+            ),
+        ]
+
+        with self.assertRaisesRegex(
+            FlowMeshContainerDagError,
+            "duplicate operation keys",
+        ):
+            _aggregate_telemetry(rows)
 
 
 class FlowMeshContainerDagTest(unittest.TestCase):

@@ -416,6 +416,102 @@ access-denied and sharing-violation errors with a bounded backoff. Persistent
 locks and unrelated I/O errors still fail, leaving only the previously durable
 ledger prefix for an auditable resume.
 
+### Formal 4x8 execution through FlowMesh
+
+The formal FlowMesh runner consumes all three frozen inputs together: the
+64-trial matrix, the serial execution profile, and the coordinator dry-run.
+It does not start or stop the eight container nodes or the FlowMesh worker.
+Those services must already be healthy, and the worker alias in the command
+must match the alias frozen into the matrix.
+
+Bind the four paths to the immutable artifacts produced by the matrix,
+profile, and coordinator planning commands. Use a new run directory; the
+runner creates it and refuses unrelated pre-existing contents.
+
+```bash
+export PF_MATRIX_PLAN=/path/to/matrix-plan
+export PF_FORMAL_PROFILE=/path/to/formal-profile
+export PF_COORDINATOR_PLAN=/path/to/coordinator-dry-run
+export PF_MATRIX_RUN=/path/to/new/formal-matrix-run
+export PF_FLOWMESH_WORKER_ALIAS=the-alias-frozen-in-the-matrix
+```
+
+These directories are produced and verified in this order:
+
+1. `plan-flowmesh-container-matrix`, then
+   `verify-flowmesh-container-matrix-plan`;
+2. `freeze-flowmesh-container-formal-execution-profile`, then
+   `verify-flowmesh-container-formal-execution-profile`; and
+3. `plan-flowmesh-container-matrix-coordinator-dry-run`, then
+   `verify-flowmesh-container-matrix-coordinator-dry-run`.
+
+Use each command's `--help` output for the complete arguments. The profile
+must bind the matrix plan, and the coordinator must bind both the matrix and
+profile; the formal runner re-verifies all three links before submission.
+
+Smoke runs use the same operation keys as the formal matrix. Because a node
+correctly rejects a repeated key as an idempotent replay, recreate the eight
+simulator containers once after the last smoke and before starting the formal
+run. Verify that all eight new runtime epochs are distinct and stable before
+submission. Do not recreate a node after the formal run has begun: a changed
+epoch makes the existing run directory ineligible for resume.
+
+```bash
+PYTHONPATH=. python -m pathfinder run-flowmesh-container-matrix \
+  --matrix-plan-dir "$PF_MATRIX_PLAN" \
+  --formal-execution-profile-dir "$PF_FORMAL_PROFILE" \
+  --coordinator-plan-dir "$PF_COORDINATOR_PLAN" \
+  --output-dir "$PF_MATRIX_RUN" \
+  --run-id "flowmesh-infra-4x8-formal-run-v1" \
+  --worker-alias "$PF_FLOWMESH_WORKER_ALIAS" \
+  --flowmesh-base-url "$FLOWMESH_BASE_URL" \
+  --poll-interval 2
+```
+
+The per-operation API timeout is the value already frozen in the matrix; the
+run command deliberately has no override that could change that envelope.
+
+The first profile executes trial wrappers globally in their frozen order with
+one wrapper active at a time. An unconditional trial is one arbitrary DAG.
+A D3 or D7 trial is two workflows: phase A observes the cache, and phase B is
+submitted only when that literal observation matches the frozen branch. A
+successful run of the current matrix therefore has exactly 80 workflows, 472
+executed operations, and 28 explicitly inactive branch operations. The final
+operation ledger must still account for all 500 frozen operations; an
+inactive operation has no invented zero latency or cost.
+
+The run directory is a durable checkpoint. Re-running the exact command with
+the same `run-id` and output directory resumes only a verified completed
+prefix. A submission intent is persisted before every side effect and the
+returned workflow and task IDs are persisted immediately afterward. If a
+process stops in the narrow interval where submission may have occurred but
+the IDs were not made durable, resume fails closed instead of silently
+submitting a duplicate. The first ordinary failure also stops the matrix;
+later trials are never skipped over.
+
+One operating-system advisory lock covers the whole invocation. A second
+process targeting the same output directory fails before reading or changing
+its checkpoint. The sibling lock file is intentionally retained after exit;
+the operating system releases the lock itself if the runner crashes.
+
+After completion, verification is offline. Supplying all three source
+directories additionally rechecks the run-to-input bindings; supplying only a
+subset is refused.
+
+```bash
+PYTHONPATH=. python -m pathfinder verify-flowmesh-container-matrix-run \
+  --run-dir "$PF_MATRIX_RUN" \
+  --matrix-plan-dir "$PF_MATRIX_PLAN" \
+  --formal-execution-profile-dir "$PF_FORMAL_PROFILE" \
+  --coordinator-plan-dir "$PF_COORDINATOR_PLAN"
+```
+
+This runner produces infrastructure-conformance evidence only. It preserves
+container service time, exact logical/physical bytes, cache outcomes, worker
+identity, and runtime epochs. It does not infer FlowMesh queue time or
+end-to-end latency, call an LLM, evaluate semantic answer quality, fit cost
+parameters, or make a physical-money or scientific-performance claim.
+
 The portable metric contract freezes the comparison fields but leaves parity
 thresholds unset. Once a container backend emits a complete canonical record
 ledger, descriptive comparison uses the exact same trial identities:
@@ -541,12 +637,15 @@ The offline MVP is complete when:
 - two independent output directories are byte-identical; and
 - checksum verification succeeds without any external service.
 
-The implementation and focused tests enforce the offline properties. A local
-Docker launch has now validated all eight health endpoints, one serial trial,
-and a four-trial concurrent smoke with cache hit/miss and frozen-slot admission
-queueing. A complete 64-trial container ledger, failure models, AWM/OED
-adapters, preregistered parity tolerances, and real eight-machine validation
-remain later phases.
+The implementation and focused tests enforce the offline properties.
+Operator-observed smoke evidence outside this repository has exercised all
+eight health endpoints, serial and concurrent cache paths, and representative
+full physical chains submitted through FlowMesh; those observations are not
+packaged as repository-verifiable evidence here. The formal runner can now
+execute and checkpoint the complete
+64-trial matrix, but that live formal run has not yet been performed. Failure
+models, AWM/OED adapters, preregistered parity tolerances, and real
+eight-machine validation remain later phases.
 
 Container nodes treat `SIGTERM` and `SIGINT` as graceful shutdown requests.
 The HTTP serving loop is stopped from a coordinator thread (the standard

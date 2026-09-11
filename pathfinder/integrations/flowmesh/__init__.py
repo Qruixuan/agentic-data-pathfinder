@@ -124,6 +124,13 @@ from .container_matrix_coordinator import (
     plan_flowmesh_container_matrix_coordinator_dry_run,
     verify_flowmesh_container_matrix_coordinator_dry_run,
 )
+from .container_matrix_runner import (
+    FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION,
+    FlowMeshContainerMatrixRunError,
+    build_flowmesh_container_matrix_trial_workflow,
+    run_flowmesh_container_matrix,
+    verify_flowmesh_container_matrix_run,
+)
 
 __all__ = [
     "AccessGateway",
@@ -136,6 +143,7 @@ __all__ = [
     "FlowMeshContainerDagError",
     "FlowMeshContainerFormalProfileError",
     "FlowMeshContainerMatrixCoordinatorError",
+    "FlowMeshContainerMatrixRunError",
     "FullChainCalibrationAuditError",
     "FlowMeshPinningError",
     "FlowMeshPilotConfig",
@@ -159,6 +167,7 @@ __all__ = [
     "FLOWMESH_CONTAINER_MATRIX_PLAN_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_COORDINATOR_ADMISSION_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_COORDINATOR_PLAN_SCHEMA_VERSION",
+    "FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION",
     "PATHFINDER_GRAPH_NODE_NAME",
     "PREFLIGHT_SCHEMA_VERSION",
     "PilotTrial",
@@ -178,6 +187,7 @@ __all__ = [
     "build_flowmesh_container_operation_workflow",
     "build_flowmesh_container_full_physical_chain_workflow",
     "build_flowmesh_container_conditional_phase_workflow",
+    "build_flowmesh_container_matrix_trial_workflow",
     "build_agent_workflow",
     "build_trial_plan",
     "describe_pinned_worker",
@@ -201,6 +211,7 @@ __all__ = [
     "run_flowmesh_container_operation_dag",
     "run_flowmesh_container_full_physical_chain",
     "run_flowmesh_container_conditional_trial",
+    "run_flowmesh_container_matrix",
     "sanitize_endpoint",
     "summarize_pilot_records",
     "summarize_pilot_records_by_workload",
@@ -218,5 +229,6 @@ __all__ = [
     "verify_flowmesh_container_formal_execution_profile",
     "verify_flowmesh_container_matrix_plan",
     "verify_flowmesh_container_matrix_coordinator_dry_run",
+    "verify_flowmesh_container_matrix_run",
     "workflow_selected_worker",
 ]
