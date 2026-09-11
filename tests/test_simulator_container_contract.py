@@ -170,6 +170,19 @@ class ContainerBackendContractTest(unittest.TestCase):
         )
         self.assertEqual("N3", transfer["execution_node_id"])
         self.assertEqual("N7", transfer["destination_node_id"])
+        cache_reads = [
+            row for row in container_operations
+            if row["operation_kind"] == "cache_read"
+        ]
+        self.assertTrue(cache_reads)
+        self.assertTrue(
+            all(
+                isinstance(row["cache_adapter"], dict)
+                and isinstance(row["cache_scope_id"], str)
+                and row["cache_scope_id"]
+                for row in cache_reads
+            )
+        )
         self.assertEqual("CONTRACT_READY_LAUNCH_UNVERIFIED", report["readiness_status"])
         self.assertEqual(2, report["launch_blocker_count"])
         verified = verify_container_backend_plan(output)

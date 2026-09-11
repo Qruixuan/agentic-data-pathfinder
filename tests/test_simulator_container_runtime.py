@@ -175,6 +175,9 @@ def _mock_node_response(
             "status": "ok",
             "node_id": node_id,
             "runtime_epoch": f"epoch-{node_id}-{epoch_suffix}",
+            "operation_result_schema_version": (
+                CONTAINER_NODE_RESULT_SCHEMA_VERSION
+            ),
             "semantic_quality_enabled": False,
         }
     kind = payload["operation_kind"]
@@ -182,6 +185,14 @@ def _mock_node_response(
         "schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
         "operation_key": payload["operation_key"],
         "execution_node_id": payload["execution_node_id"],
+        "runtime_epoch": (
+            f"epoch-{payload['execution_node_id']}-{epoch_suffix}"
+        ),
+        "destination_runtime_epoch": (
+            f"epoch-{payload['destination_node_id']}-{epoch_suffix}"
+            if kind == "network_transfer"
+            else None
+        ),
         "outcome_type": "completed",
         "telemetry_complete": True,
         "credentials_recorded": False,
@@ -270,6 +281,7 @@ class ContainerNodeRuntimeTest(unittest.TestCase):
             f"http://127.0.0.1:{destination.server_address[1]}"
         )
         operation["destination_container"] = "pathfinder-sim-n7"
+        operation["destination_node_id"] = "N7"
         operation["link_adapter"] = {
             "link_id": "N3-N7",
             "bandwidth_bytes_per_second": 100_000_000,
@@ -281,6 +293,13 @@ class ContainerNodeRuntimeTest(unittest.TestCase):
         self.assertEqual(1.08192, result["application_shaping_target_ms"])
         self.assertRegex(result["payload_sha256"], r"^[0-9a-f]{64}$")
         self.assertGreaterEqual(result["service_time_ms"], 1.0)
+        self.assertEqual(source.runtime_epoch, result["runtime_epoch"])
+        self.assertEqual(
+            destination.runtime.runtime_epoch,
+            result["destination_runtime_epoch"],
+        )
+        self.assertIsNotNone(result["network_http_exchange_ms"])
+        self.assertIsNotNone(result["application_shaping_sleep_ms"])
 
     def test_cache_insert_does_not_claim_payload_io(self) -> None:
         runtime = ContainerNodeRuntime("N7", self.root / "state")
@@ -309,6 +328,78 @@ class ContainerNodeRuntimeTest(unittest.TestCase):
         }
         result = runtime.execute(operation)
         self.assertEqual("hit", result["cache_result"])
+
+    def test_cache_scope_isolates_repetitions_but_preserves_one_lane(self) -> None:
+        runtime = ContainerNodeRuntime("N7", self.root / "state")
+
+        def cache_operation(kind: str, key: str, scope: str) -> dict:
+            operation = _operation(kind, node_id="N7", size=100)
+            operation["operation_key"] = key
+            operation["object_id"] = "scope-object"
+            operation["representation_id"] = "multimodal_digest"
+            operation["cache_scope_id"] = scope
+            operation["cache_adapter"] = {
+                "cache_id": "N7.cache",
+                "node_id": "N7",
+                "capacity_bytes": 10_000,
+                "initial_entries": [],
+            }
+            return operation
+
+        inserted = runtime.execute(
+            cache_operation("cache_insert", "D3-r0|insert", "D3|r0000")
+        )
+        self.assertEqual("D3|r0000", inserted["cache_scope_id"])
+        same_lane = runtime.execute(
+            cache_operation("cache_lookup", "D3-r0|lookup", "D3|r0000")
+        )
+        other_repetition = runtime.execute(
+            cache_operation("cache_lookup", "D3-r1|lookup", "D3|r0001")
+        )
+        self.assertEqual("hit", same_lane["cache_result"])
+        self.assertEqual("miss", other_repetition["cache_result"])
+        self.assertEqual("D3|r0001", other_repetition["cache_scope_id"])
+
+    def test_scoped_cache_read_requires_a_live_entry_in_the_lookup_namespace(self) -> None:
+        runtime = ContainerNodeRuntime("N7", self.root / "state")
+
+        def cache_operation(kind: str, key: str, scope: str) -> dict:
+            operation = _operation(kind, node_id="N7", size=100)
+            operation["operation_key"] = key
+            operation["object_id"] = "cached-object"
+            operation["representation_id"] = "multimodal_digest"
+            operation["cache_scope_id"] = scope
+            operation["cache_adapter"] = {
+                "cache_id": "N7.cache",
+                "node_id": "N7",
+                "capacity_bytes": 10_000,
+                "initial_entries": [],
+            }
+            return operation
+
+        runtime.execute(cache_operation("cache_insert", "D3-r0|insert", "D3|r0000"))
+        read = runtime.execute(
+            cache_operation("cache_read", "D3-r0|read-local", "D3|r0000")
+        )
+        self.assertEqual("hit", read["cache_result"])
+        self.assertEqual("D3|r0000", read["cache_scope_id"])
+        self.assertEqual(100, read["physical_bytes"])
+
+        with self.assertRaisesRegex(
+            ContainerNodeError,
+            "not backed by a current cache entry",
+        ):
+            runtime.execute(
+                cache_operation("cache_read", "D3-r1|read-local", "D3|r0001")
+            )
+
+        unbound = _operation("cache_read", node_id="N7", size=100)
+        unbound["operation_key"] = "D3-r0|unbound-cache-read"
+        with self.assertRaisesRegex(
+            ContainerNodeError,
+            "requires a cache adapter",
+        ):
+            runtime.execute(unbound)
 
     def test_service_handles_sigterm_without_deadlocking_main_loop(self) -> None:
         installed_handlers: dict[int, object] = {}
@@ -564,6 +655,44 @@ class LocalComposePackageTest(unittest.TestCase):
         self.assertGreater(records[0]["network_bytes"], 0)
         self.assertEqual("VERIFIED", verify_container_execution(output)["status"])
 
+    def test_post_run_runtime_epoch_change_refuses_canonical_output(self) -> None:
+        compose = self.root / "compose"
+        build_local_container_compose(self.container_plan, output_dir=compose)
+        health_calls = 0
+
+        def restarted_after_execution(
+            url: str,
+            *,
+            payload: dict | None,
+            timeout_seconds: float,
+        ) -> dict:
+            nonlocal health_calls
+            if payload is None:
+                health_calls += 1
+                suffix = "stable" if health_calls <= 8 else "restarted"
+                return _mock_node_response(url, payload, epoch_suffix=suffix)
+            return _mock_node_response(url, payload, epoch_suffix="stable")
+
+        output = self.root / "epoch-changed-during-run"
+        with (
+            mock.patch(
+                "pathfinder.simulator.container_execution._request_json",
+                side_effect=restarted_after_execution,
+            ),
+            self.assertRaisesRegex(
+                ContainerExecutionError,
+                "runtime epoch changed during container execution",
+            ),
+        ):
+            execute_local_container_plan(
+                compose,
+                self.portable,
+                output_dir=output,
+                trial_limit=1,
+                endpoint_override=_mock_endpoints(),
+            )
+        self.assertFalse((output / "SHA256SUMS").exists())
+
     def test_concurrent_driver_enforces_frozen_slots_and_measures_queue(self) -> None:
         compose = self.root / "compose"
         build_local_container_compose(self.container_plan, output_dir=compose)
@@ -585,39 +714,14 @@ class LocalComposePackageTest(unittest.TestCase):
         ) -> dict:
             self.assertGreater(timeout_seconds, 0.0)
             if payload is None:
-                node_id = url.split("//", 1)[1].split(".", 1)[0]
-                return {
-                    "status": "ok",
-                    "node_id": node_id,
-                    "runtime_epoch": f"epoch-{node_id}",
-                    "semantic_quality_enabled": False,
-                }
+                return _mock_node_response(url, payload, epoch_suffix="stable")
             if payload["operation_kind"] == "control":
                 # Four trials reach a two-slot frozen control resource almost
                 # together.  Holding it makes admission queueing observable.
                 time.sleep(0.04)
-            physical = (
-                payload["logical_bytes"]
-                if payload["operation_kind"]
-                in ("storage_read", "cache_read", "network_transfer")
-                else 0
-            )
-            return {
-                "schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
-                "operation_key": payload["operation_key"],
-                "execution_node_id": payload["execution_node_id"],
-                "outcome_type": "completed",
-                "telemetry_complete": True,
-                "credentials_recorded": False,
-                "semantic_task_quality_evaluated": False,
-                "service_time_ms": 40.0,
-                "logical_bytes": payload["logical_bytes"],
-                "physical_bytes": physical,
-                "cache_result": None,
-                "cache_evictions": [],
-                "payload_sha256": None,
-                "application_shaping_target_ms": None,
-            }
+            result = _mock_node_response(url, payload, epoch_suffix="stable")
+            result["service_time_ms"] = 40.0
+            return result
 
         output = self.root / "concurrent-execution"
         with mock.patch(
@@ -743,34 +847,11 @@ class LocalComposePackageTest(unittest.TestCase):
             timeout_seconds: float,
         ) -> dict:
             if payload is None:
-                node_id = url.split("//", 1)[1].split(".", 1)[0]
-                return {
-                    "status": "ok",
-                    "node_id": node_id,
-                    "runtime_epoch": f"epoch-{node_id}",
-                    "semantic_quality_enabled": False,
-                }
-            kind = payload["operation_kind"]
-            return {
-                "schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
-                "operation_key": payload["operation_key"],
-                "execution_node_id": payload["execution_node_id"],
-                "outcome_type": "completed",
-                "telemetry_complete": True,
-                "credentials_recorded": False,
-                "semantic_task_quality_evaluated": False,
-                "service_time_ms": 0.01,
-                "logical_bytes": payload["logical_bytes"],
-                "physical_bytes": (
-                    payload["logical_bytes"]
-                    if kind in ("storage_read", "cache_read", "network_transfer")
-                    else 0
-                ),
-                "cache_result": "hit" if kind == "cache_lookup" else None,
-                "cache_evictions": [],
-                "payload_sha256": None,
-                "application_shaping_target_ms": None,
-            }
+                return _mock_node_response(url, payload, epoch_suffix="stable")
+            result = _mock_node_response(url, payload, epoch_suffix="stable")
+            if payload["operation_kind"] == "cache_lookup":
+                result["cache_result"] = "hit"
+            return result
 
         output = self.root / "exact-subset"
         with mock.patch(

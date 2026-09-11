@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ from pathfinder.integrations.flowmesh.contracts import (
     WorkflowValidation,
 )
 from pathfinder.simulator.container_contract import (
+    CONTAINER_NODE_RESULT_SCHEMA_VERSION,
     CONTAINER_OPERATION_SCHEMA_VERSION,
 )
 
@@ -220,8 +222,30 @@ _RUN_URLS = {
 }
 
 
+def _runtime_epoch(node_id: str) -> str:
+    return hashlib.sha256(f"container-runtime:{node_id}".encode("utf-8")).hexdigest()[:32]
+
+
+def _runtime_epoch_probe(
+    node_api_urls: Mapping[str, str],
+    operations: list[Mapping[str, Any]],
+) -> dict[str, str]:
+    del node_api_urls
+    nodes = {str(operation["execution_node_id"]) for operation in operations}
+    nodes.update(
+        str(operation["destination_node_id"])
+        for operation in operations
+        if operation["operation_kind"] == "network_transfer"
+    )
+    return {node_id: _runtime_epoch(node_id) for node_id in sorted(nodes)}
+
+
 def _plan_and_run(
-    root: Path, *, mutate_result: Any = None, assigned_worker: str | None = None
+    root: Path,
+    *,
+    mutate_result: Any = None,
+    assigned_worker: str | None = None,
+    runtime_epoch_probe: Any = _runtime_epoch_probe,
 ) -> tuple[dict[str, Any], Path, Path]:
     source = root / "container_operations.jsonl"
     source.write_text(
@@ -250,6 +274,7 @@ def _plan_and_run(
             worker_alias="container-smoke-worker",
             validate_before_submit=True,
         ),
+        runtime_epoch_probe=runtime_epoch_probe,
     )
     return summary, plan_dir, run_dir
 
@@ -312,6 +337,57 @@ class ContainerTelemetryTest(unittest.TestCase):
                 rows["network_transfer"]["application_shaping_target_ms"],
             )
             self.assertEqual(3, summary["task_result_count"])
+
+    def test_v2_runtime_epochs_and_network_timing_components_are_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            summary, _, run_dir = _plan_and_run(Path(temporary))
+            binding = summary["runtime_epoch_binding"]
+            self.assertTrue(binding["runtime_epoch_binding_required"])
+            self.assertTrue(binding["all_runtime_epochs_stable"])
+            self.assertEqual(
+                binding["node_runtime_epochs_before"],
+                binding["node_runtime_epochs_after"],
+            )
+            rows = {row["operation_kind"]: row for row in _records(run_dir)}
+            transfer = rows["network_transfer"]
+            self.assertEqual(90.0, transfer["network_http_exchange_ms"])
+            self.assertEqual(6.03, transfer["application_shaping_sleep_ms"])
+            self.assertIsNotNone(transfer["destination_runtime_epoch"])
+            self.assertIsNone(rows["compute"]["destination_runtime_epoch"])
+
+    def test_mismatched_runtime_epoch_refuses_before_artifact_write(self) -> None:
+        def mutate(body: dict[str, Any]) -> None:
+            if body["operation_kind"] == "storage_read":
+                body["runtime_epoch"] = "0" * 32
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(FlowMeshContainerDagError, "runtime epoch"):
+                _plan_and_run(root, mutate_result=mutate)
+            self.assertFalse((root / "run").exists())
+
+    def test_changed_post_run_runtime_epoch_refuses_before_artifact_write(self) -> None:
+        calls = 0
+
+        def changing_probe(
+            node_api_urls: Mapping[str, str],
+            operations: list[Mapping[str, Any]],
+        ) -> dict[str, str]:
+            nonlocal calls
+            calls += 1
+            epochs = _runtime_epoch_probe(node_api_urls, operations)
+            if calls == 2:
+                epochs["N7"] = "f" * 32
+            return epochs
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                FlowMeshContainerDagError,
+                "runtime epoch changed",
+            ):
+                _plan_and_run(root, runtime_epoch_probe=changing_probe)
+            self.assertFalse((root / "run").exists())
 
     def test_non_whitelisted_container_fields_are_not_copied(self) -> None:
         # A payload digest or cache internal must not ride along.
@@ -475,7 +551,7 @@ class ContainerTelemetryTest(unittest.TestCase):
             )
             joined = " ".join(provenance["disclaimers"])
             self.assertIn("No cross-container clock comparison", joined)
-            self.assertIn("No queue time", joined)
+            self.assertIn("No FlowMesh queue time", joined)
 
 
 class RunVerificationTest(unittest.TestCase):
@@ -1034,6 +1110,7 @@ def _container_body(
     service_ms = _SERVICE_MS[kind]
     started = 1_000_000_000
     return {
+        "schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
         "status": "completed",
         "outcome_type": "completed",
         "telemetry_complete": True,
@@ -1042,6 +1119,12 @@ def _container_body(
         "operation_key": operation["operation_key"],
         "operation_kind": kind,
         "execution_node_id": operation["execution_node_id"],
+        "runtime_epoch": _runtime_epoch(str(operation["execution_node_id"])),
+        "destination_runtime_epoch": (
+            _runtime_epoch(str(operation["destination_node_id"]))
+            if kind == "network_transfer"
+            else None
+        ),
         "logical_bytes": operation["logical_bytes"],
         "physical_bytes": physical_bytes,
         "started_monotonic_ns": started,
@@ -1052,6 +1135,12 @@ def _container_body(
         ),
         "application_shaping_target_ms": (
             96_000.0 if kind == "network_transfer" else None
+        ),
+        "network_http_exchange_ms": (
+            90.0 if kind == "network_transfer" else None
+        ),
+        "application_shaping_sleep_ms": (
+            6.03 if kind == "network_transfer" else None
         ),
         # Fields the whitelist must NOT carry into the artifact.
         "payload_sha256": "c" * 64,
@@ -1229,6 +1318,7 @@ class FlowMeshContainerDagTest(unittest.TestCase):
                     worker_alias="container-smoke-worker",
                     validate_before_submit=True,
                 ),
+                runtime_epoch_probe=_runtime_epoch_probe,
             )
             self.assertEqual("COMPLETE", run["status"])
             self.assertEqual(3, run["task_result_count"])
@@ -1274,6 +1364,7 @@ class FlowMeshContainerDagTest(unittest.TestCase):
                         worker_alias="container-smoke-worker",
                         validate_before_submit=True,
                     ),
+                    runtime_epoch_probe=_runtime_epoch_probe,
                 )
             self.assertIn("other than the pin", str(context.exception))
             self.assertFalse((root / "run").exists())

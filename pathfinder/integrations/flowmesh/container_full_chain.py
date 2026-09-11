@@ -14,13 +14,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .adapter import extract_api_executor_result
 from .container_dag import (
+    CONTAINER_NODE_RESULT_SCHEMA_VERSION,
     DEFAULT_API_TASK_TIMEOUT_SECONDS,
     TELEMETRY_DISCLAIMERS,
+    TELEMETRY_DISCLAIMERS_V1,
     TELEMETRY_FIELD_PROVENANCE,
+    TELEMETRY_FIELD_PROVENANCE_V1,
+    TELEMETRY_PROVENANCE_LEGACY_VERSION,
     TELEMETRY_PROVENANCE_VERSION,
     FlowMeshContainerDagError,
     _canonical_bytes,
@@ -31,13 +35,18 @@ from .container_dag import (
     _jsonl_bytes,
     _operation_result,
     _operation_telemetry,
+    _probe_container_runtime_epochs,
     _require,
     _require_api_timeout_covers,
     _sha256_bytes,
     _task_spec,
     _text,
+    _telemetry_contract,
     _validate_api_task_timeout,
     _validate_node_api_urls,
+    _validate_runtime_epochs,
+    _runtime_epoch_binding,
+    _verify_runtime_epoch_binding,
     _validate_operation,
     _workflow_failure,
     _write_documents,
@@ -53,6 +62,9 @@ FLOWMESH_CONTAINER_FULL_CHAIN_PLAN_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-full-physical-chain-plan/v1alpha1"
 )
 FLOWMESH_CONTAINER_FULL_CHAIN_RUN_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-full-physical-chain-run/v1alpha2"
+)
+FLOWMESH_CONTAINER_FULL_CHAIN_RUN_LEGACY_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-full-physical-chain-run/v1alpha1"
 )
 
@@ -525,9 +537,14 @@ def verify_flowmesh_container_full_physical_chain_plan(
     }
 
 
-def _aggregate_telemetry(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def _aggregate_telemetry(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    provenance_version: str = TELEMETRY_PROVENANCE_VERSION,
+) -> dict[str, Any]:
     """Aggregate repeat-safe telemetry without making latency claims."""
 
+    _telemetry_contract(provenance_version)
     service_by_key = {
         str(row["operation_key"]): round(float(row["service_time_ms"]), 6)
         for row in rows
@@ -546,8 +563,8 @@ def _aggregate_telemetry(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         float(row["fixture_materialization_ms_excluded_from_storage_measurement"])
         for row in rows
     ]
-    return {
-        "telemetry_provenance_version": TELEMETRY_PROVENANCE_VERSION,
+    aggregate: dict[str, Any] = {
+        "telemetry_provenance_version": provenance_version,
         "record_count": len(rows),
         "telemetry_complete_record_count": sum(
             1 for row in rows if row.get("telemetry_complete") is True
@@ -567,6 +584,22 @@ def _aggregate_telemetry(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "network_throughput_derived": False,
         "queue_time_measured": False,
     }
+    if provenance_version == TELEMETRY_PROVENANCE_VERSION:
+        network_rows = [
+            row for row in rows if row.get("operation_kind") == "network_transfer"
+        ]
+        aggregate["network_http_exchange_ms_sum"] = round(
+            sum(float(row["network_http_exchange_ms"]) for row in network_rows),
+            6,
+        )
+        aggregate["application_shaping_sleep_ms_sum"] = round(
+            sum(
+                float(row["application_shaping_sleep_ms"])
+                for row in network_rows
+            ),
+            6,
+        )
+    return aggregate
 
 
 def _read_run(
@@ -611,8 +644,22 @@ def verify_flowmesh_container_full_physical_chain_run(
     """Offline verification of a complete-chain run artifact."""
 
     summary, rows, submission = _read_run(run_dir)
-    _require(summary.get("schema_version") == FLOWMESH_CONTAINER_FULL_CHAIN_RUN_SCHEMA_VERSION, "unsupported full physical-chain run schema")
+    schema = summary.get("schema_version")
+    _require(
+        schema
+        in (
+            FLOWMESH_CONTAINER_FULL_CHAIN_RUN_SCHEMA_VERSION,
+            FLOWMESH_CONTAINER_FULL_CHAIN_RUN_LEGACY_SCHEMA_VERSION,
+        ),
+        "unsupported full physical-chain run schema",
+    )
     _require(summary.get("status") == "COMPLETE", "full physical-chain run is not complete")
+    legacy = schema == FLOWMESH_CONTAINER_FULL_CHAIN_RUN_LEGACY_SCHEMA_VERSION
+    provenance_version = (
+        TELEMETRY_PROVENANCE_VERSION
+        if schema == FLOWMESH_CONTAINER_FULL_CHAIN_RUN_SCHEMA_VERSION
+        else TELEMETRY_PROVENANCE_LEGACY_VERSION
+    )
     operation_keys = summary.get("operation_keys")
     _require(isinstance(operation_keys, list) and operation_keys, "full physical-chain run summary has no operation keys")
     _require([row.get("operation_key") for row in rows] == operation_keys, "full physical-chain task result order or coverage changed")
@@ -627,15 +674,69 @@ def verify_flowmesh_container_full_physical_chain_run(
     for row in rows:
         _text(row.get("container_result_sha256"), "container_result_sha256")
         _require(row.get("telemetry_complete") is True, "full physical-chain telemetry is incomplete")
-        _require(row.get("telemetry_provenance_version") == TELEMETRY_PROVENANCE_VERSION, "full physical-chain telemetry provenance changed")
-        _operation_telemetry(row, {"operation_kind": row.get("operation_kind")})
-    _require(summary.get("telemetry") == _aggregate_telemetry(rows), "full physical-chain telemetry aggregate does not match task results")
-    _require(summary.get("telemetry_provenance", {}).get("fields") == TELEMETRY_FIELD_PROVENANCE, "full physical-chain telemetry provenance record changed")
+        _require(
+            row.get("telemetry_provenance_version") == provenance_version,
+            "full physical-chain telemetry provenance changed",
+        )
+        _operation_telemetry(
+            row,
+            {"operation_kind": row.get("operation_kind")},
+            provenance_version=provenance_version,
+        )
+    _require(
+        summary.get("telemetry")
+        == _aggregate_telemetry(rows, provenance_version=provenance_version),
+        "full physical-chain telemetry aggregate does not match task results",
+    )
+    fields, disclaimers = _telemetry_contract(provenance_version)
+    _require(
+        summary.get("telemetry_provenance", {}).get("fields") == fields,
+        "full physical-chain telemetry provenance record changed",
+    )
+    _require(
+        summary.get("telemetry_provenance", {}).get("version")
+        == provenance_version,
+        "full physical-chain telemetry provenance version changed",
+    )
+    _require(
+        summary.get("telemetry_provenance", {}).get("disclaimers")
+        == list(disclaimers),
+        "full physical-chain telemetry provenance disclaimers changed",
+    )
     if plan_dir is not None:
         plan = _read_plan(plan_dir)
         _require(plan["plan_sha256"] == summary.get("plan_sha256"), "full physical-chain run is not bound to the supplied plan")
         _require([row["operation_key"] for row in plan["operations"]] == operation_keys, "full physical-chain run operations do not match the supplied plan")
         _require(plan["worker_alias"] == worker.get("alias", plan["worker_alias"]), "full physical-chain run worker alias does not match the plan")
+    runtime_integrity = "not-recorded-v1"
+    if not legacy:
+        urls = summary.get("node_api_urls")
+        _require(
+            isinstance(urls, Mapping),
+            "full physical-chain run node API URLs are missing",
+        )
+        _validate_node_api_urls(rows, urls)
+        _verify_runtime_epoch_binding(
+            summary.get("runtime_epoch_binding"),
+            plan_sha256=summary.get("plan_sha256"),
+            node_api_urls=urls,
+            operations=rows,
+            rows=rows,
+        )
+        _require(
+            all(
+                row.get("container_result_schema_version")
+                == CONTAINER_NODE_RESULT_SCHEMA_VERSION
+                for row in rows
+            ),
+            "full physical-chain container result schema changed",
+        )
+        runtime_integrity = "bound-v2"
+        if plan_dir is not None:
+            _require(
+                urls == plan["node_api_urls"],
+                "full physical-chain run node API URLs do not match the supplied plan",
+            )
     return {
         "status": "VERIFIED",
         "schema_version": summary["schema_version"],
@@ -645,7 +746,12 @@ def verify_flowmesh_container_full_physical_chain_run(
         "task_result_count": len(rows),
         "physical_operation_count": len(rows),
         "plan_binding_checked": plan_dir is not None,
-        "telemetry_recording": "whitelisted-validated",
+        "telemetry_recording": (
+            "whitelisted-validated-v2"
+            if provenance_version == TELEMETRY_PROVENANCE_VERSION
+            else "whitelisted-validated-v1"
+        ),
+        "runtime_epoch_binding": runtime_integrity,
         "telemetry": summary["telemetry"],
         "eligible_for_scientific_claims": False,
     }
@@ -657,6 +763,9 @@ def run_flowmesh_container_full_physical_chain(
     output_dir: str | Path,
     client: FlowMeshClientProtocol,
     settings: FlowMeshSettings,
+    runtime_epoch_probe: Callable[
+        [Mapping[str, str], Sequence[Mapping[str, Any]]], Mapping[str, str]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Validate, submit, and record every task of one frozen full chain."""
 
@@ -673,6 +782,11 @@ def run_flowmesh_container_full_physical_chain(
     )
     validation = client.validate(workflow)
     _require(validation.ok, "FlowMesh rejected the full physical-chain workflow: " + "; ".join(validation.errors))
+    probe = runtime_epoch_probe or _probe_container_runtime_epochs
+    runtime_epochs_before = _validate_runtime_epochs(
+        probe(plan["node_api_urls"], plan["operations"]),
+        plan["operations"],
+    )
     submitted = client.submit(workflow)
     _require(len(submitted.task_ids) == len(plan["operations"]), "FlowMesh returned a task count other than the frozen full physical-chain nodes")
     terminal = client.wait(submitted.workflow_id, settings.poll_interval_seconds)
@@ -696,11 +810,31 @@ def run_flowmesh_container_full_physical_chain(
         except Exception as exc:
             raise FlowMeshContainerDagError("cannot verify the FlowMesh worker assigned to a completed full physical-chain task: " + redact_secrets(str(exc))) from exc
         _require(isinstance(task_detail, Mapping), "FlowMesh did not return task metadata needed to verify the worker pin")
-        task_results.append(_operation_result(raw, expected_by_key[operation_key], task_id=task_id, selected_worker_id=identity.worker_id, task_detail=task_detail))
+        task_results.append(
+            _operation_result(
+                raw,
+                expected_by_key[operation_key],
+                task_id=task_id,
+                selected_worker_id=identity.worker_id,
+                task_detail=task_detail,
+                expected_runtime_epochs=runtime_epochs_before,
+            )
+        )
     _require({row["operation_key"] for row in task_results} == set(expected_by_key), "FlowMesh task results do not cover the exact frozen full physical-chain operations")
     _require(len(task_results) == len(expected_by_key), "FlowMesh returned duplicate full physical-chain task results")
     result_by_key = {row["operation_key"]: row for row in task_results}
     task_results = [result_by_key[row["operation_key"]] for row in plan["operations"]]
+    runtime_epochs_after = _validate_runtime_epochs(
+        probe(plan["node_api_urls"], plan["operations"]),
+        plan["operations"],
+    )
+    runtime_binding = _runtime_epoch_binding(
+        plan_sha256=plan["plan_sha256"],
+        node_api_urls=plan["node_api_urls"],
+        operations=plan["operations"],
+        before=runtime_epochs_before,
+        after=runtime_epochs_after,
+    )
     names = _task_names(plan["operations"])
     summary = {
         "schema_version": FLOWMESH_CONTAINER_FULL_CHAIN_RUN_SCHEMA_VERSION,
@@ -712,6 +846,7 @@ def run_flowmesh_container_full_physical_chain(
         "selected_worker": identity.to_public_dict(),
         "operation_keys": [row["operation_key"] for row in plan["operations"]],
         "execution_nodes": [row["execution_node_id"] for row in plan["operations"]],
+        "node_api_urls": plan["node_api_urls"],
         "physical_operation_count": len(task_results),
         "terminal_physical_operation_key": plan["terminal_physical_operation_key"],
         "task_result_count": len(task_results),
@@ -725,6 +860,7 @@ def run_flowmesh_container_full_physical_chain(
             "fields": dict(TELEMETRY_FIELD_PROVENANCE),
             "disclaimers": list(TELEMETRY_DISCLAIMERS),
         },
+        "runtime_epoch_binding": runtime_binding,
         "evidence_class": "orchestration-transport-compute-workload-path-conformance",
         "llm_called": False,
         "semantic_task_quality_evaluated": False,

@@ -44,6 +44,9 @@ LEGACY_CONTAINER_INFRASTRUCTURE_RECORD_SCHEMA_VERSION = (
     "pathfinder.container-emulation-infrastructure-record/v1alpha1"
 )
 CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION = (
+    "pathfinder.container-emulation-execution-run/v1alpha4"
+)
+RUNTIME_EPOCH_UNBOUND_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION = (
     "pathfinder.container-emulation-execution-run/v1alpha3"
 )
 LEGACY_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION = (
@@ -525,6 +528,49 @@ def _endpoint_map(
     return result, _sha256_bytes(raw), source
 
 
+def _read_runtime_epochs(
+    endpoints: Mapping[str, Mapping[str, Any]],
+    *,
+    timeout_seconds: float,
+) -> dict[str, str]:
+    """Read the runtime identity required by the v2 node-result contract.
+
+    The direct driver uses these values twice: immediately before dispatch and
+    after all durable trial checkpoints.  Individual operation replies are
+    checked against the pre-run map separately, so a health probe alone is not
+    treated as evidence that the worker reached the intended node instance.
+    """
+
+    runtime_epochs: dict[str, str] = {}
+    for node_id in sorted(endpoints):
+        health = _request_json(
+            str(endpoints[node_id]["host_health_url"]),
+            payload=None,
+            timeout_seconds=timeout_seconds,
+        )
+        _require(health.get("status") == "ok", f"node {node_id} is unhealthy")
+        _require(
+            health.get("node_id") == node_id,
+            f"node {node_id} identity changed",
+        )
+        _require(
+            health.get("semantic_quality_enabled") is False,
+            f"node {node_id} unexpectedly enables semantic quality",
+        )
+        _require(
+            health.get("operation_result_schema_version")
+            == CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+            f"node {node_id} does not support the v2 result contract",
+        )
+        epoch = health.get("runtime_epoch")
+        _require(
+            isinstance(epoch, str) and bool(epoch),
+            f"node {node_id} has no runtime epoch",
+        )
+        runtime_epochs[node_id] = epoch
+    return dict(sorted(runtime_epochs.items()))
+
+
 def _binding(operation: Mapping[str, Any]) -> tuple[str | None, str | None]:
     resource = operation.get("resource_adapter")
     if isinstance(resource, Mapping):
@@ -588,6 +634,7 @@ def _execute_operation(
     timeout_seconds: float,
     run_started_ns: int,
     event_index: int,
+    expected_runtime_epochs: Mapping[str, str],
     ready_ns: int | None = None,
     admitted_ns: int | None = None,
     queue_time_measurement: str = "not-observed-serial-driver",
@@ -626,6 +673,30 @@ def _execute_operation(
         result.get("semantic_task_quality_evaluated") is False,
         "infrastructure node unexpectedly reported semantic quality",
     )
+    _require(
+        node_id in expected_runtime_epochs,
+        "runtime epoch binding lacks the execution node",
+    )
+    _require(
+        result.get("runtime_epoch") == expected_runtime_epochs[node_id],
+        "operation result runtime epoch does not match the pre-run health binding",
+    )
+    destination_runtime_epoch = result.get("destination_runtime_epoch")
+    if operation["operation_kind"] == "network_transfer":
+        destination = str(operation["destination_node_id"])
+        _require(
+            destination in expected_runtime_epochs,
+            "runtime epoch binding lacks the network destination node",
+        )
+        _require(
+            destination_runtime_epoch == expected_runtime_epochs[destination],
+            "network sink runtime epoch does not match the pre-run health binding",
+        )
+    else:
+        _require(
+            destination_runtime_epoch is None,
+            "non-network operation names a destination runtime epoch",
+        )
     resource_id, resource_kind = _binding(operation)
     event = {
         "schema_version": CONTAINER_EXECUTION_EVENT_SCHEMA_VERSION,
@@ -638,6 +709,9 @@ def _execute_operation(
         "skip_reason": None,
         "execution_node_id": node_id,
         "destination_node_id": operation["destination_node_id"],
+        "runtime_epoch": result["runtime_epoch"],
+        "destination_runtime_epoch": destination_runtime_epoch,
+        "container_result_schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
         "resource_id": resource_id,
         "resource_kind": resource_kind,
         "ready_time_ms": (ready_ns - run_started_ns) / 1_000_000.0,
@@ -686,6 +760,9 @@ def _skip_event(
         "skip_reason": reason,
         "execution_node_id": None,
         "destination_node_id": None,
+        "runtime_epoch": None,
+        "destination_runtime_epoch": None,
+        "container_result_schema_version": None,
         "resource_id": None,
         "resource_kind": None,
         "ready_time_ms": now_ms,
@@ -1034,25 +1111,10 @@ def execute_local_container_plan(
                 "resume_performed": True,
             }
 
-    runtime_epochs: dict[str, str] = {}
-    for node_id in sorted(endpoints):
-        health = _request_json(
-            str(endpoints[node_id]["host_health_url"]),
-            payload=None,
-            timeout_seconds=min(request_timeout_seconds, 10.0),
-        )
-        _require(health.get("status") == "ok", f"node {node_id} is unhealthy")
-        _require(health.get("node_id") == node_id, f"node {node_id} identity changed")
-        _require(
-            health.get("semantic_quality_enabled") is False,
-            f"node {node_id} unexpectedly enables semantic quality",
-        )
-        epoch = health.get("runtime_epoch")
-        _require(
-            isinstance(epoch, str) and bool(epoch),
-            f"node {node_id} has no runtime epoch",
-        )
-        runtime_epochs[node_id] = epoch
+    runtime_epochs = _read_runtime_epochs(
+        endpoints,
+        timeout_seconds=min(request_timeout_seconds, 10.0),
+    )
 
     expected_contract = _checkpoint_contract(
         scenario_id=str(compose["scenario_id"]),
@@ -1195,6 +1257,7 @@ def execute_local_container_plan(
                             timeout_seconds=request_timeout_seconds,
                             run_started_ns=run_started_ns,
                             event_index=event_index,
+                            expected_runtime_epochs=runtime_epochs,
                             ready_ns=ready_ns,
                             admitted_ns=admitted_ns,
                             queue_time_measurement=queue_measurement,
@@ -1297,6 +1360,14 @@ def execute_local_container_plan(
         len(checkpoint_entries) == len(selected_trials),
         "execution ended without checkpointing every selected trial",
     )
+    runtime_epochs_after = _read_runtime_epochs(
+        endpoints,
+        timeout_seconds=min(request_timeout_seconds, 10.0),
+    )
+    _require(
+        runtime_epochs_after == runtime_epochs,
+        "node runtime epoch changed during container execution",
+    )
     entry_by_key = {str(row["trial_key"]): row for row in checkpoint_entries}
     records = [entry_by_key[key]["record"] for key in selected_trial_keys]
     events = sorted(
@@ -1388,6 +1459,16 @@ def execute_local_container_plan(
         ),
         "checkpoint_sha256": expected_contract["checkpoint_sha256"],
         "runtime_epochs_sha256": expected_contract["runtime_epochs_sha256"],
+        "runtime_integrity": {
+            "container_result_schema_version": (
+                CONTAINER_NODE_RESULT_SCHEMA_VERSION
+            ),
+            "runtime_epochs_before": runtime_epochs,
+            "runtime_epochs_after": runtime_epochs_after,
+            "runtime_epoch_binding_required": True,
+            "all_runtime_epochs_stable": True,
+            "credentials_recorded": False,
+        },
         "checkpoint_trial_count": len(checkpoint_entries),
         "checkpoint_reused_trial_count": reused_trial_count,
         "executed_this_invocation": len(pending_trials),
@@ -1454,6 +1535,7 @@ def verify_container_execution(output_dir: str | Path) -> dict[str, Any]:
     _require(
         schema_version in (
             CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+            RUNTIME_EPOCH_UNBOUND_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
             CHECKPOINT_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
             LEGACY_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
         ),
@@ -1461,6 +1543,7 @@ def verify_container_execution(output_dir: str | Path) -> dict[str, Any]:
     )
     checkpoint_manifest = schema_version in (
         CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+        RUNTIME_EPOCH_UNBOUND_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
         CHECKPOINT_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
     )
     expected_files = _OUTPUT_FILES if checkpoint_manifest else _LEGACY_OUTPUT_FILES
@@ -1500,7 +1583,10 @@ def verify_container_execution(output_dir: str | Path) -> dict[str, Any]:
         [row.get("event_index") for row in events] == list(range(len(events))),
         "operation event indexes are not contiguous",
     )
-    if schema_version == CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION:
+    if schema_version in (
+        CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+        RUNTIME_EPOCH_UNBOUND_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+    ):
         try:
             frozen_slots = validate_trial_admission_contract(
                 manifest.get("trial_admission"),
@@ -1539,12 +1625,20 @@ def verify_container_execution(output_dir: str | Path) -> dict[str, Any]:
             raise ContainerExecutionError("checkpoint contract is invalid") from exc
         expected_checkpoint_schema = (
             CONTAINER_EXECUTION_CHECKPOINT_SCHEMA_VERSION
-            if schema_version == CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION
+            if schema_version
+            in (
+                CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+                RUNTIME_EPOCH_UNBOUND_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+            )
             else LEGACY_CONTAINER_EXECUTION_CHECKPOINT_SCHEMA_VERSION
         )
         expected_entry_schema = (
             CONTAINER_EXECUTION_CHECKPOINT_ENTRY_SCHEMA_VERSION
-            if schema_version == CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION
+            if schema_version
+            in (
+                CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+                RUNTIME_EPOCH_UNBOUND_CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION,
+            )
             else LEGACY_CONTAINER_EXECUTION_CHECKPOINT_ENTRY_SCHEMA_VERSION
         )
         _require(
@@ -1573,6 +1667,38 @@ def verify_container_execution(output_dir: str | Path) -> dict[str, Any]:
             == contract["runtime_epochs_sha256"],
             "manifest checkpoint binding changed",
         )
+        if schema_version == CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION:
+            integrity = manifest.get("runtime_integrity")
+            _require(
+                isinstance(integrity, Mapping),
+                "runtime-integrity record is missing",
+            )
+            epochs_before = integrity.get("runtime_epochs_before")
+            epochs_after = integrity.get("runtime_epochs_after")
+            _require(
+                isinstance(epochs_before, Mapping)
+                and isinstance(epochs_after, Mapping),
+                "runtime-integrity epoch maps are missing",
+            )
+            _require(
+                dict(epochs_before) == contract.get("runtime_epochs"),
+                "runtime-integrity pre-run epochs changed",
+            )
+            _require(
+                dict(epochs_after) == dict(epochs_before),
+                "runtime-integrity post-run epochs changed",
+            )
+            _require(
+                integrity.get("container_result_schema_version")
+                == CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+                "runtime-integrity result schema changed",
+            )
+            _require(
+                integrity.get("runtime_epoch_binding_required") is True
+                and integrity.get("all_runtime_epochs_stable") is True
+                and integrity.get("credentials_recorded") is False,
+                "runtime-integrity contract is incomplete",
+            )
         checkpoint_bytes = (root / "trial_checkpoint.jsonl").read_bytes()
         _require(
             not checkpoint_bytes or checkpoint_bytes.endswith(b"\n"),
@@ -1650,6 +1776,38 @@ def verify_container_execution(output_dir: str | Path) -> dict[str, Any]:
             manifest.get("checkpoint_trial_count") == len(checkpoint_entries),
             "checkpoint trial count changed",
         )
+        if schema_version == CONTAINER_EXECUTION_MANIFEST_SCHEMA_VERSION:
+            bound_epochs = contract["runtime_epochs"]
+            for event in events:
+                if event.get("executed") is not True:
+                    _require(
+                        event.get("runtime_epoch") is None
+                        and event.get("destination_runtime_epoch") is None,
+                        "skipped event carries a runtime epoch",
+                    )
+                    continue
+                source = event.get("execution_node_id")
+                _require(
+                    event.get("runtime_epoch") == bound_epochs.get(source),
+                    "event runtime epoch does not match the checkpoint binding",
+                )
+                _require(
+                    event.get("container_result_schema_version")
+                    == CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+                    "event result schema changed",
+                )
+                if event.get("operation_kind") == "network_transfer":
+                    destination = event.get("destination_node_id")
+                    _require(
+                        event.get("destination_runtime_epoch")
+                        == bound_epochs.get(destination),
+                        "network event destination runtime epoch changed",
+                    )
+                else:
+                    _require(
+                        event.get("destination_runtime_epoch") is None,
+                        "non-network event carries a destination runtime epoch",
+                    )
     execution_mode = manifest.get("execution_mode", "serial")
     _require(
         execution_mode in ("serial", "concurrent"),

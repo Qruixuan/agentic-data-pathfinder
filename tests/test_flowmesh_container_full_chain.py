@@ -22,6 +22,7 @@ from tests.test_flowmesh_container_dag import (
     _RUN_URLS,
     _link,
     _operation,
+    _runtime_epoch_probe,
 )
 
 
@@ -157,6 +158,7 @@ class FullPhysicalChainPlanAndRunTest(unittest.TestCase):
                     worker_alias="container-smoke-worker",
                     validate_before_submit=True,
                 ),
+                runtime_epoch_probe=_runtime_epoch_probe,
             )
             self.assertEqual("COMPLETE", result["status"])
             self.assertEqual(5, result["task_result_count"])

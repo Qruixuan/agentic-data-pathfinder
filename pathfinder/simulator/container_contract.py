@@ -29,7 +29,20 @@ CONTAINER_TOPOLOGY_SCHEMA_VERSION = (
     "pathfinder.container-emulation-topology/v1alpha1"
 )
 CONTAINER_OPERATION_SCHEMA_VERSION = (
+    "pathfinder.container-emulation-operation/v1alpha2"
+)
+#: v1alpha1 operation ledgers predate explicit cache namespaces.  They remain
+#: readable for historical smoke evidence, but are deliberately not eligible
+#: for a new formal matrix freeze because cache state could leak across trial
+#: repetitions.
+CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION = (
     "pathfinder.container-emulation-operation/v1alpha1"
+)
+CONTAINER_NODE_RESULT_LEGACY_SCHEMA_VERSION = (
+    "pathfinder.container-node-operation-result/v1alpha1"
+)
+CONTAINER_NODE_RESULT_SCHEMA_VERSION = (
+    "pathfinder.container-node-operation-result/v1alpha2"
 )
 CONTAINER_READINESS_SCHEMA_VERSION = (
     "pathfinder.container-emulation-readiness/v1alpha1"
@@ -448,8 +461,22 @@ def _documents(
         if link_binding is not None:
             link_adapter = dict(links[link_binding["link_id"]])
         cache_adapter = None
+        cache_scope_id = None
         if cache_binding is not None:
             cache_adapter = dict(caches[cache_binding["cache_id"]])
+            repetition = trial["repetition"]
+            _require(
+                type(repetition) is int and repetition >= 0,
+                "portable trial repetition is invalid",
+            )
+            # The discrete simulator scopes cache state by design and
+            # repetition.  Preserve the same boundary in the container
+            # operation ledger so a long-lived node cannot let one repetition
+            # warm another merely because both name the same physical cache.
+            cache_scope_id = (
+                f"{_text(trial['design_id'], 'portable trial design_id')}"
+                f"|r{repetition:04d}"
+            )
         if resource_binding is not None:
             execution_node_id = resource_binding["node_id"]
             destination_node_id = execution_node_id
@@ -483,6 +510,7 @@ def _documents(
             "resource_adapter": resource_adapter,
             "link_adapter": link_adapter,
             "cache_adapter": cache_adapter,
+            "cache_scope_id": cache_scope_id,
             "task_executor": dict(task_executors[trial["task_type"]]),
             "execution_node_id": execution_node_id,
             "execution_container": nodes[execution_node_id]["container_name"],
@@ -679,7 +707,10 @@ def _verify_output(root: Path) -> dict[str, Any]:
     _require(len(keys) == len(set(keys)), "duplicate container operation key")
     for row in operations:
         _require(
-            row.get("schema_version") == CONTAINER_OPERATION_SCHEMA_VERSION,
+            row.get("schema_version") in {
+                CONTAINER_OPERATION_SCHEMA_VERSION,
+                CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION,
+            },
             "unsupported container operation schema_version",
         )
         _text(row.get("execution_node_id"), "container execution_node_id")
@@ -693,6 +724,24 @@ def _verify_output(root: Path) -> dict[str, Any]:
             row.get("simulation_hint_used_as_measured_duration") is False,
             "container operation attempts to promote a simulation hint",
         )
+        if (
+            row.get("schema_version") == CONTAINER_OPERATION_SCHEMA_VERSION
+            and row.get("operation_kind") == "cache_read"
+        ):
+            _require(
+                isinstance(row.get("cache_adapter"), Mapping),
+                "scoped cache_read has no cache adapter",
+            )
+            _text(row.get("cache_scope_id"), "scoped cache_read cache_scope_id")
+        if row.get("cache_adapter") is not None:
+            scope = row.get("cache_scope_id")
+            if row.get("schema_version") == CONTAINER_OPERATION_SCHEMA_VERSION:
+                _text(scope, "container cache_scope_id")
+            else:
+                _require(
+                    scope is None or isinstance(scope, str),
+                    "legacy container cache_scope_id is invalid",
+                )
     return dict(manifest)
 
 

@@ -57,6 +57,34 @@ def _node_api_url_mapping(values: Sequence[str]) -> dict[str, str]:
     return bindings
 
 
+def _cache_outcome_mapping(values: Sequence[str]) -> dict[str, str]:
+    """Parse repeatable frozen cache lookup outcomes.
+
+    These values are never a way to choose a branch freely: the conditional
+    planner compares them against the cache snapshot recorded in the frozen
+    container operation.  Parsing them here simply makes an operator-supplied
+    expectation explicit and rejects ambiguous command lines early.
+    """
+
+    outcomes: dict[str, str] = {}
+    for raw in values:
+        operation_key, separator, outcome = raw.partition("=")
+        if (
+            not separator
+            or not operation_key.strip()
+            or outcome.strip() not in {"hit", "miss"}
+        ):
+            raise ConfigError(
+                "--cache-outcome must have the form "
+                "LOOKUP_OPERATION_KEY=hit|miss"
+            )
+        key = operation_key.strip()
+        if key in outcomes:
+            raise ConfigError(f"duplicate --cache-outcome binding for {key}")
+        outcomes[key] = outcome.strip()
+    return outcomes
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pathfinder",
@@ -1568,6 +1596,208 @@ def _parser() -> argparse.ArgumentParser:
     )
     flowmesh_container_dag_run.add_argument("--compact", action="store_true")
 
+    flowmesh_container_matrix_plan = subcommands.add_parser(
+        "plan-flowmesh-container-matrix",
+        help=(
+            "freeze the complete 64-trial / 500-operation 4x8 container "
+            "matrix for a later plan-bound FlowMesh trial-wrapper run; "
+            "does not start services or submit work"
+        ),
+    )
+    flowmesh_container_matrix_plan.add_argument(
+        "--portable-plan-dir", type=Path, required=True
+    )
+    flowmesh_container_matrix_plan.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    flowmesh_container_matrix_plan.add_argument(
+        "--node-api-url",
+        action="append",
+        required=True,
+        help=(
+            "repeat NODE_ID=http://host:port for every one of the eight "
+            "frozen topology nodes"
+        ),
+    )
+    flowmesh_container_matrix_plan.add_argument("--worker-alias", required=True)
+    flowmesh_container_matrix_plan.add_argument("--matrix-id", required=True)
+    flowmesh_container_matrix_plan.add_argument(
+        "--source-git-revision",
+        required=True,
+        help="40-character lowercase commit ID that produced the frozen inputs",
+    )
+    flowmesh_container_matrix_plan.add_argument(
+        "--execution-profile-id",
+        required=True,
+        help="explicit frozen admission/cache profile identifier",
+    )
+    flowmesh_container_matrix_plan.add_argument(
+        "--api-task-timeout-seconds",
+        type=int,
+        default=None,
+        help=(
+            "per-operation FlowMesh API timeout in seconds; frozen into the "
+            "matrix and refused below any link-rate lower bound"
+        ),
+    )
+    flowmesh_container_matrix_plan.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    flowmesh_container_matrix_plan.add_argument("--compact", action="store_true")
+
+    verify_flowmesh_container_matrix_plan = subcommands.add_parser(
+        "verify-flowmesh-container-matrix-plan",
+        help=(
+            "verify a frozen complete 4x8 container-matrix plan offline; "
+            "no service or FlowMesh request is made"
+        ),
+    )
+    verify_flowmesh_container_matrix_plan.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    verify_flowmesh_container_matrix_plan.add_argument(
+        "--compact", action="store_true"
+    )
+
+    conditional_dag_candidates = subcommands.add_parser(
+        "list-flowmesh-container-conditional-dag-candidates",
+        help=(
+            "list every cache-conditional 4x8 trial with the hit/miss "
+            "outcomes derivable from its frozen initial cache snapshot; "
+            "does not start services or submit work"
+        ),
+    )
+    conditional_dag_candidates.add_argument(
+        "--container-operations", type=Path, required=True
+    )
+    conditional_dag_candidates.add_argument("--compact", action="store_true")
+
+    conditional_dag_resolve = subcommands.add_parser(
+        "resolve-flowmesh-container-conditional-dag",
+        help=(
+            "resolve one cache-conditional container trial into a safe "
+            "two-phase DAG from frozen cache state; does not start services "
+            "or submit work"
+        ),
+    )
+    conditional_dag_resolve.add_argument(
+        "--container-operations", type=Path, required=True
+    )
+    conditional_dag_resolve.add_argument("--trial-key", required=True)
+    conditional_dag_resolve.add_argument(
+        "--cache-outcome",
+        action="append",
+        default=[],
+        help=(
+            "optional exact expectation LOOKUP_OPERATION_KEY=hit|miss; it "
+            "must agree with the frozen cache snapshot"
+        ),
+    )
+    conditional_dag_resolve.add_argument("--compact", action="store_true")
+
+    conditional_trial_plan = subcommands.add_parser(
+        "plan-flowmesh-container-conditional-trial",
+        help=(
+            "freeze one D3/D7 cache-conditional trial into a two-phase "
+            "FlowMesh plan; does not start services or submit work"
+        ),
+    )
+    conditional_trial_plan.add_argument(
+        "--matrix-plan-dir", type=Path, required=True
+    )
+    conditional_trial_plan.add_argument("--trial-key", required=True)
+    conditional_trial_plan.add_argument("--smoke-id", required=True)
+    conditional_trial_plan.add_argument("--owner", default="pathfinder")
+    conditional_trial_plan.add_argument("--output-dir", type=Path, required=True)
+    conditional_trial_plan.add_argument("--compact", action="store_true")
+
+    verify_conditional_trial_plan = subcommands.add_parser(
+        "verify-flowmesh-container-conditional-trial-plan",
+        help="verify a frozen two-phase cache-conditional trial plan offline",
+    )
+    verify_conditional_trial_plan.add_argument("--plan-dir", type=Path, required=True)
+    verify_conditional_trial_plan.add_argument("--compact", action="store_true")
+
+    conditional_trial_run = subcommands.add_parser(
+        "run-flowmesh-container-conditional-trial",
+        help=(
+            "submit the phase-A cache checks of one frozen D3/D7 trial and "
+            "submit phase B only when their literal outcomes match"
+        ),
+    )
+    conditional_trial_run.add_argument("--plan-dir", type=Path, required=True)
+    conditional_trial_run.add_argument("--output-dir", type=Path, required=True)
+    conditional_trial_run.add_argument("--worker-alias", required=True)
+    conditional_trial_run.add_argument("--flowmesh-base-url")
+    conditional_trial_run.add_argument("--task-timeout", type=int, default=600)
+    conditional_trial_run.add_argument("--poll-interval", type=float, default=2.0)
+    conditional_trial_run.add_argument("--compact", action="store_true")
+
+    verify_conditional_trial_run = subcommands.add_parser(
+        "verify-flowmesh-container-conditional-trial-run",
+        help=(
+            "verify a completed or phase-B-refused conditional trial "
+            "artifact offline"
+        ),
+    )
+    verify_conditional_trial_run.add_argument("--run-dir", type=Path, required=True)
+    verify_conditional_trial_run.add_argument("--plan-dir", type=Path)
+    verify_conditional_trial_run.add_argument("--compact", action="store_true")
+
+    formal_profile = subcommands.add_parser(
+        "freeze-flowmesh-container-formal-execution-profile",
+        help=(
+            "bind a v2 matrix and the read-only fast/slow audit into the "
+            "conservative serial infrastructure-conformance profile"
+        ),
+    )
+    formal_profile.add_argument("--matrix-plan-dir", type=Path, required=True)
+    formal_profile.add_argument(
+        "--calibration-audit-dir", type=Path, required=True
+    )
+    formal_profile.add_argument("--execution-profile-id", required=True)
+    formal_profile.add_argument(
+        "--primary-trial-wrapper-max-concurrency", type=int, default=1
+    )
+    formal_profile.add_argument("--output-dir", type=Path, required=True)
+    formal_profile.add_argument("--compact", action="store_true")
+
+    verify_formal_profile = subcommands.add_parser(
+        "verify-flowmesh-container-formal-execution-profile",
+        help="verify a frozen formal container-infrastructure profile offline",
+    )
+    verify_formal_profile.add_argument("--profile-dir", type=Path, required=True)
+    verify_formal_profile.add_argument("--compact", action="store_true")
+
+    matrix_coordinator = subcommands.add_parser(
+        "plan-flowmesh-container-matrix-coordinator-dry-run",
+        help=(
+            "freeze a non-submitting, globally serial 64-trial coordinator "
+            "admission package bound to a v2 matrix and formal profile"
+        ),
+    )
+    matrix_coordinator.add_argument("--matrix-plan-dir", type=Path, required=True)
+    matrix_coordinator.add_argument(
+        "--formal-execution-profile-dir", type=Path, required=True
+    )
+    matrix_coordinator.add_argument("--coordinator-id", required=True)
+    matrix_coordinator.add_argument("--output-dir", type=Path, required=True)
+    matrix_coordinator.add_argument("--compact", action="store_true")
+
+    verify_matrix_coordinator = subcommands.add_parser(
+        "verify-flowmesh-container-matrix-coordinator-dry-run",
+        help=(
+            "verify a frozen 64-trial coordinator admission package; "
+            "source matrix/profile bindings are optional"
+        ),
+    )
+    verify_matrix_coordinator.add_argument("--plan-dir", type=Path, required=True)
+    verify_matrix_coordinator.add_argument("--matrix-plan-dir", type=Path)
+    verify_matrix_coordinator.add_argument(
+        "--formal-execution-profile-dir", type=Path
+    )
+    verify_matrix_coordinator.add_argument("--compact", action="store_true")
+
     full_chain_candidates = subcommands.add_parser(
         "list-flowmesh-container-full-chain-candidates",
         help=(
@@ -1647,6 +1877,38 @@ def _parser() -> argparse.ArgumentParser:
     verify_full_chain_run.add_argument("--run-dir", type=Path, required=True)
     verify_full_chain_run.add_argument("--plan-dir", type=Path)
     verify_full_chain_run.add_argument("--compact", action="store_true")
+
+    full_chain_calibration = subcommands.add_parser(
+        "audit-flowmesh-container-full-chain-calibration",
+        help=(
+            "read only two existing full-chain artifacts and audit configured "
+            "fast/slow application-shaping conformance; fits no parameters "
+            "and derives no network throughput"
+        ),
+    )
+    full_chain_calibration.add_argument(
+        "--fast-plan-dir", type=Path, required=True
+    )
+    full_chain_calibration.add_argument(
+        "--fast-run-dir", type=Path, required=True
+    )
+    full_chain_calibration.add_argument(
+        "--slow-plan-dir", type=Path, required=True
+    )
+    full_chain_calibration.add_argument(
+        "--slow-run-dir", type=Path, required=True
+    )
+    full_chain_calibration.add_argument("--output-dir", type=Path, required=True)
+    full_chain_calibration.add_argument("--compact", action="store_true")
+
+    verify_full_chain_calibration = subcommands.add_parser(
+        "verify-flowmesh-container-full-chain-calibration",
+        help="verify an immutable read-only fast/slow full-chain audit",
+    )
+    verify_full_chain_calibration.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_full_chain_calibration.add_argument("--compact", action="store_true")
 
     parity = subcommands.add_parser(
         "evaluate-backend-parity",
@@ -2038,6 +2300,179 @@ def main(argv: Sequence[str] | None = None) -> int:
             finally:
                 client.close()
             return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-flowmesh-container-matrix":
+            from .integrations.flowmesh.container_dag import (
+                DEFAULT_API_TASK_TIMEOUT_SECONDS,
+            )
+            from .integrations.flowmesh.container_matrix import (
+                plan_flowmesh_container_matrix,
+            )
+
+            api_task_timeout = args.api_task_timeout_seconds
+            if api_task_timeout is None:
+                api_task_timeout = DEFAULT_API_TASK_TIMEOUT_SECONDS
+            payload = plan_flowmesh_container_matrix(
+                portable_plan_dir=args.portable_plan_dir,
+                container_plan_dir=args.container_plan_dir,
+                node_api_urls=_node_api_url_mapping(args.node_api_url),
+                worker_alias=args.worker_alias,
+                matrix_id=args.matrix_id,
+                source_git_revision=args.source_git_revision,
+                execution_profile_id=args.execution_profile_id,
+                api_task_timeout_seconds=api_task_timeout,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-matrix-plan":
+            from .integrations.flowmesh.container_matrix import (
+                verify_flowmesh_container_matrix_plan,
+            )
+
+            payload = verify_flowmesh_container_matrix_plan(args.plan_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "list-flowmesh-container-conditional-dag-candidates":
+            from .integrations.flowmesh.container_conditional_dag import (
+                list_conditional_container_trial_candidates,
+            )
+            from .integrations.flowmesh.container_dag import (
+                load_container_operations,
+            )
+
+            candidates = list_conditional_container_trial_candidates(
+                load_container_operations(args.container_operations)
+            )
+            payload = {
+                "status": "COMPLETE",
+                "candidate_count": len(candidates),
+                "candidates": candidates,
+                "workflow_submitted": False,
+                "services_started": False,
+                "credentials_recorded": False,
+                "eligible_for_scientific_claims": False,
+            }
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "resolve-flowmesh-container-conditional-dag":
+            from .integrations.flowmesh.container_conditional_dag import (
+                resolve_conditional_container_trial,
+            )
+            from .integrations.flowmesh.container_dag import (
+                load_container_operations,
+            )
+
+            expected_outcomes = _cache_outcome_mapping(args.cache_outcome)
+            resolution = resolve_conditional_container_trial(
+                load_container_operations(args.container_operations),
+                trial_key=args.trial_key,
+                cache_outcomes=expected_outcomes or None,
+            )
+            payload = {
+                "status": "RESOLVED_FROM_FROZEN_CACHE_SNAPSHOT",
+                **resolution,
+            }
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-flowmesh-container-conditional-trial":
+            from .integrations.flowmesh.container_conditional_runner import (
+                plan_flowmesh_container_conditional_trial,
+            )
+
+            payload = plan_flowmesh_container_conditional_trial(
+                matrix_plan_dir=args.matrix_plan_dir,
+                trial_key=args.trial_key,
+                smoke_id=args.smoke_id,
+                owner=args.owner,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-conditional-trial-plan":
+            from .integrations.flowmesh.container_conditional_runner import (
+                verify_flowmesh_container_conditional_trial_plan,
+            )
+
+            payload = verify_flowmesh_container_conditional_trial_plan(
+                args.plan_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-flowmesh-container-conditional-trial":
+            from .integrations.flowmesh import FlowMeshSettings, SdkFlowMeshClient
+            from .integrations.flowmesh.container_conditional_runner import (
+                run_flowmesh_container_conditional_trial,
+            )
+
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=args.worker_alias,
+                validate_before_submit=True,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_container_conditional_trial(
+                    plan_dir=args.plan_dir,
+                    output_dir=args.output_dir,
+                    client=client,
+                    settings=settings,
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-conditional-trial-run":
+            from .integrations.flowmesh.container_conditional_runner import (
+                verify_flowmesh_container_conditional_trial_run,
+            )
+
+            payload = verify_flowmesh_container_conditional_trial_run(
+                args.run_dir,
+                plan_dir=args.plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "freeze-flowmesh-container-formal-execution-profile":
+            from .integrations.flowmesh.container_formal_profile import (
+                freeze_flowmesh_container_formal_execution_profile,
+            )
+
+            payload = freeze_flowmesh_container_formal_execution_profile(
+                matrix_plan_dir=args.matrix_plan_dir,
+                calibration_audit_dir=args.calibration_audit_dir,
+                execution_profile_id=args.execution_profile_id,
+                primary_trial_wrapper_max_concurrency=(
+                    args.primary_trial_wrapper_max_concurrency
+                ),
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-formal-execution-profile":
+            from .integrations.flowmesh.container_formal_profile import (
+                verify_flowmesh_container_formal_execution_profile,
+            )
+
+            payload = verify_flowmesh_container_formal_execution_profile(
+                args.profile_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-flowmesh-container-matrix-coordinator-dry-run":
+            from .integrations.flowmesh.container_matrix_coordinator import (
+                plan_flowmesh_container_matrix_coordinator_dry_run,
+            )
+
+            payload = plan_flowmesh_container_matrix_coordinator_dry_run(
+                matrix_plan_dir=args.matrix_plan_dir,
+                formal_execution_profile_dir=args.formal_execution_profile_dir,
+                coordinator_id=args.coordinator_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-matrix-coordinator-dry-run":
+            from .integrations.flowmesh.container_matrix_coordinator import (
+                verify_flowmesh_container_matrix_coordinator_dry_run,
+            )
+
+            payload = verify_flowmesh_container_matrix_coordinator_dry_run(
+                args.plan_dir,
+                matrix_plan_dir=args.matrix_plan_dir,
+                formal_execution_profile_dir=args.formal_execution_profile_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
         if args.command == "list-flowmesh-container-full-chain-candidates":
             from .integrations.flowmesh.container_full_chain import (
                 list_full_physical_container_operation_chain_candidates,
@@ -2121,6 +2556,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = verify_flowmesh_container_full_physical_chain_run(
                 args.run_dir,
                 plan_dir=args.plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "audit-flowmesh-container-full-chain-calibration":
+            from .integrations.flowmesh.container_full_chain_calibration import (
+                audit_flowmesh_container_full_chain_calibration,
+            )
+
+            payload = audit_flowmesh_container_full_chain_calibration(
+                fast_plan_dir=args.fast_plan_dir,
+                fast_run_dir=args.fast_run_dir,
+                slow_plan_dir=args.slow_plan_dir,
+                slow_run_dir=args.slow_run_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-full-chain-calibration":
+            from .integrations.flowmesh.container_full_chain_calibration import (
+                verify_flowmesh_container_full_chain_calibration,
+            )
+
+            payload = verify_flowmesh_container_full_chain_calibration(
+                args.output_dir
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "evaluate-backend-parity":

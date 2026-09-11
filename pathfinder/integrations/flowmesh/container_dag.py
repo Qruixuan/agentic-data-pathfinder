@@ -16,14 +16,21 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
-from ...simulator.container_contract import CONTAINER_OPERATION_SCHEMA_VERSION
+from ...simulator.container_contract import (
+    CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+    CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION,
+    CONTAINER_OPERATION_SCHEMA_VERSION,
+)
 from .adapter import FlowMeshRunError, extract_api_executor_result
 from .contracts import (
     FlowMeshClientProtocol,
@@ -48,6 +55,12 @@ FLOWMESH_CONTAINER_DAG_PLAN_LEGACY_SCHEMA_VERSION = (
 LEGACY_API_TASK_TIMEOUT_SECONDS = 120
 DEFAULT_API_TASK_TIMEOUT_SECONDS = 120
 FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-container-operation-dag-run/v1alpha3"
+)
+#: v1alpha2 records timing, but predates runtime-instance binding and the
+#: corrected network timing provenance. It remains readable as historical
+#: evidence and cannot be promoted to a v2 runtime-integrity result.
+FLOWMESH_CONTAINER_DAG_RUN_TIMING_V1_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-operation-dag-run/v1alpha2"
 )
 #: v1alpha1 runs discarded every timing field. They stay readable and are
@@ -57,7 +70,10 @@ FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION = (
     "pathfinder.flowmesh-container-operation-dag-run/v1alpha1"
 )
 
-TELEMETRY_PROVENANCE_VERSION = "pathfinder.container-dag-telemetry/v1alpha1"
+TELEMETRY_PROVENANCE_LEGACY_VERSION = (
+    "pathfinder.container-dag-telemetry/v1alpha1"
+)
+TELEMETRY_PROVENANCE_VERSION = "pathfinder.container-dag-telemetry/v1alpha2"
 
 #: Exactly the container-result fields that may be preserved. Anything else
 #: the runtime returns -- payload digests, prompts, answers, cache internals
@@ -70,7 +86,7 @@ _TELEMETRY_TIMING_FIELDS = (
 
 #: What each preserved number actually is. Recorded in the artifact so a
 #: later reader cannot mistake a configured target for a measurement.
-TELEMETRY_FIELD_PROVENANCE: dict[str, str] = {
+TELEMETRY_FIELD_PROVENANCE_V1: dict[str, str] = {
     "service_time_ms": (
         "measured inside the container operation as the monotonic interval "
         "between the start and end of the operation body on the executing "
@@ -100,7 +116,7 @@ TELEMETRY_FIELD_PROVENANCE: dict[str, str] = {
     ),
 }
 
-TELEMETRY_DISCLAIMERS: tuple[str, ...] = (
+TELEMETRY_DISCLAIMERS_V1: tuple[str, ...] = (
     "No cross-container clock comparison is made: every timing value is a "
     "duration measured by one node against its own monotonic clock, and "
     "durations from different nodes are never subtracted or ordered.",
@@ -111,6 +127,85 @@ TELEMETRY_DISCLAIMERS: tuple[str, ...] = (
     "shaper, not the link.",
     "This is infrastructure-conformance telemetry, not a performance result.",
 )
+
+#: v2 corrects the network timing scope and exposes the two node-side
+#: components needed to audit it. The new fields are still deliberately
+#: insufficient to claim end-to-end latency or physical-link throughput.
+TELEMETRY_FIELD_PROVENANCE: dict[str, str] = {
+    "service_time_ms": (
+        "measured inside the container operation as the monotonic interval "
+        "between the start and end of the operation body on the executing "
+        "node; a network transfer includes source-side HTTP request/response "
+        "work and any application-level shaping sleep, while fixture "
+        "materialization remains excluded"
+    ),
+    "fixture_materialization_ms_excluded_from_storage_measurement": (
+        "measured on the executing node while preparing the read fixture, "
+        "before the timed operation body begins; it is deliberately EXCLUDED "
+        "from service_time_ms and is reported separately so a storage "
+        "measurement is never inflated by test-fixture setup"
+    ),
+    "application_shaping_target_ms": (
+        "a CONFIGURED application-level shaping target derived from the "
+        "frozen link adapter, not an independently measured network latency "
+        "and not an observed round-trip time"
+    ),
+    "network_http_exchange_ms": (
+        "for a network transfer only, the source node's observed HTTP "
+        "connection, request, payload-send, response-read, and sink "
+        "validation interval; it is not a physical-link latency measurement"
+    ),
+    "application_shaping_sleep_ms": (
+        "for a network transfer only, the observed post-exchange sleep used "
+        "to enforce the configured application-level target; it is not a "
+        "network measurement"
+    ),
+    "runtime_epoch": (
+        "the executing container runtime instance identifier, captured in "
+        "the operation result and matched to pre- and post-run health probes"
+    ),
+    "destination_runtime_epoch": (
+        "for a network transfer only, the sink container runtime instance "
+        "identifier returned with the transfer acknowledgement and matched "
+        "to the run health binding"
+    ),
+    "logical_bytes": (
+        "the exact byte count declared by the frozen operation and confirmed "
+        "by the container result"
+    ),
+    "physical_bytes": (
+        "the exact byte count the container reported reading or transferring"
+    ),
+    "telemetry_complete": (
+        "the container's own assertion that it reported a complete record; a "
+        "false or missing value refuses the run artifact"
+    ),
+}
+
+TELEMETRY_DISCLAIMERS: tuple[str, ...] = (
+    "No cross-container clock comparison is made: every timing value is a "
+    "duration measured by one node against its own monotonic clock, and "
+    "durations from different nodes are never subtracted or ordered.",
+    "No FlowMesh queue time, scheduling delay, worker-to-node request time, "
+    "or end-to-end latency is claimed; those were not measured and are not "
+    "derivable from these records.",
+    "No network throughput is derived from bytes and service time: the "
+    "transfer is application-shaped, so such a ratio would describe the "
+    "shaper, not the link.",
+    "Runtime epochs detect a container-instance change during this run; they "
+    "do not authenticate a record or establish image provenance.",
+    "This is infrastructure-conformance telemetry, not a performance result.",
+)
+
+_TELEMETRY_FIELD_PROVENANCE_BY_VERSION = {
+    TELEMETRY_PROVENANCE_LEGACY_VERSION: TELEMETRY_FIELD_PROVENANCE_V1,
+    TELEMETRY_PROVENANCE_VERSION: TELEMETRY_FIELD_PROVENANCE,
+}
+_TELEMETRY_DISCLAIMERS_BY_VERSION = {
+    TELEMETRY_PROVENANCE_LEGACY_VERSION: TELEMETRY_DISCLAIMERS_V1,
+    TELEMETRY_PROVENANCE_VERSION: TELEMETRY_DISCLAIMERS,
+}
+_RUNTIME_EPOCH = re.compile(r"[0-9a-f]{32}")
 
 _PLAN_FILES = {
     "flowmesh-container-dag-plan.json",
@@ -179,6 +274,225 @@ def _text(value: Any, field: str) -> str:
     return value.strip()
 
 
+def _runtime_epoch(value: Any, field: str) -> str:
+    epoch = _text(value, field)
+    _require(
+        _RUNTIME_EPOCH.fullmatch(epoch) is not None,
+        f"{field} must be a lowercase runtime epoch",
+    )
+    return epoch
+
+
+def _telemetry_contract(
+    provenance_version: str,
+) -> tuple[Mapping[str, str], tuple[str, ...]]:
+    fields = _TELEMETRY_FIELD_PROVENANCE_BY_VERSION.get(provenance_version)
+    disclaimers = _TELEMETRY_DISCLAIMERS_BY_VERSION.get(provenance_version)
+    _require(
+        fields is not None and disclaimers is not None,
+        "unsupported container telemetry provenance",
+    )
+    return fields, disclaimers
+
+
+def _required_runtime_node_ids(
+    operations: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    required = {
+        _text(row.get("execution_node_id"), "execution_node_id")
+        for row in operations
+    }
+    required.update(
+        _text(row.get("destination_node_id"), "destination_node_id")
+        for row in operations
+        if row.get("operation_kind") == "network_transfer"
+    )
+    _require(bool(required), "runtime binding needs at least one node")
+    return tuple(sorted(required))
+
+
+def _health_url(base_url: str) -> str:
+    base = _text(base_url, "node API URL").rstrip("/")
+    parsed = urlsplit(base)
+    _require(
+        parsed.scheme == "http" and parsed.hostname is not None,
+        "node API URL must be an absolute http URL",
+    )
+    _require(
+        parsed.username is None and parsed.password is None,
+        "node API URL must not contain credentials",
+    )
+    return base + "/healthz"
+
+
+def _probe_container_runtime_epochs(
+    node_api_urls: Mapping[str, str],
+    operations: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    """Read the v2 instance identity from every node a run can touch.
+
+    This helper is called only by live runners, never by a planner or an
+    offline verifier.  A task result independently carries the same epoch,
+    preventing a host-side health probe from being mistaken for proof of the
+    endpoint actually reached by a FlowMesh worker.
+    """
+
+    expected: dict[str, str] = {}
+    for node_id in _required_runtime_node_ids(operations):
+        _require(node_id in node_api_urls, f"no API URL was supplied for runtime node {node_id}")
+        url = _health_url(_text(node_api_urls[node_id], f"node API URL for {node_id}"))
+        try:
+            with urlopen(Request(url, method="GET"), timeout=10.0) as response:
+                raw = response.read(128 * 1024 + 1)
+                _require(len(raw) <= 128 * 1024, "container health response is too large")
+                _require(response.status == 200, f"container health returned HTTP {response.status}")
+        except HTTPError as exc:
+            raise FlowMeshContainerDagError(
+                f"container node {node_id} health returned HTTP {exc.code}"
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise FlowMeshContainerDagError(
+                "container node "
+                f"{node_id} health is unavailable: {getattr(exc, 'reason', exc)}"
+            ) from exc
+        try:
+            health = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise FlowMeshContainerDagError(
+                f"container node {node_id} health is invalid JSON"
+            ) from exc
+        _require(isinstance(health, Mapping), "container health must be an object")
+        _require(health.get("status") == "ok", f"container node {node_id} is unhealthy")
+        _require(health.get("node_id") == node_id, f"container node {node_id} identity changed")
+        _require(
+            health.get("operation_result_schema_version")
+            == CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+            f"container node {node_id} does not support the v2 result contract",
+        )
+        _require(
+            health.get("semantic_quality_enabled") is False,
+            f"container node {node_id} unexpectedly enables semantic quality",
+        )
+        expected[node_id] = _runtime_epoch(
+            health.get("runtime_epoch"), f"container node {node_id} runtime_epoch"
+        )
+    return dict(sorted(expected.items()))
+
+
+def _validate_runtime_epochs(
+    value: Mapping[str, Any],
+    operations: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    required = _required_runtime_node_ids(operations)
+    _require(
+        set(value) == set(required),
+        "runtime epoch binding node set changed",
+    )
+    return {
+        node_id: _runtime_epoch(value[node_id], f"runtime epoch for {node_id}")
+        for node_id in required
+    }
+
+
+def _runtime_epoch_binding(
+    *,
+    plan_sha256: str,
+    node_api_urls: Mapping[str, str],
+    operations: Sequence[Mapping[str, Any]],
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    before_epochs = _validate_runtime_epochs(before, operations)
+    after_epochs = _validate_runtime_epochs(after, operations)
+    _require(
+        before_epochs == after_epochs,
+        "container runtime epoch changed during the FlowMesh run",
+    )
+    urls = {
+        node_id: _text(node_api_urls[node_id], f"node API URL for {node_id}")
+        for node_id in _required_runtime_node_ids(operations)
+    }
+    return {
+        "schema_version": "pathfinder.flowmesh-container-runtime-binding/v1alpha1",
+        "plan_sha256": _text(plan_sha256, "plan_sha256"),
+        "node_api_urls_sha256": _sha256_bytes(_canonical_bytes(dict(sorted(urls.items())))),
+        "node_runtime_epochs_before": before_epochs,
+        "node_runtime_epochs_after": after_epochs,
+        "operation_result_schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+        "runtime_epoch_binding_required": True,
+        "all_runtime_epochs_stable": True,
+        "credentials_recorded": False,
+    }
+
+
+def _verify_runtime_epoch_binding(
+    binding: Any,
+    *,
+    plan_sha256: Any,
+    node_api_urls: Mapping[str, Any],
+    operations: Sequence[Mapping[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
+) -> None:
+    _require(isinstance(binding, Mapping), "container runtime epoch binding is missing")
+    _require(
+        binding.get("schema_version")
+        == "pathfinder.flowmesh-container-runtime-binding/v1alpha1",
+        "unsupported container runtime epoch binding schema",
+    )
+    _require(binding.get("plan_sha256") == plan_sha256, "runtime epoch binding plan changed")
+    required = _required_runtime_node_ids(operations)
+    urls = {
+        node_id: _text(node_api_urls[node_id], f"node API URL for {node_id}")
+        for node_id in required
+    }
+    _require(
+        binding.get("node_api_urls_sha256")
+        == _sha256_bytes(_canonical_bytes(dict(sorted(urls.items())))),
+        "runtime epoch binding endpoint map changed",
+    )
+    before_value = binding.get("node_runtime_epochs_before")
+    after_value = binding.get("node_runtime_epochs_after")
+    _require(
+        isinstance(before_value, Mapping) and isinstance(after_value, Mapping),
+        "runtime epoch binding epoch maps are missing",
+    )
+    before = _validate_runtime_epochs(before_value, operations)
+    after = _validate_runtime_epochs(after_value, operations)
+    _require(before == after, "runtime epoch binding records a changed node epoch")
+    _require(
+        binding.get("operation_result_schema_version")
+        == CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+        "runtime epoch binding result schema changed",
+    )
+    _require(binding.get("runtime_epoch_binding_required") is True, "runtime epoch binding is not required")
+    _require(binding.get("all_runtime_epochs_stable") is True, "runtime epoch binding is not stable")
+    _require(binding.get("credentials_recorded") is False, "runtime epoch binding records credentials")
+    for row in rows:
+        source = _text(row.get("execution_node_id"), "task result execution_node_id")
+        _require(
+            _runtime_epoch(row.get("runtime_epoch"), "task result runtime_epoch")
+            == before[source],
+            "task result runtime epoch does not match the run binding",
+        )
+        if row.get("operation_kind") == "network_transfer":
+            destination = _text(
+                row.get("destination_node_id"), "task result destination_node_id"
+            )
+            _require(
+                _runtime_epoch(
+                    row.get("destination_runtime_epoch"),
+                    "task result destination_runtime_epoch",
+                )
+                == before[destination],
+                "network sink runtime epoch does not match the run binding",
+            )
+        else:
+            _require(
+                row.get("destination_runtime_epoch") is None,
+                "non-network task result names a destination runtime epoch",
+            )
+
+
 def _copy_operation(value: Mapping[str, Any]) -> dict[str, Any]:
     # JSON round-tripping prevents a caller from mutating a nested field after
     # validation and before workflow construction.
@@ -195,7 +509,10 @@ def _copy_operation(value: Mapping[str, Any]) -> dict[str, Any]:
 def _validate_operation(value: Mapping[str, Any]) -> dict[str, Any]:
     operation = _copy_operation(value)
     _require(
-        operation.get("schema_version") == CONTAINER_OPERATION_SCHEMA_VERSION,
+        operation.get("schema_version") in {
+            CONTAINER_OPERATION_SCHEMA_VERSION,
+            CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION,
+        },
         "unsupported container operation schema_version",
     )
     _text(operation.get("operation_key"), "operation_key")
@@ -520,6 +837,11 @@ def _validate_node_api_urls(
         )
         normalized[name] = url
     required = {str(row["execution_node_id"]) for row in operations}
+    required.update(
+        str(row["destination_node_id"])
+        for row in operations
+        if row.get("operation_kind") == "network_transfer"
+    )
     missing = sorted(required - set(normalized))
     _require(
         not missing,
@@ -963,6 +1285,8 @@ def _finite_non_negative(value: Any, field: str) -> float:
 def _operation_telemetry(
     result: Mapping[str, Any],
     operation: Mapping[str, Any],
+    *,
+    provenance_version: str = TELEMETRY_PROVENANCE_VERSION,
 ) -> dict[str, Any]:
     """Extract and validate the preserved telemetry subset.
 
@@ -970,6 +1294,7 @@ def _operation_telemetry(
     defaulted, because a silent zero would be indistinguishable from a real
     measurement of zero.
     """
+    _telemetry_contract(provenance_version)
     kind = operation["operation_kind"]
     telemetry: dict[str, Any] = {}
     for field in (
@@ -1014,6 +1339,37 @@ def _operation_telemetry(
             f"a {kind} operation must not report fixture materialization time",
         )
 
+    if provenance_version == TELEMETRY_PROVENANCE_VERSION:
+        for field in (
+            "network_http_exchange_ms",
+            "application_shaping_sleep_ms",
+        ):
+            _require(field in result, f"container result is missing {field}")
+        if kind == "network_transfer":
+            http_exchange_ms = _finite_non_negative(
+                result["network_http_exchange_ms"],
+                "network_http_exchange_ms",
+            )
+            shaping_sleep_ms = _finite_non_negative(
+                result["application_shaping_sleep_ms"],
+                "application_shaping_sleep_ms",
+            )
+            _require(
+                http_exchange_ms + shaping_sleep_ms
+                <= telemetry["service_time_ms"] + 0.1,
+                "network timing components exceed service_time_ms",
+            )
+            telemetry["network_http_exchange_ms"] = http_exchange_ms
+            telemetry["application_shaping_sleep_ms"] = shaping_sleep_ms
+        else:
+            _require(
+                result["network_http_exchange_ms"] is None
+                and result["application_shaping_sleep_ms"] is None,
+                f"a {kind} operation must not report network timing components",
+            )
+            telemetry["network_http_exchange_ms"] = None
+            telemetry["application_shaping_sleep_ms"] = None
+
     started = result.get("started_monotonic_ns")
     finished = result.get("finished_monotonic_ns")
     if isinstance(started, int) and isinstance(finished, int):
@@ -1042,6 +1398,7 @@ def _operation_result(
     task_id: str,
     selected_worker_id: str,
     task_detail: Mapping[str, Any] | None,
+    expected_runtime_epochs: Mapping[str, str],
 ) -> dict[str, Any]:
     api = extract_api_executor_result(raw)
     try:
@@ -1051,6 +1408,10 @@ def _operation_result(
             f"FlowMesh task {task_id} returned non-JSON container output"
         ) from exc
     _require(isinstance(result, Mapping), "container result must be an object")
+    _require(
+        result.get("schema_version") == CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+        "container result does not support the v2 result contract",
+    )
     _require(result.get("status") == "completed", "container operation did not complete")
     _require(result.get("outcome_type") == "completed", "container outcome is not completed")
     _require(result.get("telemetry_complete") is True, "container telemetry is incomplete")
@@ -1081,12 +1442,45 @@ def _operation_result(
             assigned == selected_worker_id,
             "FlowMesh assigned a container DAG task to a worker other than the pin",
         )
+    source = _text(operation.get("execution_node_id"), "execution_node_id")
+    _require(source in expected_runtime_epochs, "runtime binding lacks the execution node")
+    runtime_epoch = _runtime_epoch(result.get("runtime_epoch"), "container runtime_epoch")
+    _require(
+        runtime_epoch == expected_runtime_epochs[source],
+        "container result runtime epoch does not match the pre-submit health binding",
+    )
+    destination_runtime_epoch = result.get("destination_runtime_epoch")
+    if operation["operation_kind"] == "network_transfer":
+        destination = _text(
+            operation.get("destination_node_id"), "destination_node_id"
+        )
+        _require(
+            destination in expected_runtime_epochs,
+            "runtime binding lacks the network destination node",
+        )
+        destination_runtime_epoch = _runtime_epoch(
+            destination_runtime_epoch,
+            "container destination_runtime_epoch",
+        )
+        _require(
+            destination_runtime_epoch == expected_runtime_epochs[destination],
+            "network sink runtime epoch does not match the pre-submit health binding",
+        )
+    else:
+        _require(
+            destination_runtime_epoch is None,
+            "non-network container result names a destination runtime epoch",
+        )
     return {
         "task_id": task_id,
         "worker_id": selected_worker_id,
         "operation_key": operation["operation_key"],
         "operation_kind": operation["operation_kind"],
         "execution_node_id": operation["execution_node_id"],
+        "destination_node_id": operation["destination_node_id"],
+        "runtime_epoch": runtime_epoch,
+        "destination_runtime_epoch": destination_runtime_epoch,
+        "container_result_schema_version": CONTAINER_NODE_RESULT_SCHEMA_VERSION,
         "logical_bytes": result["logical_bytes"],
         "physical_bytes": result["physical_bytes"],
         **_operation_telemetry(result, operation),
@@ -1102,6 +1496,8 @@ def _operation_result(
 
 def _aggregate_telemetry(
     task_results: Sequence[Mapping[str, Any]],
+    *,
+    provenance_version: str = TELEMETRY_PROVENANCE_VERSION,
 ) -> dict[str, Any]:
     """Descriptive aggregates that follow directly from preserved records.
 
@@ -1110,6 +1506,7 @@ def _aggregate_telemetry(
     throughput ratio over an application-shaped transfer would describe the
     shaper rather than the link.
     """
+    _telemetry_contract(provenance_version)
     service = [float(row["service_time_ms"]) for row in task_results]
     materialization = [
         float(
@@ -1126,8 +1523,8 @@ def _aggregate_telemetry(
         for row in task_results
         if row.get("application_shaping_target_ms") is not None
     }
-    return {
-        "telemetry_provenance_version": TELEMETRY_PROVENANCE_VERSION,
+    aggregate = {
+        "telemetry_provenance_version": provenance_version,
         "record_count": len(task_results),
         "telemetry_complete_record_count": sum(
             1 for row in task_results if row.get("telemetry_complete") is True
@@ -1148,6 +1545,24 @@ def _aggregate_telemetry(
         "network_throughput_derived": False,
         "queue_time_measured": False,
     }
+    if provenance_version == TELEMETRY_PROVENANCE_VERSION:
+        network_rows = [
+            row
+            for row in task_results
+            if row.get("operation_kind") == "network_transfer"
+        ]
+        aggregate["network_http_exchange_ms_sum"] = round(
+            sum(float(row["network_http_exchange_ms"]) for row in network_rows),
+            6,
+        )
+        aggregate["application_shaping_sleep_ms_sum"] = round(
+            sum(
+                float(row["application_shaping_sleep_ms"])
+                for row in network_rows
+            ),
+            6,
+        )
+    return aggregate
 
 
 def _read_run(
@@ -1230,12 +1645,18 @@ def verify_flowmesh_container_operation_dag_run(
         schema
         in (
             FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION,
+            FLOWMESH_CONTAINER_DAG_RUN_TIMING_V1_SCHEMA_VERSION,
             FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION,
         ),
         "unsupported container DAG run schema",
     )
     _require(summary.get("status") == "COMPLETE", "container DAG run is not complete")
     legacy = schema == FLOWMESH_CONTAINER_DAG_RUN_LEGACY_SCHEMA_VERSION
+    provenance_version = (
+        TELEMETRY_PROVENANCE_VERSION
+        if schema == FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION
+        else TELEMETRY_PROVENANCE_LEGACY_VERSION
+    )
 
     operation_keys = summary.get("operation_keys")
     _require(
@@ -1311,11 +1732,15 @@ def verify_flowmesh_container_operation_dag_run(
 
     for row in rows:
         _require(
-            row.get("telemetry_provenance_version") == TELEMETRY_PROVENANCE_VERSION,
+            row.get("telemetry_provenance_version") == provenance_version,
             "container DAG task result has an unsupported telemetry provenance",
         )
         # Re-validate against the operation kind the record itself declares.
-        _operation_telemetry(row, {"operation_kind": row.get("operation_kind")})
+        _operation_telemetry(
+            row,
+            {"operation_kind": row.get("operation_kind")},
+            provenance_version=provenance_version,
+        )
         _require(
             type(row.get("logical_bytes")) is int
             and row["logical_bytes"] >= 0
@@ -1334,14 +1759,52 @@ def verify_flowmesh_container_operation_dag_run(
                 "container DAG compute result must not report transfer bytes",
             )
     _require(
-        summary.get("telemetry") == _aggregate_telemetry(rows),
+        summary.get("telemetry")
+        == _aggregate_telemetry(rows, provenance_version=provenance_version),
         "container DAG run telemetry aggregate does not match its task results",
     )
+    fields, disclaimers = _telemetry_contract(provenance_version)
     _require(
         summary.get("telemetry_provenance", {}).get("fields")
-        == TELEMETRY_FIELD_PROVENANCE,
+        == fields,
         "container DAG run telemetry provenance record changed",
     )
+    _require(
+        summary.get("telemetry_provenance", {}).get("version")
+        == provenance_version,
+        "container DAG run telemetry provenance version changed",
+    )
+    _require(
+        summary.get("telemetry_provenance", {}).get("disclaimers")
+        == list(disclaimers),
+        "container DAG run telemetry provenance disclaimers changed",
+    )
+    runtime_integrity = "not-recorded-v1"
+    if schema == FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION:
+        urls = summary.get("node_api_urls")
+        _require(isinstance(urls, Mapping), "container DAG run node API URLs are missing")
+        _validate_node_api_urls(rows, urls)
+        _verify_runtime_epoch_binding(
+            summary.get("runtime_epoch_binding"),
+            plan_sha256=summary.get("plan_sha256"),
+            node_api_urls=urls,
+            operations=rows,
+            rows=rows,
+        )
+        _require(
+            all(
+                row.get("container_result_schema_version")
+                == CONTAINER_NODE_RESULT_SCHEMA_VERSION
+                for row in rows
+            ),
+            "container DAG task result schema changed",
+        )
+        runtime_integrity = "bound-v2"
+        if plan_dir is not None:
+            _require(
+                urls == plan["node_api_urls"],
+                "container DAG run node API URLs do not match the supplied plan",
+            )
     return {
         "status": "VERIFIED",
         "schema_version": schema,
@@ -1351,7 +1814,12 @@ def verify_flowmesh_container_operation_dag_run(
         "task_result_count": len(rows),
         "plan_binding_checked": plan_dir is not None,
         "timing_recorded": True,
-        "telemetry_recording": "whitelisted-validated",
+        "telemetry_recording": (
+            "whitelisted-validated-v2"
+            if provenance_version == TELEMETRY_PROVENANCE_VERSION
+            else "whitelisted-validated-v1"
+        ),
+        "runtime_epoch_binding": runtime_integrity,
         "telemetry": summary["telemetry"],
         "eligible_for_scientific_claims": False,
     }
@@ -1363,6 +1831,9 @@ def run_flowmesh_container_operation_dag(
     output_dir: str | Path,
     client: FlowMeshClientProtocol,
     settings: FlowMeshSettings,
+    runtime_epoch_probe: Callable[
+        [Mapping[str, str], Sequence[Mapping[str, Any]]], Mapping[str, str]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Submit exactly one validated FlowMesh graph and verify all three tasks.
 
@@ -1390,6 +1861,11 @@ def run_flowmesh_container_operation_dag(
         validation.ok,
         "FlowMesh rejected the container DAG workflow: "
         + "; ".join(validation.errors),
+    )
+    probe = runtime_epoch_probe or _probe_container_runtime_epochs
+    runtime_epochs_before = _validate_runtime_epochs(
+        probe(plan["node_api_urls"], plan["operations"]),
+        plan["operations"],
     )
     submitted = client.submit(workflow)
     _require(
@@ -1435,6 +1911,7 @@ def run_flowmesh_container_operation_dag(
                 task_id=task_id,
                 selected_worker_id=identity.worker_id,
                 task_detail=task_detail,
+                expected_runtime_epochs=runtime_epochs_before,
             )
         )
     _require(
@@ -1446,6 +1923,17 @@ def run_flowmesh_container_operation_dag(
         "network_transfer": "network-transfer",
         "compute": "compute",
     }[row["operation_kind"]]))
+    runtime_epochs_after = _validate_runtime_epochs(
+        probe(plan["node_api_urls"], plan["operations"]),
+        plan["operations"],
+    )
+    runtime_binding = _runtime_epoch_binding(
+        plan_sha256=plan["plan_sha256"],
+        node_api_urls=plan["node_api_urls"],
+        operations=plan["operations"],
+        before=runtime_epochs_before,
+        after=runtime_epochs_after,
+    )
     summary = {
         "schema_version": FLOWMESH_CONTAINER_DAG_RUN_SCHEMA_VERSION,
         "status": "COMPLETE",
@@ -1456,6 +1944,7 @@ def run_flowmesh_container_operation_dag(
         "selected_worker": identity.to_public_dict(),
         "operation_keys": [row["operation_key"] for row in plan["operations"]],
         "execution_nodes": [row["execution_node_id"] for row in plan["operations"]],
+        "node_api_urls": plan["node_api_urls"],
         "task_result_count": len(task_results),
         "flowmesh_graph_dependencies": {
             "storage-read": [],
@@ -1468,6 +1957,7 @@ def run_flowmesh_container_operation_dag(
             "fields": dict(TELEMETRY_FIELD_PROVENANCE),
             "disclaimers": list(TELEMETRY_DISCLAIMERS),
         },
+        "runtime_epoch_binding": runtime_binding,
         "evidence_class": "orchestration-transport-compute-conformance",
         "llm_called": False,
         "semantic_task_quality_evaluated": False,

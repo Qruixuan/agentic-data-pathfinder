@@ -28,13 +28,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
-from .container_contract import CONTAINER_OPERATION_SCHEMA_VERSION
+from .container_contract import (
+    CONTAINER_NODE_RESULT_LEGACY_SCHEMA_VERSION,
+    CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+    CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION,
+    CONTAINER_OPERATION_SCHEMA_VERSION,
+)
 
 
 CONTAINER_NODE_API_VERSION = "pathfinder.container-node/v1alpha1"
-CONTAINER_NODE_RESULT_SCHEMA_VERSION = (
-    "pathfinder.container-node-operation-result/v1alpha1"
-)
 CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION = (
     "pathfinder.container-node-semantic-request/v1alpha1"
 )
@@ -46,6 +48,7 @@ _CHUNK_BYTES = 64 * 1024
 _MAX_JSON_BYTES = 2 * 1024 * 1024
 _MAX_SEMANTIC_PROMPT_BYTES = 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_RUNTIME_EPOCH = re.compile(r"[0-9a-f]{32}")
 
 
 class ContainerNodeError(ValueError):
@@ -68,6 +71,15 @@ def _text(value: Any, name: str) -> str:
 def _integer(value: Any, name: str) -> int:
     _require(type(value) is int and value >= 0, f"{name} must be non-negative")
     return value
+
+
+def _runtime_epoch(value: Any, name: str) -> str:
+    epoch = _text(value, name)
+    _require(
+        _RUNTIME_EPOCH.fullmatch(epoch) is not None,
+        f"{name} must be a lowercase runtime epoch",
+    )
+    return epoch
 
 
 def _fixture_block(key: str) -> bytes:
@@ -177,7 +189,7 @@ class ContainerNodeRuntime:
             "semantic allowed source containers contain duplicates",
         )
         self.runtime_epoch = uuid.uuid4().hex
-        self._caches: dict[str, _CacheState] = {}
+        self._caches: dict[tuple[str, str], _CacheState] = {}
         self._lock = threading.RLock()
         self._operation_condition = threading.Condition(self._lock)
         self._operation_request_sha256: dict[str, str] = {}
@@ -202,6 +214,9 @@ class ContainerNodeRuntime:
             "status": "ok",
             "node_id": self.node_id,
             "runtime_epoch": self.runtime_epoch,
+            "operation_result_schema_version": (
+                CONTAINER_NODE_RESULT_SCHEMA_VERSION
+            ),
             "payload_mode": "deterministic-size-preserving-fixture",
             "semantic_quality_enabled": self.enable_semantic_llm,
             "semantic_llm_configured": configured,
@@ -619,26 +634,38 @@ class ContainerNodeRuntime:
         _require(read == size, "fixture read did not return the exact logical bytes")
         return digest.hexdigest()
 
-    def _cache(self, operation: Mapping[str, Any]) -> tuple[str, _CacheState]:
+    def _cache(
+        self,
+        operation: Mapping[str, Any],
+    ) -> tuple[str, str, _CacheState]:
         binding = operation.get("cache_adapter")
         _require(isinstance(binding, Mapping), "operation has no cache adapter")
         cache_id = _text(binding.get("cache_id"), "cache_id")
+        raw_scope = operation.get("cache_scope_id")
+        if raw_scope is None:
+            # Historical v1alpha1 ledgers had no namespace.  Continue to read
+            # them for old smoke artifacts, but never confuse that behavior
+            # with the scoped semantics required by a newly frozen matrix.
+            scope_id = "legacy-unscoped-v1"
+        else:
+            scope_id = _text(raw_scope, "cache_scope_id")
         capacity = _integer(binding.get("capacity_bytes"), "cache capacity")
         initial_entries = binding.get("initial_entries")
         _require(isinstance(initial_entries, list), "cache initial_entries missing")
+        state_key = (cache_id, scope_id)
         with self._lock:
-            cache = self._caches.get(cache_id)
+            cache = self._caches.get(state_key)
             if cache is None:
                 cache = _CacheState(capacity, initial_entries)
-                self._caches[cache_id] = cache
+                self._caches[state_key] = cache
             _require(cache.capacity_bytes == capacity, "cache capacity changed")
-        return cache_id, cache
+        return cache_id, scope_id, cache
 
     def _send_payload(
         self,
         operation: Mapping[str, Any],
         size: int,
-    ) -> tuple[str, float]:
+    ) -> tuple[str, float, float, float, str]:
         destination = operation.get("destination_url")
         if destination is None:
             destination = (
@@ -684,14 +711,33 @@ class ContainerNodeRuntime:
             result = json.loads(response_bytes.decode("utf-8"))
             _require(result.get("sha256") == expected_digest, "sink digest mismatch")
             _require(result.get("bytes_received") == size, "sink byte count mismatch")
+            _require(
+                result.get("node_id") == operation.get("destination_node_id"),
+                "sink node identity mismatch",
+            )
+            destination_runtime_epoch = _runtime_epoch(
+                result.get("runtime_epoch"),
+                "sink runtime_epoch",
+            )
         finally:
             connection.close()
-        elapsed = (time.perf_counter_ns() - started) / 1_000_000.0
+        http_exchange_ms = (time.perf_counter_ns() - started) / 1_000_000.0
         target_ms = rtt_ms + size / bandwidth * 1000.0
-        remaining_ms = target_ms - elapsed
+        remaining_ms = target_ms - http_exchange_ms
+        shaping_sleep_ms = 0.0
         if remaining_ms > 0.0:
+            sleep_started = time.perf_counter_ns()
             time.sleep(remaining_ms / 1000.0)
-        return expected_digest, target_ms
+            shaping_sleep_ms = (
+                time.perf_counter_ns() - sleep_started
+            ) / 1_000_000.0
+        return (
+            expected_digest,
+            target_ms,
+            http_exchange_ms,
+            shaping_sleep_ms,
+            destination_runtime_epoch,
+        )
 
     def execute(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         """Execute once per operation key within this runtime epoch.
@@ -751,7 +797,10 @@ class ContainerNodeRuntime:
 
     def _execute_once(self, operation: Mapping[str, Any]) -> dict[str, Any]:
         _require(
-            operation.get("schema_version") == CONTAINER_OPERATION_SCHEMA_VERSION,
+            operation.get("schema_version") in {
+                CONTAINER_OPERATION_SCHEMA_VERSION,
+                CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION,
+            },
             "unsupported container operation schema_version",
         )
         _require(
@@ -780,9 +829,43 @@ class ContainerNodeRuntime:
         physical_bytes = 0
         cache_result = None
         cache_evictions: list[str] = []
+        cache_scope_id = None
         payload_sha256 = None
         shaped_target_ms = None
-        if kind in ("storage_read", "cache_read"):
+        network_http_exchange_ms = None
+        application_shaping_sleep_ms = None
+        destination_runtime_epoch = None
+        if kind == "storage_read":
+            assert fixture_path is not None
+            payload_sha256 = self._read_fixture(
+                fixture_path,
+                logical_bytes,
+            )
+            physical_bytes = logical_bytes
+        elif kind == "cache_read":
+            # A cache-hit branch is not entitled to read a local fixture just
+            # because a prior lookup once said "hit".  For current scoped
+            # ledgers, re-check the same cache namespace immediately before
+            # serving the data.  This makes a restart/lost entry fail closed
+            # instead of turning a stale hit into a successful local read.
+            if operation.get("cache_adapter") is None:
+                _require(
+                    operation.get("schema_version")
+                    == CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION,
+                    "cache_read requires a cache adapter in a scoped ledger",
+                )
+            else:
+                _, cache_scope_id, cache = self._cache(operation)
+                cache_key = (
+                    f"{operation['object_id']}:"
+                    f"{operation.get('representation_id')}"
+                )
+                with self._lock:
+                    _require(
+                        cache.lookup(cache_key),
+                        "cache_read is not backed by a current cache entry",
+                    )
+                cache_result = "hit"
             assert fixture_path is not None
             payload_sha256 = self._read_fixture(
                 fixture_path,
@@ -790,18 +873,21 @@ class ContainerNodeRuntime:
             )
             physical_bytes = logical_bytes
         elif kind == "network_transfer":
-            payload_sha256, shaped_target_ms = self._send_payload(
-                operation,
-                logical_bytes,
-            )
+            (
+                payload_sha256,
+                shaped_target_ms,
+                network_http_exchange_ms,
+                application_shaping_sleep_ms,
+                destination_runtime_epoch,
+            ) = self._send_payload(operation, logical_bytes)
             physical_bytes = logical_bytes
         elif kind == "cache_lookup":
-            _, cache = self._cache(operation)
+            _, cache_scope_id, cache = self._cache(operation)
             key = f"{operation['object_id']}:{operation.get('representation_id')}"
             with self._lock:
                 cache_result = "hit" if cache.lookup(key) else "miss"
         elif kind == "cache_insert":
-            _, cache = self._cache(operation)
+            _, cache_scope_id, cache = self._cache(operation)
             key = f"{operation['object_id']}:{operation.get('representation_id')}"
             with self._lock:
                 cache_evictions = cache.insert(key, logical_bytes)
@@ -822,6 +908,8 @@ class ContainerNodeRuntime:
             "operation_key": operation_key,
             "operation_kind": kind,
             "execution_node_id": self.node_id,
+            "runtime_epoch": self.runtime_epoch,
+            "destination_runtime_epoch": destination_runtime_epoch,
             "started_monotonic_ns": started_ns,
             "finished_monotonic_ns": finished_ns,
             "service_time_ms": (finished_ns - started_ns) / 1_000_000.0,
@@ -829,11 +917,14 @@ class ContainerNodeRuntime:
                 materialization_ms
             ),
             "application_shaping_target_ms": shaped_target_ms,
+            "network_http_exchange_ms": network_http_exchange_ms,
+            "application_shaping_sleep_ms": application_shaping_sleep_ms,
             "logical_bytes": logical_bytes,
             "physical_bytes": physical_bytes,
             "payload_sha256": payload_sha256,
             "cache_result": cache_result,
             "cache_evictions": cache_evictions,
+            "cache_scope_id": cache_scope_id,
             "infrastructure_operation_success": True,
             "semantic_task_quality_evaluated": False,
             "credentials_recorded": False,
@@ -916,7 +1007,9 @@ class ContainerNodeRequestHandler(BaseHTTPRequestHandler):
                 _require(actual == expected, "received payload digest mismatch")
                 self._write_json(200, {
                     "status": "complete",
+                    "api_version": CONTAINER_NODE_API_VERSION,
                     "node_id": self.server.runtime.node_id,
+                    "runtime_epoch": self.server.runtime.runtime_epoch,
                     "bytes_received": length,
                     "sha256": actual,
                     "credentials_recorded": False,
