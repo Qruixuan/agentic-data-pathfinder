@@ -55,6 +55,10 @@ from .contracts import (
 )
 from .preflight import describe_pinned_worker
 from .redaction import redact_secrets
+from .task_recovery_evidence import (
+    RESULT_UPLOAD_TIMEOUT_FAILURE_CLASS,
+    validate_result_upload_timeout_observation,
+)
 from .adapter import extract_api_executor_result
 
 
@@ -133,6 +137,12 @@ _RECOVERABLE_FAILURE_CLASS = (
 )
 _RECOVERY_IMPLEMENTATION_SCHEMA = (
     "pathfinder.flowmesh-container-matrix-infrastructure-recovery/v1alpha2"
+)
+_RESULT_UPLOAD_TIMEOUT_RECOVERABLE_FAILURE_CLASS = (
+    RESULT_UPLOAD_TIMEOUT_FAILURE_CLASS
+)
+_RESULT_UPLOAD_TIMEOUT_RECOVERY_IMPLEMENTATION_SCHEMA = (
+    "pathfinder.flowmesh-container-matrix-infrastructure-recovery/v1alpha3"
 )
 _REPLAY_ADOPTION_IMPLEMENTATION_SCHEMA = (
     "pathfinder.flowmesh-container-matrix-replay-result-adoption/v1alpha1"
@@ -1459,13 +1469,50 @@ def _normalize_task_evidence(
     }
 
 
+def _classify_recoverable_primary_failure(
+    task_id: str,
+    detail: str,
+    *,
+    result_upload_timeout_observation: Mapping[str, Any] | None = None,
+) -> str | None:
+    identity_provider_match = re.fullmatch(
+        rf"HTTP delivery for task {re.escape(task_id)} returned "
+        r"status 503: (.+)",
+        detail,
+    )
+    identity_provider_body: Any = None
+    if identity_provider_match is not None:
+        try:
+            identity_provider_body = json.loads(
+                identity_provider_match.group(1)
+            )
+        except json.JSONDecodeError:
+            identity_provider_body = None
+    if identity_provider_body == {
+        "detail": "Identity provider unavailable"
+    }:
+        return _RECOVERABLE_FAILURE_CLASS
+    if (
+        validate_result_upload_timeout_observation(
+            result_upload_timeout_observation,
+            expected_task_id=task_id,
+            expected_redacted_detail=detail,
+        )
+        is not None
+    ):
+        return _RESULT_UPLOAD_TIMEOUT_RECOVERABLE_FAILURE_CLASS
+    return None
+
+
 def _validate_recoverable_task_evidence(
     evidence: Sequence[Mapping[str, Any]],
     *,
     bound_task_ids: Sequence[str],
     failed_task_ids: Sequence[str],
     selected_worker_id: str,
-) -> None:
+    expected_failure_class: str | None = None,
+    result_upload_timeout_observation: Mapping[str, Any] | None = None,
+) -> str:
     _runner_require(
         len(evidence) == len(bound_task_ids)
         and [row.get("task_id") for row in evidence]
@@ -1484,6 +1531,7 @@ def _validate_recoverable_task_evidence(
         "SUCCESS",
         "SUCCEEDED",
     }
+    classified_failure: str | None = None
     for row in evidence:
         _runner_require(
             set(row)
@@ -1519,27 +1567,24 @@ def _validate_recoverable_task_evidence(
         )
         if attempts > 0:
             task_id = str(row["task_id"])
-            match = re.fullmatch(
-                rf"HTTP delivery for task {re.escape(task_id)} returned "
-                r"status 503: (.+)",
+            failure_class = _classify_recoverable_primary_failure(
+                task_id,
                 detail or "",
+                result_upload_timeout_observation=(
+                    result_upload_timeout_observation
+                ),
             )
-            body: Any = None
-            if match is not None:
-                try:
-                    body = json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    body = None
             _runner_require(
                 status == "FAILED"
                 and attempts == 1
                 and task_id in failed_task_ids
                 and assigned == selected_worker_id
                 and last_failed == selected_worker_id
-                and body == {"detail": "Identity provider unavailable"},
-                "an attempted task did not fail solely at the allowlisted "
-                "identity-provider delivery boundary",
+                and failure_class is not None,
+                "an attempted task did not fail solely at an allowlisted "
+                "delivery boundary",
             )
+            classified_failure = failure_class
             primary_failures.append(task_id)
         elif status == "FAILED":
             _runner_require(
@@ -1575,6 +1620,24 @@ def _validate_recoverable_task_evidence(
         set(failed_task_ids) == {primary, *dependency_failures},
         "Root-reported failed tasks differ from the classified failures",
     )
+    validated_failure_class = classified_failure
+    if (
+        expected_failure_class == _LEGACY_RECOVERABLE_FAILURE_CLASS
+        and classified_failure == _RECOVERABLE_FAILURE_CLASS
+    ):
+        # V1alpha1 stored a before-dispatch label for the same exact 503 task
+        # evidence.  Preserve offline readability without allowing builders
+        # to emit that superseded interpretation.
+        validated_failure_class = _LEGACY_RECOVERABLE_FAILURE_CLASS
+    _runner_require(
+        validated_failure_class is not None
+        and (
+            expected_failure_class is None
+            or validated_failure_class == expected_failure_class
+        ),
+        "infrastructure recovery failure classification changed",
+    )
+    return validated_failure_class
 
 
 def _recovery_schedule_safety_evidence(
@@ -1614,7 +1677,7 @@ def _recovery_schedule_safety_evidence(
         )
     except FlowMeshContainerMatrixRunError as exc:
         raise FlowMeshContainerMatrixRunError(
-            "identity-provider recovery requires the attempted task to map "
+            "infrastructure recovery requires the attempted task to map "
             "to the dependency-free zero-byte schedule control root"
         ) from exc
     schedule_key = str(primary_operation["operation_key"])
@@ -1630,7 +1693,7 @@ def _recovery_schedule_safety_evidence(
     _runner_require(
         len(schedule_candidates) == 1
         and schedule_candidates[0]["operation_key"] == schedule_key,
-        "identity-provider recovery requires one unique schedule control root",
+        "infrastructure recovery requires one unique schedule control root",
     )
 
     dependency_map = {
@@ -1663,7 +1726,7 @@ def _recovery_schedule_safety_evidence(
     downstream_keys = [key for key in operation_keys if key != schedule_key]
     _runner_require(
         all(descends_from_schedule(key) for key in downstream_keys),
-        "identity-provider recovery requires every other phase operation to "
+        "infrastructure recovery requires every other phase operation to "
         "be transitively downstream of the schedule control",
     )
     return {
@@ -1780,22 +1843,39 @@ def _validate_recovery_payload(
     schema = payload.get("recovery_implementation_schema")
     # Historical v1alpha1 entries used an empty Root dispatch snapshot as a
     # recovery premise.  Keep them readable, but the builder below emits only
-    # v1alpha2 evidence whose safety comes from the frozen DAG structure.
+    # v1alpha2/v1alpha3 evidence whose safety comes from the frozen DAG
+    # structure.  V1alpha3 distinguishes a Root result-upload read timeout
+    # from the earlier identity-provider failure class.
     legacy = schema == _LEGACY_RECOVERY_IMPLEMENTATION_SCHEMA
-    current = schema == _RECOVERY_IMPLEMENTATION_SCHEMA
-    expected_fields = (
-        legacy_fields
-        if legacy
-        else legacy_fields
-        | {
-            "root_dispatch_history_interpretation",
-            "schedule_root_safety_evidence",
-        }
+    identity_provider = schema == _RECOVERY_IMPLEMENTATION_SCHEMA
+    result_upload_timeout = (
+        schema == _RESULT_UPLOAD_TIMEOUT_RECOVERY_IMPLEMENTATION_SCHEMA
     )
+    current = identity_provider or result_upload_timeout
+    failure_class_by_schema = {
+        _LEGACY_RECOVERY_IMPLEMENTATION_SCHEMA: (
+            _LEGACY_RECOVERABLE_FAILURE_CLASS
+        ),
+        _RECOVERY_IMPLEMENTATION_SCHEMA: _RECOVERABLE_FAILURE_CLASS,
+        _RESULT_UPLOAD_TIMEOUT_RECOVERY_IMPLEMENTATION_SCHEMA: (
+            _RESULT_UPLOAD_TIMEOUT_RECOVERABLE_FAILURE_CLASS
+        ),
+    }
+    expected_failure_class = failure_class_by_schema.get(schema)
+    expected_fields = set(legacy_fields)
+    if current:
+        expected_fields.update(
+            {
+                "root_dispatch_history_interpretation",
+                "schedule_root_safety_evidence",
+            }
+        )
+    if result_upload_timeout:
+        expected_fields.add("primary_delivery_failure_evidence")
     evidence = payload.get("task_evidence")
     dispatched = payload.get("dispatched_task_ids")
     _runner_require(
-        (legacy or current)
+        expected_failure_class is not None
         and set(payload) == expected_fields
         and _recovery_identifier(payload.get("recovery_id"))
         == payload.get("recovery_id")
@@ -1803,12 +1883,7 @@ def _validate_recovery_payload(
         == payload.get("recovery_reason")
         and payload.get("retry_ordinal") == expected_retry_ordinal
         and expected_retry_ordinal >= 1
-        and payload.get("failure_class")
-        == (
-            _LEGACY_RECOVERABLE_FAILURE_CLASS
-            if legacy
-            else _RECOVERABLE_FAILURE_CLASS
-        )
+        and payload.get("failure_class") == expected_failure_class
         and re.fullmatch(
             r"[0-9a-f]{64}",
             str(payload.get("recovery_runner_module_sha256") or ""),
@@ -1852,12 +1927,44 @@ def _validate_recovery_payload(
         and payload.get("credentials_recorded") is False,
         "matrix infrastructure recovery payload is invalid",
     )
-    _validate_recoverable_task_evidence(
+    classified_failure = _validate_recoverable_task_evidence(
         evidence,
         bound_task_ids=payload["bound_task_ids"],
         failed_task_ids=payload["failed_task_ids"],
         selected_worker_id=str(payload["selected_worker_id"]),
+        expected_failure_class=expected_failure_class,
+        result_upload_timeout_observation=(
+            payload.get("primary_delivery_failure_evidence")
+            if result_upload_timeout
+            else None
+        ),
     )
+    _runner_require(
+        classified_failure == expected_failure_class,
+        "matrix infrastructure recovery payload is invalid",
+    )
+    if result_upload_timeout:
+        _runner_require(
+            failure_entry.get("phase") == "unconditional",
+            "result-upload timeout recovery supports only an "
+            "unconditional phase",
+        )
+        primary_rows = [
+            row for row in evidence if row.get("attempts", 0) > 0
+        ]
+        _runner_require(
+            len(primary_rows) == 1,
+            "matrix result-upload timeout evidence has no unique primary",
+        )
+        _runner_require(
+            validate_result_upload_timeout_observation(
+                payload.get("primary_delivery_failure_evidence"),
+                expected_task_id=str(primary_rows[0]["task_id"]),
+                expected_redacted_detail=str(primary_rows[0]["detail"]),
+            )
+            is not None,
+            "matrix result-upload timeout evidence is invalid",
+        )
     if current:
         trial_key = str(failure_entry.get("trial_key"))
         phase = str(failure_entry.get("phase"))
@@ -1919,9 +2026,53 @@ def _build_recovery_payload(
         "FlowMesh failure is not an allowlisted terminal workflow",
     )
     evidence: list[dict[str, Any]] = []
+    result_upload_observations: dict[str, dict[str, Any]] = {}
+    recovery_describe = getattr(
+        client,
+        "describe_task_recovery_evidence",
+        None,
+    )
     for task_id in task_ids:
         try:
-            detail = client.describe_task_failure(task_id)
+            if callable(recovery_describe):
+                recovery_detail = recovery_describe(task_id)
+                _runner_require(
+                    isinstance(recovery_detail, Mapping)
+                    and set(recovery_detail)
+                    == {
+                        "task_evidence",
+                        "result_upload_read_timeout_observation",
+                    }
+                    and isinstance(
+                        recovery_detail.get("task_evidence"), Mapping
+                    ),
+                    "FlowMesh returned invalid recovery-only task evidence",
+                )
+                detail = recovery_detail["task_evidence"]
+                observation = recovery_detail[
+                    "result_upload_read_timeout_observation"
+                ]
+                if observation is not None:
+                    redacted_detail = detail.get("detail")
+                    checked_observation = (
+                        validate_result_upload_timeout_observation(
+                            observation,
+                            expected_task_id=task_id,
+                            expected_redacted_detail=(
+                                redacted_detail
+                                if isinstance(redacted_detail, str)
+                                else ""
+                            ),
+                        )
+                    )
+                    _runner_require(
+                        checked_observation is not None,
+                        "FlowMesh returned invalid result-upload timeout "
+                        "observation",
+                    )
+                    result_upload_observations[task_id] = checked_observation
+            else:
+                detail = client.describe_task_failure(task_id)
         except Exception as exc:
             raise FlowMeshContainerMatrixRunError(
                 "cannot read complete task evidence for infrastructure "
@@ -1932,11 +2083,46 @@ def _build_recovery_payload(
             "FlowMesh returned no task evidence for infrastructure recovery",
         )
         evidence.append(_normalize_task_evidence(task_id, detail))
-    _validate_recoverable_task_evidence(
+    attempted_task_ids = [
+        str(row["task_id"])
+        for row in evidence
+        if row.get("attempts", 0) > 0
+    ]
+    primary_observation = (
+        result_upload_observations.get(attempted_task_ids[0])
+        if len(attempted_task_ids) == 1
+        else None
+    )
+    failure_class = _validate_recoverable_task_evidence(
         evidence,
         bound_task_ids=task_ids,
         failed_task_ids=terminal.failed_task_ids,
         selected_worker_id=str(contract["selected_worker"]["worker_id"]),
+        result_upload_timeout_observation=primary_observation,
+    )
+    _runner_require(
+        (
+            failure_class
+            == _RESULT_UPLOAD_TIMEOUT_RECOVERABLE_FAILURE_CLASS
+            and len(result_upload_observations) == 1
+            and set(result_upload_observations) == set(attempted_task_ids)
+        )
+        or (
+            failure_class == _RECOVERABLE_FAILURE_CLASS
+            and not result_upload_observations
+        ),
+        "recovery-only task evidence disagrees with the failure class",
+    )
+    if failure_class == _RESULT_UPLOAD_TIMEOUT_RECOVERABLE_FAILURE_CLASS:
+        _runner_require(
+            failure_entry.get("phase") == "unconditional",
+            "result-upload timeout recovery supports only an "
+            "unconditional phase",
+        )
+    recovery_schema = (
+        _RESULT_UPLOAD_TIMEOUT_RECOVERY_IMPLEMENTATION_SCHEMA
+        if failure_class == _RESULT_UPLOAD_TIMEOUT_RECOVERABLE_FAILURE_CLASS
+        else _RECOVERY_IMPLEMENTATION_SCHEMA
     )
     safety_evidence = _recovery_schedule_safety_evidence(
         phase_operations,
@@ -1948,8 +2134,8 @@ def _build_recovery_payload(
         "recovery_id": recovery_request["recovery_id"],
         "recovery_reason": recovery_request["recovery_reason"],
         "retry_ordinal": retry_ordinal,
-        "failure_class": _RECOVERABLE_FAILURE_CLASS,
-        "recovery_implementation_schema": _RECOVERY_IMPLEMENTATION_SCHEMA,
+        "failure_class": failure_class,
+        "recovery_implementation_schema": recovery_schema,
         "recovery_runner_module_sha256": (
             _recovery_runner_module_sha256()
         ),
@@ -1980,6 +2166,14 @@ def _build_recovery_payload(
         "recovery_evidence_validated": True,
         "credentials_recorded": False,
     }
+    if failure_class == _RESULT_UPLOAD_TIMEOUT_RECOVERABLE_FAILURE_CLASS:
+        _runner_require(
+            primary_observation is not None,
+            "result-upload recovery has no unique primary failure",
+        )
+        payload["primary_delivery_failure_evidence"] = dict(
+            primary_observation
+        )
     _validate_recovery_payload(
         payload,
         contract=contract,

@@ -10,6 +10,10 @@ from .contracts import (
     WorkflowValidation,
 )
 from .redaction import redact_secrets
+from .task_recovery_evidence import (
+    observe_result_upload_read_timeout,
+    result_upload_timeout_redacted_detail,
+)
 
 
 def _optional_text(value: Any) -> str | None:
@@ -142,17 +146,12 @@ class SdkFlowMeshClient:
     def retrieve_result(self, task_id: str) -> dict[str, Any]:
         return self._client.results.retrieve(task_id)
 
-    def describe_task_failure(self, task_id: str) -> dict[str, Any] | None:
-        """Return read-only terminal task metadata and failure detail.
+    def _read_task_detail(
+        self,
+        task_id: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Read metadata and retain pre-redaction detail in this stack frame."""
 
-        Uses the public ``tasks.retrieve`` resource, which on flowmesh-sdk
-        0.1.8rc1 is a plain ``GET /tasks/{id}``: it never stops, retries, or
-        otherwise mutates the task. If an SDK does not expose that public
-        method this raises rather than reaching for a private path; the caller
-        turns that into "no additional detail available". Everything echoed
-        back is redacted, because a worker-side error string can quote a
-        request header or a signed URL.
-        """
         tasks = getattr(self._client, "tasks", None)
         retrieve = getattr(tasks, "retrieve", None)
         if not callable(retrieve):
@@ -162,9 +161,14 @@ class SdkFlowMeshClient:
             )
         info = retrieve(task_id)
         status = getattr(info, "status", None)
-        detail = _optional_text(
+        pre_redaction_detail = _optional_text(
             getattr(info, "error", None)
         ) or _optional_text(getattr(info, "last_error", None))
+        redacted_detail = (
+            redact_secrets(pre_redaction_detail)
+            if pre_redaction_detail is not None
+            else None
+        )
         payload = {
             "task_status": str(getattr(status, "value", status) or "").upper()
             or None,
@@ -176,11 +180,61 @@ class SdkFlowMeshClient:
             "last_failed_worker": _optional_text(
                 getattr(info, "last_failed_worker", None)
             ),
-            "detail": redact_secrets(detail) if detail else None,
+            "detail": redacted_detail,
         }
         if not any(value is not None for value in payload.values()):
-            return None
+            return None, pre_redaction_detail
+        return payload, pre_redaction_detail
+
+    def describe_task_failure(self, task_id: str) -> dict[str, Any] | None:
+        """Return read-only terminal task metadata and redacted detail.
+
+        Uses the public ``tasks.retrieve`` resource, which on flowmesh-sdk
+        0.1.8rc1 is a plain ``GET /tasks/{id}``: it never stops, retries, or
+        otherwise mutates the task. If an SDK does not expose that public
+        method this raises rather than reaching for a private path; the caller
+        turns that into "no additional detail available". Everything echoed
+        back is redacted, because a worker-side error string can quote a
+        request header or a signed URL.
+        """
+
+        payload, _pre_redaction_detail = self._read_task_detail(task_id)
         return payload
+
+    def describe_task_recovery_evidence(
+        self,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        """Return redacted task metadata plus sanitized recovery evidence.
+
+        The normalized pre-redaction worker error is parsed and hashed
+        transiently here, before redaction could collapse two distinct
+        secret-shaped host strings. It is never returned. The optional
+        observation contains no endpoint text or credential value.
+        """
+
+        payload, pre_redaction_detail = self._read_task_detail(task_id)
+        if payload is None:
+            return None
+        observation = (
+            observe_result_upload_read_timeout(
+                task_id,
+                pre_redaction_detail,
+            )
+            if pre_redaction_detail is not None
+            and payload["detail"] is not None
+            else None
+        )
+        if observation is not None:
+            payload = dict(payload)
+            payload["detail"] = result_upload_timeout_redacted_detail(
+                task_id,
+                float(observation["read_timeout_seconds"]),
+            )
+        return {
+            "task_evidence": payload,
+            "result_upload_read_timeout_observation": observation,
+        }
 
     def validate(self, workflow: Mapping[str, Any]) -> WorkflowValidation:
         """Validate a workflow through FlowMesh without submitting it.

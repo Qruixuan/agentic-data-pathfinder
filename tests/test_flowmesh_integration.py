@@ -658,6 +658,128 @@ class WorkerListFallbackTest(unittest.TestCase):
         self.assertIn("no public tasks.retrieve", str(context.exception))
 
 
+class SdkTaskRecoveryEvidenceTest(unittest.TestCase):
+    @staticmethod
+    def _client(raw_detail: str) -> SdkFlowMeshClient:
+        info = types.SimpleNamespace(
+            status=types.SimpleNamespace(value="FAILED"),
+            error=raw_detail,
+            last_error=None,
+            attempts=1,
+            max_attempts=3,
+            assigned_worker="wkr-recovery",
+            last_failed_worker="wkr-recovery",
+        )
+        client = SdkFlowMeshClient.__new__(SdkFlowMeshClient)
+        client._client = types.SimpleNamespace(
+            tasks=types.SimpleNamespace(
+                retrieve=lambda _task_id: info,
+            )
+        )
+        return client
+
+    def test_valid_raw_timeout_is_sanitized_before_return(self) -> None:
+        task_id = "tsk-result-upload"
+        raw_detail = (
+            f"Failed to deliver task {task_id} result to "
+            "http://192.0.2.10:31800/api/v1/results: "
+            "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+            "Read timed out. (read timeout=30.0)"
+        )
+        client = self._client(raw_detail)
+        with patch.dict(
+            os.environ,
+            {"FLOWMESH_API_KEY": "192.0.2.10"},
+        ):
+            result = client.describe_task_recovery_evidence(task_id)
+        self.assertIsNotNone(result)
+        assert result is not None
+        task_evidence = result["task_evidence"]
+        observation = result[
+            "result_upload_read_timeout_observation"
+        ]
+        self.assertIn(
+            "<worker-reported-results-endpoint>",
+            task_evidence["detail"],
+        )
+        self.assertIsInstance(observation, dict)
+        self.assertEqual(
+            sha256(raw_detail.encode("utf-8")).hexdigest(),
+            observation["pre_redaction_detail_sha256"],
+        )
+        self.assertEqual(
+            sha256(task_evidence["detail"].encode("utf-8")).hexdigest(),
+            observation["redacted_detail_sha256"],
+        )
+        self.assertEqual(
+            "not-verified",
+            observation[
+                "worker_result_upload_endpoint_matches_configured_root"
+            ],
+        )
+        serialized = json.dumps(result, sort_keys=True)
+        self.assertNotIn("192.0.2.10", serialized)
+        self.assertNotIn(raw_detail, serialized)
+
+    def test_raw_host_mismatch_is_not_hidden_by_redaction_collapse(
+        self,
+    ) -> None:
+        task_id = "tsk-result-upload-mismatch"
+        raw_detail = (
+            f"Failed to deliver task {task_id} result to "
+            "http://left.example:31800/api/v1/results: "
+            "HTTPConnectionPool(host='right.example', port=31800): "
+            "Read timed out. (read timeout=30.0)"
+        )
+        client = self._client(raw_detail)
+        with patch.dict(
+            os.environ,
+            {
+                "FLOWMESH_API_KEY": "left.example",
+                "PATHFINDER_DATA_AGENT_TOKEN": "right.example",
+            },
+        ):
+            result = client.describe_task_recovery_evidence(task_id)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(
+            2,
+            result["task_evidence"]["detail"].count("<redacted>"),
+        )
+        self.assertIsNone(
+            result["result_upload_read_timeout_observation"]
+        )
+        serialized = json.dumps(result, sort_keys=True)
+        self.assertNotIn("left.example", serialized)
+        self.assertNotIn("right.example", serialized)
+
+    def test_pre_redaction_detail_keeps_historical_whitespace_normalization(
+        self,
+    ) -> None:
+        task_id = "tsk-result-upload-whitespace"
+        normalized = (
+            f"Failed to deliver task {task_id} result to "
+            "http://192.0.2.10:31800/api/v1/results: "
+            "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+            "Read timed out. (read timeout=30.0)"
+        )
+        client = self._client(f"  {normalized}\n")
+        diagnostic = client.describe_task_failure(task_id)
+        self.assertIsNotNone(diagnostic)
+        assert diagnostic is not None
+        self.assertEqual(normalized, diagnostic["detail"])
+        recovery = client.describe_task_recovery_evidence(task_id)
+        self.assertIsNotNone(recovery)
+        assert recovery is not None
+        observation = recovery[
+            "result_upload_read_timeout_observation"
+        ]
+        self.assertEqual(
+            sha256(normalized.encode("utf-8")).hexdigest(),
+            observation["pre_redaction_detail_sha256"],
+        )
+
+
 class EndpointSanitizationTest(unittest.TestCase):
     def test_user_info_path_and_query_are_never_echoed(self) -> None:
         self.assertEqual(

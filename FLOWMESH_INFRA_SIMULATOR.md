@@ -490,20 +490,49 @@ submitting a duplicate. The first ordinary failure also stops the matrix;
 later trials are never skipped over.
 
 A narrow terminal-failure recovery path is supported without restarting the
-containers. Each trial phase may use it at most once. It applies only when
-the complete task evidence shows exactly one attempted HTTP 503 delivery
-failure with the body `{"detail":"Identity provider unavailable"}` and all
-other task evidence is pristine dependency fallout or pending. The failed task
-ID is bound by position to the exact frozen phase operation and must be the
-unique dependency-free, zero-byte `schedule` control root. Every other phase
-operation must be transitively downstream of that root, so no physical
-operation can be duplicated by the replacement submission. The Root's
-nullable `dispatched_tasks` snapshot is preserved only as diagnostic evidence;
-an empty value is not interpreted as proof that nothing executed. The worker
-identity, Root endpoint, all frozen inputs, and all eight runtime epochs must
-still match the original run contract. A different attempted operation,
-another independent phase root, another error, or a second recovery of the
-same trial phase is refused.
+containers. An eligible phase may use it at most once. Two separately
+versioned failure classes are allowlisted:
+
+- v1alpha2 accepts exactly one attempted HTTP 503 delivery failure whose body
+  is `{"detail":"Identity provider unavailable"}`;
+- v1alpha3 accepts exactly one worker result-upload read timeout in an
+  unconditional phase. Conditional A/B phases are refused because replay
+  result adoption does not support them. Its complete error must have the
+  anchored form `Failed to deliver task <task-id> result to <URL>: <pool>:
+  Read timed out. (read timeout=<seconds>)`. The task ID must be the bound
+  task, the URL must be credential-free HTTP or HTTPS with the
+  exact path `/api/v1/results`, the `HTTPConnectionPool` or
+  `HTTPSConnectionPool` type must match the URL scheme, its host and port must
+  match the URL's canonical ASCII DNS/IP host and effective port, and the
+  timeout must be finite and positive. The whitespace-normalized SDK error is
+  parsed and hashed transiently inside the SDK adapter before redaction and is
+  never returned to the runner or persisted. Its authorization records the
+  failure stage, unknown Root-acknowledgement state, timeout value,
+  worker-reported endpoint identity digest, pre-redaction-detail digest, and
+  persisted redacted-detail digest; it does not duplicate endpoint text into
+  structured evidence. The evidence explicitly records
+  `results_endpoint_evidence_source` as
+  `worker-reported-error-detail`, and records that correspondence between that
+  internal root-mounted `/api/v1/results` URL and the configured path-mounted
+  public Root endpoint is `not-verified`. Offline verification binds the
+  digests and sanitized observation but cannot reconstruct the deliberately
+  absent pre-redaction detail.
+
+In both cases all other task evidence must be pristine dependency fallout or
+pending. The failed task ID is bound by position to the exact frozen phase
+operation and must be the unique dependency-free, zero-byte `schedule`
+control root. Every other phase operation must be transitively downstream of
+that root, so no physical operation can be duplicated by the replacement
+submission. The Root's nullable `dispatched_tasks` snapshot is preserved only
+as diagnostic evidence; an empty value is not interpreted as proof that
+nothing executed. The worker identity, Root endpoint, all frozen inputs, and
+all eight runtime epochs must still match the original run contract. A
+different attempted operation, malformed or credential-bearing URL,
+non-canonical/Unicode/ambiguous authority, host or port disagreement,
+non-positive timeout, multiple attempts, another independent phase root,
+another error, or a second recovery of the same trial phase is refused.
+Historical v1alpha1 and v1alpha2 authorization evidence remains verifiable
+offline.
 
 Recovery is never automatic. First read the digest of the terminal failure:
 
@@ -525,12 +554,14 @@ PY
 )"
 ```
 
-After the external identity-provider incident is resolved, repeat the original
-run command with these three additional arguments:
+After the external incident is resolved, repeat the original run command with
+these three additional arguments. Use a failure-specific ID and reason; for a
+Root result-upload timeout, for example:
 
 ```bash
-  --recovery-id "idp-recovery-001" \
-  --recovery-reason "Root identity provider restored by the operator" \
+  --recovery-id "result-upload-timeout-recovery-001" \
+  --recovery-reason \
+    "Root result delivery is healthy after the observed read timeout" \
   --recover-failed-entry-sha256 "$PF_FAILED_ENTRY_SHA256"
 ```
 

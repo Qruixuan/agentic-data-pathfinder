@@ -224,3 +224,19 @@ class FlowMeshClientProtocol(Protocol):
 
     def retrieve_result(self, task_id: str) -> dict[str, Any]:
         """Retrieve one completed task result."""
+
+
+class FlowMeshTaskRecoveryEvidenceProtocol(Protocol):
+    """Optional capability for pre-redaction recovery classification."""
+
+    def describe_task_recovery_evidence(
+        self,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        """Return redacted task metadata and sanitized retry evidence.
+
+        Implementations may inspect normalized pre-redaction error text
+        transiently, but must not return or persist it. Keeping this separate
+        preserves compatibility for FlowMesh clients that do not participate
+        in matrix recovery.
+        """

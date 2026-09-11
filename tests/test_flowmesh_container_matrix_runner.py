@@ -40,6 +40,11 @@ from pathfinder.integrations.flowmesh.container_matrix_runner import (
     run_flowmesh_container_matrix,
     verify_flowmesh_container_matrix_run,
 )
+from pathfinder.integrations.flowmesh.redaction import redact_secrets
+from pathfinder.integrations.flowmesh.task_recovery_evidence import (
+    observe_result_upload_read_timeout,
+    result_upload_timeout_redacted_detail,
+)
 from pathfinder.integrations.flowmesh.contracts import (
     FlowMeshSettings,
     FlowMeshWorkerIdentity,
@@ -239,6 +244,8 @@ class FakeMatrixFlowMeshClient:
         interrupt_wait_trial: str | None = None,
         terminal_failure_trial: str | None = None,
         recoverable_terminal_failure_trial: str | None = None,
+        recoverable_failure_kind: str = "identity-provider",
+        recoverable_failure_phase: str | None = None,
         recoverable_primary_task_index: int = 0,
         recoverable_dispatched_task_ids: tuple[str, ...] | None = (),
         replay_operation_key: str | None = None,
@@ -257,6 +264,8 @@ class FakeMatrixFlowMeshClient:
         self.recoverable_terminal_failure_trial = (
             recoverable_terminal_failure_trial
         )
+        self.recoverable_failure_kind = recoverable_failure_kind
+        self.recoverable_failure_phase = recoverable_failure_phase
         self.recoverable_primary_task_index = recoverable_primary_task_index
         self.recoverable_dispatched_task_ids = (
             recoverable_dispatched_task_ids
@@ -271,6 +280,7 @@ class FakeMatrixFlowMeshClient:
         self.results: dict[str, dict[str, Any]] = {}
         self.task_workers: dict[str, str] = {}
         self.workflow_trials: dict[str, str] = {}
+        self.workflow_phases: dict[str, str] = {}
         self.workflow_task_ids: dict[str, tuple[str, ...]] = {}
         self.recoverable_terminals: dict[str, TerminalWorkflow] = {}
         self.failure_details: dict[str, dict[str, Any]] = {}
@@ -425,6 +435,11 @@ class FakeMatrixFlowMeshClient:
         )
         self.workflows.append(copied)
         self.workflow_trials[workflow_id] = trial_key
+        self.workflow_phases[workflow_id] = str(
+            copied["metadata"]["annotations"]["custom"][
+                "pathfinder_matrix_phase"
+            ]
+        )
         self.workflow_task_ids[workflow_id] = task_ids
         self.active_workflow = workflow_id
         self.maximum_active_workflows = max(
@@ -474,6 +489,11 @@ class FakeMatrixFlowMeshClient:
             )
         if (
             trial_key == self.recoverable_terminal_failure_trial
+            and (
+                self.recoverable_failure_phase is None
+                or self.workflow_phases[workflow_id]
+                == self.recoverable_failure_phase
+            )
             and not self._recoverable_failure_emitted
         ):
             self._recoverable_failure_emitted = True
@@ -481,16 +501,29 @@ class FakeMatrixFlowMeshClient:
             primary_index = self.recoverable_primary_task_index
             primary = task_ids[primary_index]
             failed_ids = [primary]
+            if self.recoverable_failure_kind == "identity-provider":
+                primary_detail = (
+                    f"HTTP delivery for task {primary} returned status 503: "
+                    '{"detail":"Identity provider unavailable"}'
+                )
+                terminal_detail = "root-reported identity-provider failure"
+            elif self.recoverable_failure_kind == "result-upload-timeout":
+                primary_detail = (
+                    f"Failed to deliver task {primary} result to "
+                    "http://192.0.2.10:31800/api/v1/results: "
+                    "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+                    "Read timed out. (read timeout=30.0)"
+                )
+                terminal_detail = "root-reported result-upload timeout"
+            else:
+                raise AssertionError("unsupported recoverable failure kind")
             self.failure_details[primary] = {
                 "task_status": "FAILED",
                 "attempts": 1,
                 "max_attempts": 3,
                 "assigned_worker": self.worker_id,
                 "last_failed_worker": self.worker_id,
-                "detail": (
-                    f"HTTP delivery for task {primary} returned status 503: "
-                    '{"detail":"Identity provider unavailable"}'
-                ),
+                "detail": primary_detail,
             }
             for index, task_id in enumerate(task_ids):
                 if task_id == primary:
@@ -519,7 +552,7 @@ class FakeMatrixFlowMeshClient:
                 status="FAILED",
                 failed_task_ids=tuple(failed_ids),
                 cancelled_task_ids=(),
-                detail="root-reported identity-provider failure",
+                detail=terminal_detail,
                 dispatched_task_ids=self.recoverable_dispatched_task_ids,
             )
             self.recoverable_terminals[workflow_id] = terminal
@@ -536,6 +569,37 @@ class FakeMatrixFlowMeshClient:
         return {
             "task_status": "DONE",
             "assigned_worker": self.task_workers[task_id],
+        }
+
+    def describe_task_recovery_evidence(
+        self,
+        task_id: str,
+    ) -> dict[str, Any]:
+        raw = self.describe_task_failure(task_id)
+        task_evidence = dict(raw)
+        raw_detail = raw.get("detail")
+        redacted_detail = (
+            redact_secrets(raw_detail)
+            if isinstance(raw_detail, str) and raw_detail
+            else None
+        )
+        task_evidence["detail"] = redacted_detail
+        observation = (
+            observe_result_upload_read_timeout(task_id, raw_detail)
+            if isinstance(raw_detail, str)
+            and isinstance(redacted_detail, str)
+            else None
+        )
+        if observation is not None:
+            task_evidence["detail"] = (
+                result_upload_timeout_redacted_detail(
+                    task_id,
+                    float(observation["read_timeout_seconds"]),
+                )
+            )
+        return {
+            "task_evidence": task_evidence,
+            "result_upload_read_timeout_observation": observation,
         }
 
 
@@ -699,6 +763,43 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
             for key, value in failed_client.failure_details.items()
         }
         return client
+
+    def _result_upload_timeout_failure(
+        self,
+        *,
+        output: Path,
+        primary_task_index: int = 0,
+        target_trial: str | None = None,
+        target_phase: str | None = None,
+    ) -> tuple[FakeMatrixFlowMeshClient, str, str, str]:
+        selected_trial = target_trial or next(
+            str(row["trial_key"])
+            for row in self.wrappers[1:]
+            if row["design_id"] not in {"D3", "D7"}
+        )
+        client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=selected_trial,
+            recoverable_failure_kind="result-upload-timeout",
+            recoverable_failure_phase=target_phase,
+            recoverable_primary_task_index=primary_task_index,
+        )
+        with self.assertRaises(Exception):
+            self._run(client, output=output)
+        journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        primary_task_id = next(
+            task_id
+            for task_id, detail in client.failure_details.items()
+            if detail["attempts"] == 1
+        )
+        return (
+            client,
+            str(journal[-1]["entry_sha256"]),
+            selected_trial,
+            primary_task_id,
+        )
 
     def _replay_failed_recovery(
         self,
@@ -1214,6 +1315,770 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
             )
         self.assertEqual("VERIFIED", verified["status"])
         self.assertEqual(1, verified["infrastructure_recovery_count"])
+
+    def test_result_upload_timeout_recovery_adopts_schedule_replay(
+        self,
+    ) -> None:
+        output = self.root / "recover-result-upload-timeout"
+        (
+            failed_client,
+            failed_digest,
+            target_trial,
+            _primary_task_id,
+        ) = self._result_upload_timeout_failure(output=output)
+        recovery_client = self._fresh_recovery_client(failed_client)
+        recovery_client.replay_operation_key = next(
+            str(row["operation_key"])
+            for row in self.operations
+            if row["trial_key"] == target_trial
+            and row["operation_id"] == "schedule"
+        )
+
+        with self.assertRaisesRegex(Exception, "operation was replayed"):
+            self._run(
+                recovery_client,
+                output=output,
+                recovery_id="result-upload-timeout-recovery-001",
+                recovery_reason=(
+                    "Authorize one retry after the Root result upload "
+                    "timed out."
+                ),
+                recover_failed_entry_sha256=failed_digest,
+            )
+
+        journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        authorization = next(
+            row
+            for row in journal
+            if row["state"] == "INFRASTRUCTURE_RECOVERY_AUTHORIZED"
+        )
+        self.assertEqual(
+            "pathfinder.flowmesh-container-matrix-infrastructure-recovery/"
+            "v1alpha3",
+            authorization["payload"]["recovery_implementation_schema"],
+        )
+        self.assertEqual(
+            "flowmesh-result-upload-read-timeout-at-safe-schedule-root",
+            authorization["payload"]["failure_class"],
+        )
+        self.assertEqual(
+            authorization["payload"]["bound_task_ids"][0],
+            authorization["payload"]["schedule_root_safety_evidence"][
+                "primary_failed_task_id"
+            ],
+        )
+        delivery = authorization["payload"][
+            "primary_delivery_failure_evidence"
+        ]
+        self.assertEqual(
+            {
+                "schema_version",
+                "failure_class",
+                "stage",
+                "root_result_acknowledgement",
+                "task_id",
+                "read_timeout_seconds",
+                "results_endpoint_identity_scheme",
+                "results_endpoint_identity_sha256",
+                "results_endpoint_evidence_source",
+                "worker_result_upload_endpoint_matches_configured_root",
+                "pre_redaction_detail_sha256",
+                "redacted_detail_sha256",
+                "pre_redaction_detail_persisted",
+                "pre_redaction_detail_digest_offline_reconstructible",
+            },
+            set(delivery),
+        )
+        self.assertEqual(
+            "worker-to-root-result-upload",
+            delivery["stage"],
+        )
+        self.assertEqual(
+            "unknown-after-read-timeout",
+            delivery["root_result_acknowledgement"],
+        )
+        self.assertEqual(30.0, delivery["read_timeout_seconds"])
+        self.assertEqual(
+            "worker-reported-error-detail",
+            delivery["results_endpoint_evidence_source"],
+        )
+        self.assertEqual(
+            "not-verified",
+            delivery[
+                "worker_result_upload_endpoint_matches_configured_root"
+            ],
+        )
+        self.assertFalse(delivery["pre_redaction_detail_persisted"])
+        self.assertFalse(
+            delivery[
+                "pre_redaction_detail_digest_offline_reconstructible"
+            ]
+        )
+        self.assertNotIn("192.0.2.10", json.dumps(delivery))
+
+        authorization_index = journal.index(authorization)
+        tampered_values = {
+            "pre_redaction_detail_sha256": "not-a-digest",
+            "redacted_detail_sha256": "0" * 64,
+            "results_endpoint_evidence_source": "configured-root",
+            "worker_result_upload_endpoint_matches_configured_root": (
+                "verified"
+            ),
+        }
+        for field, tampered_value in tampered_values.items():
+            with self.subTest(tampered_delivery_field=field):
+                tampered_payload = json.loads(
+                    json.dumps(authorization["payload"])
+                )
+                tampered_payload["primary_delivery_failure_evidence"][
+                    field
+                ] = tampered_value
+                with self.assertRaisesRegex(
+                    Exception,
+                    "allowlisted delivery boundary|"
+                    "result-upload timeout evidence",
+                ):
+                    matrix_runner_module._validate_recovery_payload(
+                        tampered_payload,
+                        contract=_read_json(
+                            output
+                            / "flowmesh-container-matrix-run-contract.json"
+                        ),
+                        failure_entry=journal[authorization_index - 1],
+                        bound_payload=(
+                            journal[authorization_index - 2]["payload"]
+                        ),
+                        failure_document=_read_json(
+                            output
+                            / "flowmesh-container-matrix-failure.json"
+                        ),
+                        expected_retry_ordinal=1,
+                    )
+
+        replay_failure_digest = str(journal[-1]["entry_sha256"])
+        recovered_bound = journal[-2]["payload"]
+        recovery_client.recoverable_terminals[
+            str(recovered_bound["workflow_id"])
+        ] = TerminalWorkflow(
+            workflow_id=str(recovered_bound["workflow_id"]),
+            status="DONE",
+            dispatched_task_ids=(),
+        )
+        adopted = adopt_flowmesh_container_matrix_replay_results(
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+            run_dir=output,
+            run_id="formal-matrix-runner-test-v1",
+            client=recovery_client,
+            settings=self.settings,
+            adoption_id="result-upload-schedule-replay-adoption-001",
+            adoption_reason=(
+                "Adopt the schedule result from the completed recovery "
+                "workflow."
+            ),
+            adopt_failed_entry_sha256=replay_failure_digest,
+            runtime_epoch_probe=_EpochProbe(recovery_client.epochs),
+        )
+        self.assertEqual("REPLAY_RESULTS_ADOPTED", adopted["status"])
+        self.assertEqual(target_trial, adopted["trial_key"])
+        self.assertFalse(adopted["workflow_submitted"])
+
+        completed = self._run(
+            FakeMatrixFlowMeshClient(cache_outcomes=self.cache_outcomes),
+            output=output,
+        )
+        self.assertEqual("COMPLETE", completed["status"])
+        self.assertEqual(1, completed["infrastructure_recovery_count"])
+        self.assertEqual(1, completed["replay_result_adoption_count"])
+        verified = verify_flowmesh_container_matrix_run(
+            output,
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+        )
+        self.assertEqual("VERIFIED", verified["status"])
+
+    def test_result_upload_timeout_parser_accepts_matching_https_endpoint(
+        self,
+    ) -> None:
+        task_id = "tsk-result-upload-https"
+        detail = (
+            f"Failed to deliver task {task_id} result to "
+            "https://root.example.test/api/v1/results: "
+            "HTTPSConnectionPool(host='root.example.test', port=443): "
+            "Read timed out. (read timeout=3e1)"
+        )
+        observation = observe_result_upload_read_timeout(
+            task_id,
+            detail,
+        )
+        self.assertIsNotNone(observation)
+        assert observation is not None
+        self.assertEqual(30.0, observation["read_timeout_seconds"])
+        self.assertNotIn("root.example.test", json.dumps(observation))
+
+        ipv6_detail = (
+            f"Failed to deliver task {task_id} result to "
+            "http://[2001:db8::1]:31800/api/v1/results: "
+            "HTTPConnectionPool(host='2001:db8::1', port=31800): "
+            "Read timed out. (read timeout=30.0)"
+        )
+        self.assertIsNotNone(
+            observe_result_upload_read_timeout(
+                task_id,
+                ipv6_detail,
+            )
+        )
+
+    def test_result_upload_timeout_parser_rejects_ambiguous_authorities(
+        self,
+    ) -> None:
+        task_id = "tsk-result-upload-authority"
+
+        def detail(url: str, pool_host: str = "root.example.test") -> str:
+            return (
+                f"Failed to deliver task {task_id} result to {url}: "
+                f"HTTPConnectionPool(host='{pool_host}', port=31800): "
+                "Read timed out. (read timeout=30.0)"
+            )
+
+        cases = {
+            "empty-explicit-port": detail(
+                "http://root.example.test:/api/v1/results"
+            ),
+            "backslash": detail(
+                "http://root.example.test:31800/\\api/v1/results"
+            ),
+            "nul": detail(
+                "http://root\x00.example.test:31800/api/v1/results",
+                "root\x00.example.test",
+            ),
+            "percent-escape": detail(
+                "http://%72oot.example.test:31800/api/v1/results"
+            ),
+            "double-dot": detail(
+                "http://root..example.test:31800/api/v1/results",
+                "root..example.test",
+            ),
+            "unicode": detail(
+                "http://røot.example.test:31800/api/v1/results",
+                "røot.example.test",
+            ),
+            "uppercase": detail(
+                "http://Root.example.test:31800/api/v1/results",
+                "Root.example.test",
+            ),
+            "query": detail(
+                "http://root.example.test:31800/api/v1/results?x=1"
+            ),
+            "fragment": detail(
+                "http://root.example.test:31800/api/v1/results#x"
+            ),
+            "noncanonical-ipv4": detail(
+                "http://192.000.002.010:31800/api/v1/results",
+                "192.000.002.010",
+            ),
+            "noncanonical-url-port": detail(
+                "http://root.example.test:031800/api/v1/results"
+            ),
+            "noncanonical-pool-port": (
+                f"Failed to deliver task {task_id} result to "
+                "http://root.example.test:80/api/v1/results: "
+                "HTTPConnectionPool(host='root.example.test', port=080): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "noncanonical-ipv6": detail(
+                "http://[2001:0db8::1]:31800/api/v1/results",
+                "2001:0db8::1",
+            ),
+        }
+        for label, raw_detail in cases.items():
+            with self.subTest(label=label):
+                self.assertIsNone(
+                    observe_result_upload_read_timeout(
+                        task_id,
+                        raw_detail,
+                    )
+                )
+
+    def test_result_upload_timeout_recovery_rejects_unsafe_evidence(
+        self,
+    ) -> None:
+        cases = {
+            "task-id-mismatch": lambda _task_id: (
+                "Failed to deliver task tsk-other result to "
+                "http://192.0.2.10:31800/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "wrong-results-path": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:31800/api/v1/result: "
+                "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "credentialed-url": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://user:password@192.0.2.10:31800/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "pool-host-mismatch": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:31800/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.11', port=31800): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "pool-port-mismatch": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:31800/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.10', port=31801): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "explicit-zero-port": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:0/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.10', port=80): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "pool-class-mismatch": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "https://root.example.test/api/v1/results: "
+                "HTTPConnectionPool(host='root.example.test', port=443): "
+                "Read timed out. (read timeout=30.0)"
+            ),
+            "zero-timeout": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:31800/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+                "Read timed out. (read timeout=0.0)"
+            ),
+            "non-finite-timeout": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:31800/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+                "Read timed out. (read timeout=1e309)"
+            ),
+            "non-timeout": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:31800/api/v1/results: connection refused"
+            ),
+            "trailing-text": lambda task_id: (
+                f"Failed to deliver task {task_id} result to "
+                "http://192.0.2.10:31800/api/v1/results: "
+                "HTTPConnectionPool(host='192.0.2.10', port=31800): "
+                "Read timed out. (read timeout=30.0); retrying"
+            ),
+        }
+        for label, detail_for_task in cases.items():
+            with self.subTest(label=label):
+                output = self.root / f"unsafe-result-upload-{label}"
+                (
+                    failed_client,
+                    failed_digest,
+                    _target_trial,
+                    primary_task_id,
+                ) = self._result_upload_timeout_failure(output=output)
+                failed_client.failure_details[primary_task_id]["detail"] = (
+                    detail_for_task(primary_task_id)
+                )
+                recovery_client = self._fresh_recovery_client(failed_client)
+                with self.assertRaisesRegex(
+                    Exception,
+                    "allowlisted delivery boundary",
+                ):
+                    self._run(
+                        recovery_client,
+                        output=output,
+                        recovery_id=f"unsafe-result-upload-{label}",
+                        recovery_reason=(
+                            "This malformed timeout evidence must fail."
+                        ),
+                        recover_failed_entry_sha256=failed_digest,
+                    )
+                self.assertEqual([], recovery_client.validated)
+                self.assertEqual([], recovery_client.workflows)
+
+    def test_result_upload_timeout_recovery_rejects_multiple_attempts(
+        self,
+    ) -> None:
+        output = self.root / "result-upload-multiple-attempts"
+        (
+            failed_client,
+            failed_digest,
+            _target_trial,
+            primary_task_id,
+        ) = self._result_upload_timeout_failure(output=output)
+        failed_client.failure_details[primary_task_id]["attempts"] = 2
+        recovery_client = self._fresh_recovery_client(failed_client)
+        with self.assertRaisesRegex(Exception, "allowlisted delivery boundary"):
+            self._run(
+                recovery_client,
+                output=output,
+                recovery_id="result-upload-multiple-attempts",
+                recovery_reason="Multiple attempts are not retry-safe.",
+                recover_failed_entry_sha256=failed_digest,
+            )
+        self.assertEqual([], recovery_client.workflows)
+
+    def test_result_upload_host_mismatch_survives_redaction_collapse(
+        self,
+    ) -> None:
+        output = self.root / "result-upload-redaction-collapse"
+        (
+            failed_client,
+            failed_digest,
+            _target_trial,
+            primary_task_id,
+        ) = self._result_upload_timeout_failure(output=output)
+        failed_client.failure_details[primary_task_id]["detail"] = (
+            f"Failed to deliver task {primary_task_id} result to "
+            "http://left.example:31800/api/v1/results: "
+            "HTTPConnectionPool(host='right.example', port=31800): "
+            "Read timed out. (read timeout=30.0)"
+        )
+        recovery_client = self._fresh_recovery_client(failed_client)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "FLOWMESH_API_KEY": "left.example",
+                "PATHFINDER_DATA_AGENT_TOKEN": "right.example",
+            },
+        ):
+            collapsed = recovery_client.describe_task_recovery_evidence(
+                primary_task_id
+            )
+            self.assertEqual(
+                2,
+                collapsed["task_evidence"]["detail"].count("<redacted>"),
+            )
+            self.assertIsNone(
+                collapsed["result_upload_read_timeout_observation"]
+            )
+            with self.assertRaisesRegex(
+                Exception,
+                "allowlisted delivery boundary",
+            ):
+                self._run(
+                    recovery_client,
+                    output=output,
+                    recovery_id="result-upload-redaction-collapse",
+                    recovery_reason=(
+                        "A redaction collision must not authorize recovery."
+                    ),
+                    recover_failed_entry_sha256=failed_digest,
+                )
+        self.assertEqual([], recovery_client.validated)
+        self.assertEqual([], recovery_client.workflows)
+
+    def test_result_upload_recovery_requires_exact_safe_client_envelope(
+        self,
+    ) -> None:
+        for case in ("missing-observation", "extra-raw-field"):
+            with self.subTest(case=case):
+                output = self.root / f"result-upload-envelope-{case}"
+                (
+                    failed_client,
+                    failed_digest,
+                    _target_trial,
+                    primary_task_id,
+                ) = self._result_upload_timeout_failure(output=output)
+                recovery_client = self._fresh_recovery_client(failed_client)
+                original = recovery_client.describe_task_recovery_evidence
+
+                def malformed(task_id: str) -> dict[str, Any]:
+                    envelope = original(task_id)
+                    if task_id != primary_task_id:
+                        return envelope
+                    if case == "missing-observation":
+                        envelope[
+                            "result_upload_read_timeout_observation"
+                        ] = None
+                    else:
+                        envelope["raw_detail"] = "must-not-cross-boundary"
+                    return envelope
+
+                recovery_client.describe_task_recovery_evidence = malformed
+                with self.assertRaisesRegex(
+                    Exception,
+                    "invalid recovery-only task evidence|"
+                    "allowlisted delivery boundary",
+                ):
+                    self._run(
+                        recovery_client,
+                        output=output,
+                        recovery_id=f"result-upload-envelope-{case}",
+                        recovery_reason=(
+                            "Recovery-only client evidence must fail closed."
+                        ),
+                        recover_failed_entry_sha256=failed_digest,
+                    )
+                self.assertEqual([], recovery_client.validated)
+                self.assertEqual([], recovery_client.workflows)
+
+    def test_result_upload_timeout_recovery_rejects_physical_primary(
+        self,
+    ) -> None:
+        output = self.root / "result-upload-physical-primary"
+        (
+            failed_client,
+            failed_digest,
+            _target_trial,
+            _primary_task_id,
+        ) = self._result_upload_timeout_failure(
+            output=output,
+            primary_task_index=1,
+        )
+        recovery_client = self._fresh_recovery_client(failed_client)
+        with self.assertRaisesRegex(Exception, "schedule control"):
+            self._run(
+                recovery_client,
+                output=output,
+                recovery_id="result-upload-physical-primary",
+                recovery_reason="A physical operation must not be retried.",
+                recover_failed_entry_sha256=failed_digest,
+            )
+        self.assertEqual([], recovery_client.workflows)
+
+    def test_result_upload_timeout_recovery_refuses_conditional_phases(
+        self,
+    ) -> None:
+        conditional_trial = next(
+            str(row["trial_key"])
+            for row in self.wrappers
+            if row["design_id"] in {"D3", "D7"}
+        )
+        for phase in ("A", "B"):
+            with self.subTest(phase=phase):
+                output = self.root / f"result-upload-conditional-{phase}"
+                (
+                    failed_client,
+                    failed_digest,
+                    _target_trial,
+                    _primary_task_id,
+                ) = self._result_upload_timeout_failure(
+                    output=output,
+                    target_trial=conditional_trial,
+                    target_phase=phase,
+                )
+                journal = _read_jsonl(
+                    output / "flowmesh-container-matrix-journal.jsonl"
+                )
+                self.assertEqual(phase, journal[-1]["phase"])
+                recovery_client = self._fresh_recovery_client(failed_client)
+                with self.assertRaisesRegex(
+                    Exception,
+                    "only an unconditional phase",
+                ):
+                    self._run(
+                        recovery_client,
+                        output=output,
+                        recovery_id=f"result-upload-conditional-{phase}",
+                        recovery_reason=(
+                            "Conditional result-upload timeout recovery "
+                            "must fail closed."
+                        ),
+                        recover_failed_entry_sha256=failed_digest,
+                    )
+                self.assertEqual([], recovery_client.validated)
+                self.assertEqual([], recovery_client.workflows)
+
+    def test_mixed_v2_v3_recovery_history_adopts_and_completes(
+        self,
+    ) -> None:
+        unconditional = [
+            row
+            for row in self.wrappers
+            if row["design_id"] not in {"D3", "D7"}
+        ]
+        first_trial = str(unconditional[1]["trial_key"])
+        second_trial = str(unconditional[2]["trial_key"])
+        self.assertLess(
+            int(unconditional[1]["sequence_index"]),
+            int(unconditional[2]["sequence_index"]),
+        )
+        output = self.root / "mixed-v2-v3-recovery-history"
+
+        first_failure_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=first_trial,
+        )
+        with self.assertRaises(Exception):
+            self._run(first_failure_client, output=output)
+        first_failed_digest = str(
+            _read_jsonl(
+                output / "flowmesh-container-matrix-journal.jsonl"
+            )[-1]["entry_sha256"]
+        )
+        first_recovery_client = self._fresh_recovery_client(
+            first_failure_client
+        )
+        first_recovery_client.replay_operation_key = next(
+            str(row["operation_key"])
+            for row in self.operations
+            if row["trial_key"] == first_trial
+            and row["operation_id"] == "schedule"
+        )
+        with self.assertRaisesRegex(Exception, "operation was replayed"):
+            self._run(
+                first_recovery_client,
+                output=output,
+                recovery_id="mixed-idp-recovery-001",
+                recovery_reason=(
+                    "Authorize the first safe schedule-root recovery."
+                ),
+                recover_failed_entry_sha256=first_failed_digest,
+            )
+        journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        first_replay_failure_digest = str(journal[-1]["entry_sha256"])
+        first_recovery_bound = next(
+            row
+            for row in reversed(journal[:-1])
+            if row["state"] == "WORKFLOW_BOUND"
+            and row["trial_key"] == first_trial
+        )
+        first_recovery_workflow_id = str(
+            first_recovery_bound["payload"]["workflow_id"]
+        )
+        first_recovery_client.recoverable_terminals[
+            first_recovery_workflow_id
+        ] = TerminalWorkflow(
+            workflow_id=first_recovery_workflow_id,
+            status="DONE",
+            dispatched_task_ids=(),
+        )
+        first_adoption = adopt_flowmesh_container_matrix_replay_results(
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+            run_dir=output,
+            run_id="formal-matrix-runner-test-v1",
+            client=first_recovery_client,
+            settings=self.settings,
+            adoption_id="mixed-idp-replay-adoption-001",
+            adoption_reason="Adopt the first same-epoch schedule replay.",
+            adopt_failed_entry_sha256=first_replay_failure_digest,
+            runtime_epoch_probe=_EpochProbe(first_recovery_client.epochs),
+        )
+        self.assertEqual("REPLAY_RESULTS_ADOPTED", first_adoption["status"])
+
+        second_failure_client = FakeMatrixFlowMeshClient(
+            cache_outcomes=self.cache_outcomes,
+            recoverable_terminal_failure_trial=second_trial,
+            recoverable_failure_kind="result-upload-timeout",
+        )
+        with self.assertRaises(Exception):
+            self._run(second_failure_client, output=output)
+        journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        second_failed_digest = str(journal[-1]["entry_sha256"])
+        self.assertEqual(second_trial, journal[-1]["trial_key"])
+
+        second_recovery_client = self._fresh_recovery_client(
+            second_failure_client
+        )
+        second_recovery_client.replay_operation_key = next(
+            str(row["operation_key"])
+            for row in self.operations
+            if row["trial_key"] == second_trial
+            and row["operation_id"] == "schedule"
+        )
+        with self.assertRaisesRegex(Exception, "operation was replayed"):
+            self._run(
+                second_recovery_client,
+                output=output,
+                recovery_id="mixed-result-upload-recovery-002",
+                recovery_reason=(
+                    "Authorize the second safe schedule-root recovery."
+                ),
+                recover_failed_entry_sha256=second_failed_digest,
+            )
+        journal = _read_jsonl(
+            output / "flowmesh-container-matrix-journal.jsonl"
+        )
+        recovery_entries = [
+            row
+            for row in journal
+            if row["state"] == "INFRASTRUCTURE_RECOVERY_AUTHORIZED"
+        ]
+        self.assertEqual(
+            [1, 2],
+            [row["payload"]["retry_ordinal"] for row in recovery_entries],
+        )
+        self.assertEqual(
+            [
+                "pathfinder.flowmesh-container-matrix-"
+                "infrastructure-recovery/v1alpha2",
+                "pathfinder.flowmesh-container-matrix-"
+                "infrastructure-recovery/v1alpha3",
+            ],
+            [
+                row["payload"]["recovery_implementation_schema"]
+                for row in recovery_entries
+            ],
+        )
+        self.assertEqual(
+            {first_trial, second_trial},
+            {row["trial_key"] for row in recovery_entries},
+        )
+        self.assertTrue(
+            all(row["phase"] == "unconditional" for row in recovery_entries)
+        )
+
+        second_replay_failure_digest = str(journal[-1]["entry_sha256"])
+        second_recovery_bound = next(
+            row
+            for row in reversed(journal[:-1])
+            if row["state"] == "WORKFLOW_BOUND"
+            and row["trial_key"] == second_trial
+        )
+        second_recovery_workflow_id = str(
+            second_recovery_bound["payload"]["workflow_id"]
+        )
+        second_recovery_client.recoverable_terminals[
+            second_recovery_workflow_id
+        ] = TerminalWorkflow(
+            workflow_id=second_recovery_workflow_id,
+            status="DONE",
+            dispatched_task_ids=(),
+        )
+        second_adoption = adopt_flowmesh_container_matrix_replay_results(
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+            run_dir=output,
+            run_id="formal-matrix-runner-test-v1",
+            client=second_recovery_client,
+            settings=self.settings,
+            adoption_id="mixed-result-upload-replay-adoption-002",
+            adoption_reason="Adopt the second same-epoch schedule replay.",
+            adopt_failed_entry_sha256=second_replay_failure_digest,
+            runtime_epoch_probe=_EpochProbe(second_recovery_client.epochs),
+        )
+        self.assertEqual("REPLAY_RESULTS_ADOPTED", second_adoption["status"])
+
+        completed = self._run(
+            FakeMatrixFlowMeshClient(cache_outcomes=self.cache_outcomes),
+            output=output,
+        )
+        self.assertEqual("COMPLETE", completed["status"])
+        self.assertEqual(2, completed["infrastructure_recovery_count"])
+        self.assertEqual(2, completed["replay_result_adoption_count"])
+        self.assertEqual(
+            "VERIFIED",
+            verify_flowmesh_container_matrix_run(
+                output,
+                matrix_plan_dir=self.matrix,
+                formal_execution_profile_dir=self.profile,
+                coordinator_plan_dir=self.coordinator,
+            )["status"],
+        )
 
     def test_durable_failure_requires_exact_explicit_authorization(self) -> None:
         target_trial = next(

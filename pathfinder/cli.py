@@ -1848,8 +1848,9 @@ def _parser() -> argparse.ArgumentParser:
         "--recovery-reason",
         help=(
             "operator rationale for retrying an allowlisted FlowMesh "
-            "identity-provider failure at a structurally proven safe "
-            "schedule root"
+            "identity-provider failure or exact Root result-upload read "
+            "timeout at a structurally proven safe schedule root; "
+            "result-upload timeout recovery is unconditional-phase only"
         ),
     )
     matrix_run.add_argument(
