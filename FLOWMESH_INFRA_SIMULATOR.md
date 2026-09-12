@@ -653,6 +653,41 @@ identity, and runtime epochs. It does not infer FlowMesh queue time or
 end-to-end latency, call an LLM, evaluate semantic answer quality, fit cost
 parameters, or make a physical-money or scientific-performance claim.
 
+### Lightweight descriptive matrix statistics
+
+After the source-bound run verifier returns `VERIFIED`, a separate read-only
+command can publish the small set of statistics needed to audit the execution
+and measurement pipeline:
+
+```bash
+PYTHONPATH=. python -m pathfinder \
+  summarize-flowmesh-container-matrix-run \
+  --run-dir "$PF_MATRIX_RUN" \
+  --matrix-plan-dir "$PF_MATRIX_PLAN" \
+  --formal-execution-profile-dir "$PF_FORMAL_PROFILE" \
+  --coordinator-plan-dir "$PF_COORDINATOR_PLAN" \
+  --output-dir "$PF_MATRIX_STATISTICS"
+
+PYTHONPATH=. python -m pathfinder \
+  verify-flowmesh-container-matrix-statistics \
+  --output-dir "$PF_MATRIX_STATISTICS"
+```
+
+The output is a checksum-sealed report, 32 workload-by-design cell rows, a
+route ledger, and a manifest. Each cell retains the two repetition
+observations separately. Observed totals include only executed operations with
+complete telemetry; the unselected conditional branch remains inactive with
+null observations instead of an invented zero.
+
+The statistics name component service work and operation-level payload bytes
+literally. They do not treat service-time sums as end-to-end latency, count
+repeated operation bytes as unique data or complete wire bytes, infer link
+throughput from an application shaper, estimate monetary cost, rank designs,
+or report semantic quality or statistical significance. Cache lookup outcomes
+describe the frozen snapshot and trace rather than a real-policy hit-rate
+estimate. The command starts no service, submits no workflow, and refuses
+replay-adopted measurements.
+
 The portable metric contract freezes the comparison fields but leaves parity
 thresholds unset. Once a container backend emits a complete canonical record
 ledger, descriptive comparison uses the exact same trial identities:

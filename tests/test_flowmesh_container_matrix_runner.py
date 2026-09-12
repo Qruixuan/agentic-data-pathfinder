@@ -40,6 +40,11 @@ from pathfinder.integrations.flowmesh.container_matrix_runner import (
     run_flowmesh_container_matrix,
     verify_flowmesh_container_matrix_run,
 )
+from pathfinder.integrations.flowmesh.container_matrix_statistics import (
+    FlowMeshContainerMatrixStatisticsError,
+    summarize_flowmesh_container_matrix_run,
+    verify_flowmesh_container_matrix_statistics,
+)
 from pathfinder.integrations.flowmesh.redaction import redact_secrets
 from pathfinder.integrations.flowmesh.task_recovery_evidence import (
     observe_result_upload_read_timeout,
@@ -3748,6 +3753,505 @@ class FlowMeshContainerMatrixRunnerTest(unittest.TestCase):
             formal_execution_profile_dir=self.profile,
             coordinator_plan_dir=self.coordinator,
         )
+
+    def test_descriptive_statistics_reconcile_the_golden_matrix(self) -> None:
+        output = self.root / "matrix-statistics"
+        before = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in self.golden_run.iterdir()
+            if path.is_file()
+        }
+        response = summarize_flowmesh_container_matrix_run(
+            run_dir=self.golden_run,
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+            output_dir=output,
+        )
+        after = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in self.golden_run.iterdir()
+            if path.is_file()
+        }
+        self.assertEqual(before, after)
+        self.assertEqual("COMPLETE", response["status"])
+        self.assertEqual(64, response["completed_trial_count"])
+        self.assertEqual(32, response["cell_count"])
+        self.assertFalse(response["cost_metrics_computed"])
+        self.assertFalse(response["design_ranking_computed"])
+
+        verified = verify_flowmesh_container_matrix_statistics(output)
+        self.assertEqual("VERIFIED", verified["status"])
+        self.assertEqual(32, verified["cell_count"])
+        report = _read_json(
+            output / "flowmesh-container-matrix-descriptive-report.json"
+        )
+        cells = _read_jsonl(
+            output / "flowmesh-container-matrix-descriptive-cells.jsonl"
+        )
+        routes = _read_jsonl(
+            output / "flowmesh-container-matrix-descriptive-routes.jsonl"
+        )
+        self.assertEqual(64, report["overall_totals"]["trial_count"])
+        self.assertEqual(
+            500, report["overall_totals"]["planned_operation_count"]
+        )
+        self.assertEqual(
+            472, report["overall_totals"]["executed_operation_count"]
+        )
+        self.assertEqual(
+            28, report["overall_totals"]["inactive_operation_count"]
+        )
+        self.assertEqual(80, report["overall_totals"]["workflow_count"])
+        self.assertEqual(32, len(cells))
+        self.assertTrue(routes)
+        self.assertTrue(
+            all(row["repetitions_present"] == [0, 1] for row in cells)
+        )
+
+        operations = _read_jsonl(
+            self.golden_run
+            / "flowmesh-container-matrix-operation-results.jsonl"
+        )
+        observed = [row for row in operations if row["executed"] is True]
+        inactive = [row for row in operations if row["executed"] is False]
+        totals = report["overall_totals"]
+        self.assertEqual(
+            sum(row["logical_bytes"] for row in observed),
+            totals["observed_operation_logical_bytes_sum"],
+        )
+        self.assertEqual(
+            sum(row["physical_bytes"] for row in observed),
+            totals["observed_operation_physical_bytes_sum"],
+        )
+        self.assertGreater(
+            sum(row["planned_logical_bytes"] for row in inactive), 0
+        )
+        self.assertTrue(
+            all(
+                row["logical_bytes"] is None
+                and row["physical_bytes"] is None
+                and row["service_time_ms"] is None
+                for row in inactive
+            )
+        )
+        self.assertNotIn("best_design", report)
+        self.assertFalse(report["network_throughput_derived"])
+        self.assertFalse(report["end_to_end_latency_measured"])
+
+    def test_descriptive_statistics_are_byte_deterministic(self) -> None:
+        first = self.root / "statistics-a"
+        second = self.root / "statistics-b"
+        for output in (first, second):
+            summarize_flowmesh_container_matrix_run(
+                run_dir=self.golden_run,
+                matrix_plan_dir=self.matrix,
+                formal_execution_profile_dir=self.profile,
+                coordinator_plan_dir=self.coordinator,
+                output_dir=output,
+            )
+        self.assertEqual(
+            {
+                path.name: path.read_bytes()
+                for path in first.iterdir()
+                if path.is_file()
+            },
+            {
+                path.name: path.read_bytes()
+                for path in second.iterdir()
+                if path.is_file()
+            },
+        )
+
+    def test_statistics_verifier_rejects_restamped_claim_escalation(self) -> None:
+        output = self.root / "statistics-claim-tamper"
+        summarize_flowmesh_container_matrix_run(
+            run_dir=self.golden_run,
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+            output_dir=output,
+        )
+        report_path = (
+            output / "flowmesh-container-matrix-descriptive-report.json"
+        )
+        report = _read_json(report_path)
+        report["cost_metrics_computed"] = True
+        _write_json(report_path, report)
+
+        manifest_path = (
+            output / "flowmesh-container-matrix-descriptive-manifest.json"
+        )
+        manifest = _read_json(manifest_path)
+        manifest["output_sha256"][report_path.name] = hashlib.sha256(
+            report_path.read_bytes()
+        ).hexdigest()
+        _write_json(manifest_path, manifest)
+        _restamp_checksums(output)
+        with self.assertRaisesRegex(
+            FlowMeshContainerMatrixStatisticsError,
+            "statistics boundary changed",
+        ):
+            verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_verifier_rejects_restamped_manifest_tamper(self) -> None:
+        mutations = {
+            "run identity": {"run_id": "forged-run"},
+            "source binding": {"source_binding_checked": False},
+            "source fingerprint": {"source_directory_sha256": {}},
+            "ledger count": {"route_count": 999},
+            "fitted parameters": {"parameters_fitted": 1},
+            "credential boundary": {"credentials_recorded": True},
+        }
+        for index, (name, mutation) in enumerate(mutations.items()):
+            with self.subTest(name=name):
+                output = self.root / f"statistics-manifest-tamper-{index}"
+                summarize_flowmesh_container_matrix_run(
+                    run_dir=self.golden_run,
+                    matrix_plan_dir=self.matrix,
+                    formal_execution_profile_dir=self.profile,
+                    coordinator_plan_dir=self.coordinator,
+                    output_dir=output,
+                )
+                manifest_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-manifest.json"
+                )
+                manifest = _read_json(manifest_path)
+                manifest.update(mutation)
+                _write_json(manifest_path, manifest)
+                _restamp_checksums(output)
+                with self.assertRaisesRegex(
+                    FlowMeshContainerMatrixStatisticsError,
+                    "manifest identity or counts disagree|"
+                    "manifest provenance boundary changed",
+                ):
+                    verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_verifier_rejects_restamped_claim_tamper(self) -> None:
+        mutations = {
+            "analysis class": {
+                "analysis_class": "confirmatory-scientific-ranking"
+            },
+            "cache interpretation": {
+                "cache_lookup_outcome_interpretation": (
+                    "This is a measured production cache hit rate."
+                )
+            },
+            "measurement boundary": {
+                "measurement_boundaries": ["D0 is proven cheapest."]
+            },
+        }
+        for index, (name, mutation) in enumerate(mutations.items()):
+            with self.subTest(name=name):
+                output = self.root / f"statistics-claim-text-tamper-{index}"
+                summarize_flowmesh_container_matrix_run(
+                    run_dir=self.golden_run,
+                    matrix_plan_dir=self.matrix,
+                    formal_execution_profile_dir=self.profile,
+                    coordinator_plan_dir=self.coordinator,
+                    output_dir=output,
+                )
+                report_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-report.json"
+                )
+                report = _read_json(report_path)
+                report.update(mutation)
+                _write_json(report_path, report)
+
+                manifest_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-manifest.json"
+                )
+                manifest = _read_json(manifest_path)
+                if "analysis_class" in mutation:
+                    manifest["analysis_class"] = mutation["analysis_class"]
+                manifest["output_sha256"][report_path.name] = (
+                    hashlib.sha256(report_path.read_bytes()).hexdigest()
+                )
+                _write_json(manifest_path, manifest)
+                _restamp_checksums(output)
+                with self.assertRaisesRegex(
+                    FlowMeshContainerMatrixStatisticsError,
+                    "matrix statistics interpretation boundary changed",
+                ):
+                    verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_verifier_rejects_restamped_schema_expansion(
+        self,
+    ) -> None:
+        for target in ("report", "manifest", "route"):
+            with self.subTest(target=target):
+                output = self.root / f"statistics-schema-expansion-{target}"
+                summarize_flowmesh_container_matrix_run(
+                    run_dir=self.golden_run,
+                    matrix_plan_dir=self.matrix,
+                    formal_execution_profile_dir=self.profile,
+                    coordinator_plan_dir=self.coordinator,
+                    output_dir=output,
+                )
+                report_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-report.json"
+                )
+                manifest_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-manifest.json"
+                )
+                manifest = _read_json(manifest_path)
+                if target == "report":
+                    report = _read_json(report_path)
+                    report["best_design"] = "D0"
+                    report["monetary_cost_usd"] = 1.0
+                    _write_json(report_path, report)
+                elif target == "manifest":
+                    manifest["credentials"] = "unexpected"
+                else:
+                    route_path = (
+                        output
+                        / "flowmesh-container-matrix-descriptive-routes.jsonl"
+                    )
+                    routes = _read_jsonl(route_path)
+                    routes[0]["throughput_mbps"] = 999.0
+                    _write_jsonl(route_path, routes)
+                    route_sha256 = hashlib.sha256(
+                        route_path.read_bytes()
+                    ).hexdigest()
+                    report = _read_json(report_path)
+                    report["route_statistics_sha256"] = route_sha256
+                    _write_json(report_path, report)
+                    manifest["output_sha256"][route_path.name] = (
+                        route_sha256
+                    )
+                manifest["output_sha256"][report_path.name] = hashlib.sha256(
+                    report_path.read_bytes()
+                ).hexdigest()
+                _write_json(manifest_path, manifest)
+                _restamp_checksums(output)
+                with self.assertRaisesRegex(
+                    FlowMeshContainerMatrixStatisticsError,
+                    "field set changed",
+                ):
+                    verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_verifier_rejects_restamped_audit_tamper(self) -> None:
+        mutations = {
+            "run audit": lambda report: report["run_audit"].update(
+                {
+                    "run_status": "FAILED",
+                    "verifier_status": "NOT_VERIFIED",
+                    "source_binding_checked": False,
+                    "worker_id": "forged-worker",
+                    "infrastructure_recovery_count": 99,
+                }
+            ),
+            "matrix dimensions": lambda report: report.update(
+                {"matrix_dimensions": {"cell_count": 999}}
+            ),
+            "ledger counts": lambda report: report.update(
+                {
+                    "cell_statistics_count": 999,
+                    "route_statistics_count": 999,
+                }
+            ),
+        }
+        for index, (name, mutate) in enumerate(mutations.items()):
+            with self.subTest(name=name):
+                output = self.root / f"statistics-audit-tamper-{index}"
+                summarize_flowmesh_container_matrix_run(
+                    run_dir=self.golden_run,
+                    matrix_plan_dir=self.matrix,
+                    formal_execution_profile_dir=self.profile,
+                    coordinator_plan_dir=self.coordinator,
+                    output_dir=output,
+                )
+                report_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-report.json"
+                )
+                report = _read_json(report_path)
+                mutate(report)
+                _write_json(report_path, report)
+                manifest_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-manifest.json"
+                )
+                manifest = _read_json(manifest_path)
+                manifest["output_sha256"][report_path.name] = (
+                    hashlib.sha256(report_path.read_bytes()).hexdigest()
+                )
+                _write_json(manifest_path, manifest)
+                _restamp_checksums(output)
+                with self.assertRaisesRegex(
+                    FlowMeshContainerMatrixStatisticsError,
+                    "run audit boundary changed|"
+                    "dimensions or ledger counts changed",
+                ):
+                    verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_verifier_rejects_restamped_cell_tamper(self) -> None:
+        output = self.root / "statistics-cell-tamper"
+        summarize_flowmesh_container_matrix_run(
+            run_dir=self.golden_run,
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+            output_dir=output,
+        )
+        cell_path = (
+            output / "flowmesh-container-matrix-descriptive-cells.jsonl"
+        )
+        cells = _read_jsonl(cell_path)
+        cells[0]["repetition_observations"][0][
+            "operation_component_service_time_ms_sum"
+        ] += 999.0
+        _write_jsonl(cell_path, cells)
+        cell_sha256 = hashlib.sha256(cell_path.read_bytes()).hexdigest()
+
+        report_path = (
+            output / "flowmesh-container-matrix-descriptive-report.json"
+        )
+        report = _read_json(report_path)
+        report["cell_statistics_sha256"] = cell_sha256
+        _write_json(report_path, report)
+
+        manifest_path = (
+            output / "flowmesh-container-matrix-descriptive-manifest.json"
+        )
+        manifest = _read_json(manifest_path)
+        manifest["output_sha256"][cell_path.name] = cell_sha256
+        manifest["output_sha256"][report_path.name] = hashlib.sha256(
+            report_path.read_bytes()
+        ).hexdigest()
+        _write_json(manifest_path, manifest)
+        _restamp_checksums(output)
+        with self.assertRaisesRegex(
+            FlowMeshContainerMatrixStatisticsError,
+            "matrix cell repetition observations do not reconcile",
+        ):
+            verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_verifier_rejects_restamped_summary_swap(self) -> None:
+        for dimension in ("workload_totals", "design_totals"):
+            with self.subTest(dimension=dimension):
+                output = self.root / f"statistics-summary-swap-{dimension}"
+                summarize_flowmesh_container_matrix_run(
+                    run_dir=self.golden_run,
+                    matrix_plan_dir=self.matrix,
+                    formal_execution_profile_dir=self.profile,
+                    coordinator_plan_dir=self.coordinator,
+                    output_dir=output,
+                )
+                report_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-report.json"
+                )
+                report = _read_json(report_path)
+                first = report[dimension][0]["totals"]
+                report[dimension][0]["totals"] = report[dimension][1][
+                    "totals"
+                ]
+                report[dimension][1]["totals"] = first
+                _write_json(report_path, report)
+
+                manifest_path = (
+                    output
+                    / "flowmesh-container-matrix-descriptive-manifest.json"
+                )
+                manifest = _read_json(manifest_path)
+                manifest["output_sha256"][report_path.name] = (
+                    hashlib.sha256(report_path.read_bytes()).hexdigest()
+                )
+                _write_json(manifest_path, manifest)
+                _restamp_checksums(output)
+                with self.assertRaisesRegex(
+                    FlowMeshContainerMatrixStatisticsError,
+                    "matrix (workload|design) totals do not reconcile",
+                ):
+                    verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_verifier_rejects_restamped_invalid_route(self) -> None:
+        output = self.root / "statistics-route-tamper"
+        summarize_flowmesh_container_matrix_run(
+            run_dir=self.golden_run,
+            matrix_plan_dir=self.matrix,
+            formal_execution_profile_dir=self.profile,
+            coordinator_plan_dir=self.coordinator,
+            output_dir=output,
+        )
+        route_path = (
+            output / "flowmesh-container-matrix-descriptive-routes.jsonl"
+        )
+        routes = _read_jsonl(route_path)
+        routes[0]["execution_node_id"] = "BOGUS"
+        _write_jsonl(route_path, routes)
+        route_sha256 = hashlib.sha256(route_path.read_bytes()).hexdigest()
+
+        report_path = (
+            output / "flowmesh-container-matrix-descriptive-report.json"
+        )
+        report = _read_json(report_path)
+        report["route_statistics_sha256"] = route_sha256
+        _write_json(report_path, report)
+
+        manifest_path = (
+            output / "flowmesh-container-matrix-descriptive-manifest.json"
+        )
+        manifest = _read_json(manifest_path)
+        manifest["output_sha256"][route_path.name] = route_sha256
+        manifest["output_sha256"][report_path.name] = hashlib.sha256(
+            report_path.read_bytes()
+        ).hexdigest()
+        _write_json(manifest_path, manifest)
+        _restamp_checksums(output)
+        with self.assertRaisesRegex(
+            FlowMeshContainerMatrixStatisticsError,
+            "matrix route node identity is invalid",
+        ):
+            verify_flowmesh_container_matrix_statistics(output)
+
+    def test_statistics_cli_is_offline_and_source_bound(self) -> None:
+        output = self.root / "statistics-cli"
+        stream = io.StringIO()
+        with (
+            mock.patch(
+                "pathfinder.integrations.flowmesh.SdkFlowMeshClient"
+            ) as sdk_client,
+            redirect_stdout(stream),
+        ):
+            code = cli_main(
+                [
+                    "summarize-flowmesh-container-matrix-run",
+                    "--run-dir",
+                    str(self.golden_run),
+                    "--matrix-plan-dir",
+                    str(self.matrix),
+                    "--formal-execution-profile-dir",
+                    str(self.profile),
+                    "--coordinator-plan-dir",
+                    str(self.coordinator),
+                    "--output-dir",
+                    str(output),
+                    "--compact",
+                ]
+            )
+        self.assertEqual(0, code)
+        self.assertEqual("COMPLETE", json.loads(stream.getvalue())["status"])
+        sdk_client.assert_not_called()
+
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            code = cli_main(
+                [
+                    "verify-flowmesh-container-matrix-statistics",
+                    "--output-dir",
+                    str(output),
+                    "--compact",
+                ]
+            )
+        self.assertEqual(0, code)
+        self.assertEqual("VERIFIED", json.loads(stream.getvalue())["status"])
 
 
 if __name__ == "__main__":

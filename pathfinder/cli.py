@@ -1911,6 +1911,39 @@ def _parser() -> argparse.ArgumentParser:
     verify_matrix_run.add_argument("--coordinator-plan-dir", type=Path)
     verify_matrix_run.add_argument("--compact", action="store_true")
 
+    matrix_statistics = subcommands.add_parser(
+        "summarize-flowmesh-container-matrix-run",
+        help=(
+            "publish read-only workload/design/route statistics from one "
+            "verified 64-trial matrix run without deriving cost, throughput, "
+            "end-to-end latency, quality, or a design ranking"
+        ),
+    )
+    matrix_statistics.add_argument("--run-dir", type=Path, required=True)
+    matrix_statistics.add_argument(
+        "--matrix-plan-dir", type=Path, required=True
+    )
+    matrix_statistics.add_argument(
+        "--formal-execution-profile-dir", type=Path, required=True
+    )
+    matrix_statistics.add_argument(
+        "--coordinator-plan-dir", type=Path, required=True
+    )
+    matrix_statistics.add_argument("--output-dir", type=Path, required=True)
+    matrix_statistics.add_argument("--compact", action="store_true")
+
+    verify_matrix_statistics = subcommands.add_parser(
+        "verify-flowmesh-container-matrix-statistics",
+        help=(
+            "verify a source-independent, descriptive-only container-matrix "
+            "statistics package"
+        ),
+    )
+    verify_matrix_statistics.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_matrix_statistics.add_argument("--compact", action="store_true")
+
     full_chain_candidates = subcommands.add_parser(
         "list-flowmesh-container-full-chain-candidates",
         help=(
@@ -2668,6 +2701,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.formal_execution_profile_dir
                 ),
                 coordinator_plan_dir=args.coordinator_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "summarize-flowmesh-container-matrix-run":
+            from .integrations.flowmesh.container_matrix_statistics import (
+                summarize_flowmesh_container_matrix_run,
+            )
+
+            payload = summarize_flowmesh_container_matrix_run(
+                run_dir=args.run_dir,
+                matrix_plan_dir=args.matrix_plan_dir,
+                formal_execution_profile_dir=(
+                    args.formal_execution_profile_dir
+                ),
+                coordinator_plan_dir=args.coordinator_plan_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-container-matrix-statistics":
+            from .integrations.flowmesh.container_matrix_statistics import (
+                verify_flowmesh_container_matrix_statistics,
+            )
+
+            payload = verify_flowmesh_container_matrix_statistics(
+                args.output_dir
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "list-flowmesh-container-full-chain-candidates":

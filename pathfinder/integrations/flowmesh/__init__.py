@@ -134,6 +134,15 @@ from .container_matrix_runner import (
     run_flowmesh_container_matrix,
     verify_flowmesh_container_matrix_run,
 )
+from .container_matrix_statistics import (
+    FLOWMESH_CONTAINER_MATRIX_STATISTICS_CELL_SCHEMA_VERSION,
+    FLOWMESH_CONTAINER_MATRIX_STATISTICS_MANIFEST_SCHEMA_VERSION,
+    FLOWMESH_CONTAINER_MATRIX_STATISTICS_REPORT_SCHEMA_VERSION,
+    FLOWMESH_CONTAINER_MATRIX_STATISTICS_ROUTE_SCHEMA_VERSION,
+    FlowMeshContainerMatrixStatisticsError,
+    summarize_flowmesh_container_matrix_run,
+    verify_flowmesh_container_matrix_statistics,
+)
 
 __all__ = [
     "AccessGateway",
@@ -147,6 +156,7 @@ __all__ = [
     "FlowMeshContainerFormalProfileError",
     "FlowMeshContainerMatrixCoordinatorError",
     "FlowMeshContainerMatrixRunError",
+    "FlowMeshContainerMatrixStatisticsError",
     "FullChainCalibrationAuditError",
     "FlowMeshPinningError",
     "FlowMeshPilotConfig",
@@ -173,6 +183,10 @@ __all__ = [
     "FLOWMESH_CONTAINER_MATRIX_RECOVERED_RUN_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_REPLAY_ADOPTED_RUN_SCHEMA_VERSION",
     "FLOWMESH_CONTAINER_MATRIX_RUN_SCHEMA_VERSION",
+    "FLOWMESH_CONTAINER_MATRIX_STATISTICS_CELL_SCHEMA_VERSION",
+    "FLOWMESH_CONTAINER_MATRIX_STATISTICS_MANIFEST_SCHEMA_VERSION",
+    "FLOWMESH_CONTAINER_MATRIX_STATISTICS_REPORT_SCHEMA_VERSION",
+    "FLOWMESH_CONTAINER_MATRIX_STATISTICS_ROUTE_SCHEMA_VERSION",
     "PATHFINDER_GRAPH_NODE_NAME",
     "PREFLIGHT_SCHEMA_VERSION",
     "PilotTrial",
@@ -222,6 +236,7 @@ __all__ = [
     "summarize_pilot_records",
     "summarize_pilot_records_by_workload",
     "summarize_paired_contrasts",
+    "summarize_flowmesh_container_matrix_run",
     "select_linear_container_operation_dag",
     "select_full_physical_container_operation_chain",
     "validate_flowmesh_pilot_config",
@@ -236,5 +251,6 @@ __all__ = [
     "verify_flowmesh_container_matrix_plan",
     "verify_flowmesh_container_matrix_coordinator_dry_run",
     "verify_flowmesh_container_matrix_run",
+    "verify_flowmesh_container_matrix_statistics",
     "workflow_selected_worker",
 ]
