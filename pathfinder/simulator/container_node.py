@@ -11,12 +11,19 @@ dataset nor an LLM.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import http.client
+import ipaddress
+import importlib.util
 import json
+import math
 import os
 import re
 import signal
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -26,7 +33,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .container_contract import (
     CONTAINER_NODE_RESULT_LEGACY_SCHEMA_VERSION,
@@ -40,19 +47,146 @@ CONTAINER_NODE_API_VERSION = "pathfinder.container-node/v1alpha1"
 CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION = (
     "pathfinder.container-node-semantic-request/v1alpha1"
 )
+CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION = (
+    "pathfinder.container-node-semantic-request/v1alpha2"
+)
 CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION = (
     "pathfinder.container-node-semantic-result/v1alpha1"
+)
+CONTAINER_NODE_SEMANTIC_VISION_RESULT_SCHEMA_VERSION = (
+    "pathfinder.container-node-semantic-result/v1alpha2"
 )
 
 _CHUNK_BYTES = 64 * 1024
 _MAX_JSON_BYTES = 2 * 1024 * 1024
 _MAX_SEMANTIC_PROMPT_BYTES = 1024 * 1024
+_MAX_SEMANTIC_VISION_PROMPT_BYTES = 128 * 1024
+_MAX_SEMANTIC_ANSWER_BYTES = 16 * 1024
+_MAX_SEMANTIC_FRAME_COUNT = 32
+_MAX_SEMANTIC_FRAME_BYTES = 512 * 1024
+_MAX_SEMANTIC_TOTAL_FRAME_BYTES = 1024 * 1024
+_MAX_SEMANTIC_IMAGE_DIMENSION = 8192
+_MAX_SEMANTIC_IMAGE_PIXELS = 16 * 1024 * 1024
+_MAX_SEMANTIC_TOTAL_IMAGE_PIXELS = 64 * 1024 * 1024
+_SEMANTIC_IMAGE_DECODE_TIMEOUT_SECONDS = 3.0
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RUNTIME_EPOCH = re.compile(r"[0-9a-f]{32}")
+_JPEG_START_OF_FRAME_MARKERS = frozenset(
+    {
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3,
+        0xC5,
+        0xC6,
+        0xC7,
+        0xC9,
+        0xCA,
+        0xCB,
+        0xCD,
+        0xCE,
+        0xCF,
+    }
+)
+_SEMANTIC_FRAME_FIELDS = frozenset(
+    {
+        "frame_index",
+        "timestamp_seconds",
+        "width",
+        "height",
+        "jpeg_size_bytes",
+        "jpeg_sha256",
+        "jpeg_base64",
+    }
+)
+_SEMANTIC_VISION_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "semantic_request_id",
+        "execution_node_id",
+        "representation_id",
+        "representation_sha256",
+        "question",
+        "prompt_sha256",
+        "frame_sequence_sha256",
+        "frames",
+    }
+)
+
+_PILLOW_JPEG_DECODE_SCRIPT = r"""
+import io
+import sys
+import warnings
+
+try:
+    from PIL import Image, ImageFile
+
+    Image.MAX_IMAGE_PIXELS = int(sys.argv[1])
+    ImageFile.LOAD_TRUNCATED_IMAGES = False
+    warnings.simplefilter("error")
+    payload = sys.stdin.buffer.read()
+    with Image.open(io.BytesIO(payload)) as probe:
+        if probe.format != "JPEG":
+            raise ValueError("not JPEG")
+        dimensions = probe.size
+        probe.verify()
+    with Image.open(io.BytesIO(payload)) as decoded:
+        if decoded.format != "JPEG" or decoded.size != dimensions:
+            raise ValueError("unstable JPEG metadata")
+        decoded.load()
+        if decoded.size != dimensions:
+            raise ValueError("unstable decoded dimensions")
+except BaseException:
+    raise SystemExit(2)
+
+sys.stdout.write(f"{dimensions[0]} {dimensions[1]}\n")
+"""
 
 
 class ContainerNodeError(ValueError):
     """Raised when an operation is unsafe or assigned to the wrong node."""
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Refuse redirecting a credential-bearing semantic LLM request."""
+
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    if hostname is None:
+        return False
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _semantic_llm_opener(base_url: str) -> Any:
+    """Build a no-redirect provider transport with local proxy isolation.
+
+    Loopback development endpoints must never be exported through ambient
+    proxy settings.  External HTTPS providers keep urllib's ordinary proxy
+    discovery while still refusing redirects of their bearer credentials.
+    """
+
+    handlers: list[Any] = []
+    if _is_loopback_hostname(urlsplit(base_url).hostname):
+        handlers.append(ProxyHandler({}))
+    handlers.append(_RejectRedirects())
+    return build_opener(*handlers)
 
 
 def _require(condition: bool, message: str) -> None:
@@ -73,6 +207,43 @@ def _integer(value: Any, name: str) -> int:
     return value
 
 
+def _number(value: Any, name: str) -> float:
+    _require(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0.0,
+        f"{name} must be finite and non-negative",
+    )
+    return float(value)
+
+
+def _strict_json_value(raw: bytes | str, label: str) -> Any:
+    """Parse one bounded JSON value without ambiguous keys or numbers."""
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            _require(key not in value, f"{label} contains a duplicate key")
+            value[key] = item
+        return value
+
+    def reject_constant(_value: str) -> None:
+        raise ContainerNodeError(f"{label} contains a non-finite number")
+
+    try:
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        return json.loads(
+            text,
+            object_pairs_hook=reject_duplicates,
+            parse_constant=reject_constant,
+        )
+    except ContainerNodeError:
+        raise
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ContainerNodeError(f"{label} is not valid JSON") from exc
+
+
 def _runtime_epoch(value: Any, name: str) -> str:
     epoch = _text(value, name)
     _require(
@@ -80,6 +251,321 @@ def _runtime_epoch(value: Any, name: str) -> str:
         f"{name} must be a lowercase runtime epoch",
     )
     return epoch
+
+
+def _jpeg_dimensions(payload: bytes, frame_index: int) -> tuple[int, int]:
+    """Return declared dimensions after bounded structural validation.
+
+    This cheap first gate validates the marker stream through the first scan,
+    requires an image-size marker and terminal EOI marker, and constrains both
+    encoded bytes and declared pixel dimensions.  A separate isolated Pillow
+    subprocess then performs the mandatory full decode.
+    """
+
+    label = f"frames[{frame_index}]"
+    _require(
+        len(payload) >= 4
+        and payload[:2] == b"\xff\xd8"
+        and payload[-2:] == b"\xff\xd9",
+        f"{label} is not a JPEG image",
+    )
+    offset = 2
+    dimensions: tuple[int, int] | None = None
+    found_scan = False
+    marker_limit = len(payload) - 2
+    while offset < marker_limit:
+        _require(payload[offset] == 0xFF, f"{label} has an invalid JPEG marker")
+        while offset < marker_limit and payload[offset] == 0xFF:
+            offset += 1
+        _require(offset < marker_limit, f"{label} has a truncated JPEG marker")
+        marker = payload[offset]
+        offset += 1
+        _require(marker != 0x00, f"{label} has an invalid JPEG marker")
+        if marker == 0xD9:
+            break
+        if marker in {0x01, *range(0xD0, 0xD9)}:
+            continue
+        _require(
+            offset + 2 <= marker_limit,
+            f"{label} has a truncated JPEG segment",
+        )
+        segment_length = int.from_bytes(payload[offset : offset + 2], "big")
+        _require(
+            segment_length >= 2 and offset + segment_length <= marker_limit,
+            f"{label} has an invalid JPEG segment length",
+        )
+        if marker in _JPEG_START_OF_FRAME_MARKERS:
+            _require(
+                segment_length >= 8,
+                f"{label} has a truncated JPEG size marker",
+            )
+            height = int.from_bytes(payload[offset + 3 : offset + 5], "big")
+            width = int.from_bytes(payload[offset + 5 : offset + 7], "big")
+            components = payload[offset + 7]
+            _require(
+                components > 0 and segment_length == 8 + 3 * components,
+                f"{label} has an invalid JPEG size marker",
+            )
+            _require(
+                dimensions is None,
+                f"{label} has more than one JPEG size marker",
+            )
+            dimensions = (width, height)
+        if marker == 0xDA:
+            found_scan = True
+            break
+        offset += segment_length
+    _require(
+        dimensions is not None and found_scan,
+        f"{label} is missing required JPEG markers",
+    )
+    width, height = dimensions
+    _require(
+        0 < width <= _MAX_SEMANTIC_IMAGE_DIMENSION
+        and 0 < height <= _MAX_SEMANTIC_IMAGE_DIMENSION
+        and width * height <= _MAX_SEMANTIC_IMAGE_PIXELS,
+        f"{label} exceeds the semantic image dimension limit",
+    )
+    return dimensions
+
+
+def _semantic_vision_request_adapter_supported() -> bool:
+    """Return whether the required isolated JPEG decoder is installed.
+
+    This is a local wire-adapter capability only.  It makes no claim that the
+    configured remote LLM backend accepts or correctly interprets images.
+    """
+
+    try:
+        return importlib.util.find_spec("PIL.Image") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
+
+
+def _decoded_jpeg_dimensions(
+    payload: bytes,
+    frame_index: int,
+) -> tuple[int, int]:
+    """Fully decode one JPEG in a credential-free, time-bounded process."""
+
+    label = f"frames[{frame_index}]"
+    _require(
+        _semantic_vision_request_adapter_supported(),
+        "semantic vision request adapter is unavailable: Pillow is not installed",
+    )
+    child_environment = {
+        "PYTHONHASHSEED": "0",
+        "PYTHONIOENCODING": "utf-8",
+    }
+    for name in ("SYSTEMROOT", "WINDIR"):
+        value = os.environ.get(name)
+        if value:
+            child_environment[name] = value
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                _PILLOW_JPEG_DECODE_SCRIPT,
+                str(_MAX_SEMANTIC_IMAGE_PIXELS),
+            ],
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=_SEMANTIC_IMAGE_DECODE_TIMEOUT_SECONDS,
+            check=False,
+            env=child_environment,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ContainerNodeError(
+            f"{label} exceeded the semantic JPEG decode timeout"
+        ) from exc
+    except OSError as exc:
+        raise ContainerNodeError(
+            f"{label} could not start the semantic JPEG decoder"
+        ) from exc
+    _require(
+        completed.returncode == 0,
+        f"{label} could not be safely decoded as JPEG",
+    )
+    try:
+        output = completed.stdout.decode("ascii")
+    except UnicodeError as exc:
+        raise ContainerNodeError(
+            f"{label} decoder returned invalid output"
+        ) from exc
+    match = re.fullmatch(
+        r"([1-9][0-9]*) ([1-9][0-9]*)\r?\n",
+        output,
+    )
+    _require(match is not None, f"{label} decoder returned invalid output")
+    width, height = (int(match.group(1)), int(match.group(2)))
+    _require(
+        0 < width <= _MAX_SEMANTIC_IMAGE_DIMENSION
+        and 0 < height <= _MAX_SEMANTIC_IMAGE_DIMENSION
+        and width * height <= _MAX_SEMANTIC_IMAGE_PIXELS,
+        f"{label} decoded pixels exceed the semantic image limit",
+    )
+    return width, height
+
+
+def _validated_semantic_frames(
+    value: Any,
+    *,
+    full_decode: bool = True,
+) -> tuple[tuple[dict[str, Any], ...], int, str]:
+    _require(isinstance(value, list), "frames must be an array")
+    _require(bool(value), "frames must not be empty")
+    _require(
+        len(value) <= _MAX_SEMANTIC_FRAME_COUNT,
+        "frame count exceeds the semantic vision limit",
+    )
+    validated: list[dict[str, Any]] = []
+    total_bytes = 0
+    total_pixels = 0
+    previous_timestamp: float | None = None
+    sequence_digest = hashlib.sha256()
+    sequence_digest.update(b"pathfinder.semantic-frame-sequence/v1\0")
+    maximum_encoded_bytes = 4 * ((_MAX_SEMANTIC_FRAME_BYTES + 2) // 3)
+    for position, raw_frame in enumerate(value):
+        label = f"frames[{position}]"
+        _require(isinstance(raw_frame, Mapping), f"{label} must be an object")
+        _require(
+            set(raw_frame) == _SEMANTIC_FRAME_FIELDS,
+            f"{label} fields do not match the vision request schema",
+        )
+        frame_index = _integer(raw_frame.get("frame_index"), f"{label}.frame_index")
+        _require(
+            frame_index == position,
+            "frames must be ordered by contiguous frame_index starting at zero",
+        )
+        timestamp = _number(
+            raw_frame.get("timestamp_seconds"),
+            f"{label}.timestamp_seconds",
+        )
+        if previous_timestamp is not None:
+            _require(
+                timestamp > previous_timestamp,
+                "frames must have strictly increasing timestamps",
+            )
+        previous_timestamp = timestamp
+        declared_width = _integer(raw_frame.get("width"), f"{label}.width")
+        declared_height = _integer(raw_frame.get("height"), f"{label}.height")
+        declared_size = _integer(
+            raw_frame.get("jpeg_size_bytes"),
+            f"{label}.jpeg_size_bytes",
+        )
+        _require(
+            0 < declared_size <= _MAX_SEMANTIC_FRAME_BYTES,
+            f"{label} exceeds the per-frame byte limit",
+        )
+        encoded_value = raw_frame.get("jpeg_base64")
+        _require(
+            isinstance(encoded_value, str) and bool(encoded_value),
+            f"{label}.jpeg_base64 must be a non-empty string",
+        )
+        encoded = encoded_value
+        _require(
+            encoded == encoded.strip(),
+            f"{label}.jpeg_base64 is not canonical",
+        )
+        _require(
+            len(encoded) <= maximum_encoded_bytes,
+            f"{label} exceeds the encoded frame limit",
+        )
+        try:
+            payload = base64.b64decode(encoded.encode("ascii"), validate=True)
+        except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+            raise ContainerNodeError(f"{label}.jpeg_base64 is invalid") from exc
+        _require(
+            base64.b64encode(payload).decode("ascii") == encoded,
+            f"{label}.jpeg_base64 is not canonical",
+        )
+        _require(
+            len(payload) == declared_size,
+            f"{label}.jpeg_size_bytes does not match decoded bytes",
+        )
+        declared_sha256 = _text(
+            raw_frame.get("jpeg_sha256"),
+            f"{label}.jpeg_sha256",
+        )
+        _require(
+            _SHA256.fullmatch(declared_sha256) is not None,
+            f"{label}.jpeg_sha256 must be lowercase SHA-256",
+        )
+        _require(
+            hashlib.sha256(payload).hexdigest() == declared_sha256,
+            f"{label}.jpeg_sha256 does not match decoded bytes",
+        )
+        marker_width, marker_height = _jpeg_dimensions(payload, position)
+        if full_decode:
+            width, height = _decoded_jpeg_dimensions(payload, position)
+            _require(
+                (width, height) == (marker_width, marker_height),
+                f"{label} decoded dimensions differ from JPEG metadata",
+            )
+        else:
+            width, height = marker_width, marker_height
+        _require(
+            (declared_width, declared_height) == (width, height),
+            f"{label} dimensions do not match the decoded JPEG",
+        )
+        total_pixels += width * height
+        _require(
+            total_pixels <= _MAX_SEMANTIC_TOTAL_IMAGE_PIXELS,
+            "total decoded pixels exceed the semantic vision limit",
+        )
+        total_bytes += len(payload)
+        _require(
+            total_bytes <= _MAX_SEMANTIC_TOTAL_FRAME_BYTES,
+            "total JPEG bytes exceed the semantic vision limit",
+        )
+        metadata = {
+            "frame_index": frame_index,
+            "timestamp_seconds": timestamp,
+            "width": width,
+            "height": height,
+            "jpeg_size_bytes": len(payload),
+            "jpeg_sha256": declared_sha256,
+        }
+        metadata_bytes = json.dumps(
+            metadata,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        sequence_digest.update(len(metadata_bytes).to_bytes(8, "big"))
+        sequence_digest.update(metadata_bytes)
+        sequence_digest.update(len(payload).to_bytes(8, "big"))
+        sequence_digest.update(payload)
+        validated.append({**metadata, "jpeg_bytes": payload})
+    return tuple(validated), total_bytes, sequence_digest.hexdigest()
+
+
+def semantic_frame_sequence_sha256(frames: Any) -> str:
+    """Return the canonical digest for an ordered v2 semantic frame array.
+
+    The digest domain is the UTF-8 byte string
+    ``pathfinder.semantic-frame-sequence/v1`` followed by NUL.  For each frame
+    in array order it then hashes: the eight-byte big-endian length of a
+    canonical compact JSON metadata object; those metadata bytes; the
+    eight-byte big-endian JPEG length; and the decoded JPEG bytes.  Metadata
+    keys are ``frame_index``, ``timestamp_seconds`` (normalised to a finite
+    float), ``width``, ``height``, ``jpeg_size_bytes``, and ``jpeg_sha256``.
+    This helper performs bounded wire, hash, marker, dimension, and ordering
+    validation, but deliberately does not invoke Pillow.  It is safe to use on
+    a host coordinator that has only the base Pathfinder installation.  N6
+    repeats these checks and additionally performs the mandatory isolated full
+    decode before it may claim frame-payload integrity.
+    """
+
+    _frames, _total_bytes, digest = _validated_semantic_frames(
+        frames,
+        full_decode=False,
+    )
+    return digest
 
 
 def _fixture_block(key: str) -> bytes:
@@ -220,6 +706,12 @@ class ContainerNodeRuntime:
             "payload_mode": "deterministic-size-preserving-fixture",
             "semantic_quality_enabled": self.enable_semantic_llm,
             "semantic_llm_configured": configured,
+            "semantic_vision_request_adapter_supported": (
+                _semantic_vision_request_adapter_supported()
+            ),
+            "semantic_vision_request_schema_version": (
+                CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION
+            ),
             "semantic_artifact_serving": self.semantic_artifact_root is not None,
             "credentials_recorded": False,
         }
@@ -344,6 +836,22 @@ class ContainerNodeRuntime:
             f"{question}"
         )
 
+    @staticmethod
+    def build_semantic_vision_prompt(
+        representation_id: str,
+        frame_count: int,
+        question: str,
+    ) -> str:
+        return (
+            "You are executing a controlled Pathfinder semantic task.\n"
+            "Use only the supplied JPEG frames. Do not use outside knowledge.\n"
+            "The frames are supplied in chronological order, from frame 0 "
+            f"through frame {frame_count - 1}.\n\n"
+            f"Representation ID: {representation_id}\n"
+            f"Frame count: {frame_count}\n\n"
+            f"{question}"
+        )
+
     def _semantic_llm_configuration(self) -> tuple[str, str, str, float]:
         _require(
             self.enable_semantic_llm,
@@ -378,17 +886,47 @@ class ContainerNodeRuntime:
         _require(timeout > 0.0, "semantic LLM timeout must be positive")
         return base_url, model, api_key, timeout
 
-    def _call_semantic_llm(self, prompt: str) -> tuple[str, str]:
+    def _call_semantic_llm(
+        self,
+        prompt: str,
+        *,
+        jpeg_frames: tuple[bytes, ...] = (),
+    ) -> tuple[str, str]:
         base_url, model, api_key, timeout = self._semantic_llm_configuration()
+        if jpeg_frames:
+            content: str | list[dict[str, Any]] = [
+                {"type": "text", "text": prompt},
+                *(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": (
+                                "data:image/jpeg;base64,"
+                                + base64.b64encode(frame).decode("ascii")
+                            ),
+                        },
+                    }
+                    for frame in jpeg_frames
+                ),
+            ]
+        else:
+            # Preserve the v1 wire representation byte for byte: text-only
+            # clients send a string content item, not a one-element array.
+            content = prompt
         body = json.dumps(
             {
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": [{"role": "user", "content": content}],
                 "temperature": 0,
             },
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode("utf-8")
+        if jpeg_frames:
+            _require(
+                len(body) <= _MAX_JSON_BYTES,
+                "semantic vision LLM request exceeds the local safety limit",
+            )
         request = Request(
             base_url + "/chat/completions",
             data=body,
@@ -400,7 +938,14 @@ class ContainerNodeRuntime:
             },
         )
         try:
-            with urlopen(request, timeout=timeout) as response:
+            # This request carries the semantic provider bearer token.  The
+            # standard urllib opener follows redirects and can replay that
+            # header to another origin, so semantic calls always use an
+            # explicit no-redirect transport.
+            with _semantic_llm_opener(base_url).open(
+                request,
+                timeout=timeout,
+            ) as response:
                 raw = response.read(_MAX_JSON_BYTES + 1)
         except HTTPError as exc:
             raise ContainerNodeError(
@@ -411,11 +956,16 @@ class ContainerNodeRuntime:
                 f"semantic LLM request failed: {type(exc).__name__}"
             ) from exc
         _require(len(raw) <= _MAX_JSON_BYTES, "semantic LLM response is too large")
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ContainerNodeError("semantic LLM response is not valid JSON") from exc
+        payload = _strict_json_value(raw, "semantic LLM response")
         _require(isinstance(payload, Mapping), "semantic LLM response must be an object")
+        reported_model = _text(
+            payload.get("model"),
+            "semantic LLM response model",
+        )
+        _require(
+            reported_model == model,
+            "semantic LLM response model differs from the requested model",
+        )
         choices = payload.get("choices")
         _require(isinstance(choices, list) and bool(choices), "semantic LLM response has no choices")
         first = choices[0]
@@ -424,7 +974,16 @@ class ContainerNodeRuntime:
         _require(isinstance(message, Mapping), "semantic LLM choice has no message")
         answer = message.get("content")
         _require(isinstance(answer, str), "semantic LLM answer must be text")
-        return answer, model
+        answer_bytes = answer.encode("utf-8")
+        _require(
+            len(answer_bytes) <= _MAX_SEMANTIC_ANSWER_BYTES,
+            "semantic LLM answer exceeds the local safety limit",
+        )
+        _require(
+            api_key not in answer,
+            "semantic LLM answer contains a configured credential",
+        )
+        return answer, reported_model
 
     def semantic_complete(self, request: Mapping[str, Any]) -> dict[str, Any]:
         """Run one idempotent, credential-free-recording semantic request.
@@ -436,7 +995,10 @@ class ContainerNodeRuntime:
 
         _require(
             request.get("schema_version")
-            == CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
+            in {
+                CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
+                CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION,
+            },
             "unsupported semantic request schema_version",
         )
         request_id = _text(request.get("semantic_request_id"), "semantic_request_id")
@@ -450,6 +1012,14 @@ class ContainerNodeRuntime:
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise ContainerNodeError("semantic request is not canonical JSON") from exc
+        if (
+            request.get("schema_version")
+            == CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION
+        ):
+            _require(
+                len(request_bytes) <= _MAX_JSON_BYTES,
+                "semantic vision request exceeds the local safety limit",
+            )
         request_sha256 = hashlib.sha256(request_bytes).hexdigest()
 
         while True:
@@ -490,6 +1060,14 @@ class ContainerNodeRuntime:
         request: Mapping[str, Any],
         request_sha256: str,
     ) -> dict[str, Any]:
+        if (
+            request.get("schema_version")
+            == CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION
+        ):
+            return self._semantic_complete_vision_once(
+                request,
+                request_sha256,
+            )
         _require(
             request.get("execution_node_id") == self.node_id,
             "semantic request is assigned to a different node",
@@ -584,6 +1162,108 @@ class ContainerNodeRuntime:
             "model": model,
             "final_answer": answer,
             "final_answer_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+            "llm_called": True,
+            "credentials_recorded": False,
+        }
+
+    def _semantic_complete_vision_once(
+        self,
+        request: Mapping[str, Any],
+        request_sha256: str,
+    ) -> dict[str, Any]:
+        _require(
+            set(request) == _SEMANTIC_VISION_REQUEST_FIELDS,
+            "semantic vision request fields do not match the v2 schema",
+        )
+        _require(
+            request.get("execution_node_id") == self.node_id,
+            "semantic request is assigned to a different node",
+        )
+        request_id = _text(
+            request.get("semantic_request_id"),
+            "semantic_request_id",
+        )
+        representation_id = _text(
+            request.get("representation_id"),
+            "representation_id",
+        )
+        representation_sha256 = _text(
+            request.get("representation_sha256"),
+            "representation_sha256",
+        )
+        _require(
+            _SHA256.fullmatch(representation_sha256) is not None,
+            "representation_sha256 must be lowercase SHA-256",
+        )
+        frames, total_frame_bytes, observed_sequence_sha256 = (
+            _validated_semantic_frames(request.get("frames"))
+        )
+        declared_sequence_sha256 = _text(
+            request.get("frame_sequence_sha256"),
+            "frame_sequence_sha256",
+        )
+        _require(
+            _SHA256.fullmatch(declared_sequence_sha256) is not None,
+            "frame_sequence_sha256 must be lowercase SHA-256",
+        )
+        _require(
+            declared_sequence_sha256 == observed_sequence_sha256,
+            "frame_sequence_sha256 does not match the ordered JPEG frames",
+        )
+        question = _text(request.get("question"), "question")
+        prompt = self.build_semantic_vision_prompt(
+            representation_id,
+            len(frames),
+            question,
+        )
+        prompt_bytes = prompt.encode("utf-8")
+        _require(
+            len(prompt_bytes) <= _MAX_SEMANTIC_VISION_PROMPT_BYTES,
+            "semantic vision prompt exceeds the local safety limit",
+        )
+        prompt_sha256 = _text(request.get("prompt_sha256"), "prompt_sha256")
+        _require(
+            _SHA256.fullmatch(prompt_sha256) is not None,
+            "prompt_sha256 must be lowercase SHA-256",
+        )
+        _require(
+            hashlib.sha256(prompt_bytes).hexdigest() == prompt_sha256,
+            "semantic prompt digest mismatch",
+        )
+        started_ns = time.perf_counter_ns()
+        answer, model = self._call_semantic_llm(
+            prompt,
+            jpeg_frames=tuple(frame["jpeg_bytes"] for frame in frames),
+        )
+        finished_ns = time.perf_counter_ns()
+        return {
+            "schema_version": (
+                CONTAINER_NODE_SEMANTIC_VISION_RESULT_SCHEMA_VERSION
+            ),
+            "api_version": CONTAINER_NODE_API_VERSION,
+            "status": "completed",
+            "outcome_type": "completed",
+            "telemetry_complete": True,
+            "semantic_request_id": request_id,
+            "execution_node_id": self.node_id,
+            "started_monotonic_ns": started_ns,
+            "finished_monotonic_ns": finished_ns,
+            "service_time_ms": (finished_ns - started_ns) / 1_000_000.0,
+            "request_sha256": request_sha256,
+            "prompt_sha256": prompt_sha256,
+            "representation_sha256": representation_sha256,
+            "frame_sequence_sha256": declared_sequence_sha256,
+            "frame_count": len(frames),
+            "representation_delivery_bytes": total_frame_bytes,
+            "semantic_input_kind": "ordered-jpeg-frames",
+            "semantic_frame_payload_integrity_verified": True,
+            "data_plane_artifact_delivery_verified": False,
+            "source_node_id": None,
+            "model": model,
+            "final_answer": answer,
+            "final_answer_sha256": hashlib.sha256(
+                answer.encode("utf-8")
+            ).hexdigest(),
             "llm_called": True,
             "credentials_recorded": False,
         }
@@ -708,7 +1388,7 @@ class ContainerNodeRuntime:
             response_bytes = response.read(_MAX_JSON_BYTES + 1)
             _require(len(response_bytes) <= _MAX_JSON_BYTES, "sink response is too large")
             _require(response.status == 200, f"sink returned HTTP {response.status}")
-            result = json.loads(response_bytes.decode("utf-8"))
+            result = _strict_json_value(response_bytes, "sink response")
             _require(result.get("sha256") == expected_digest, "sink digest mismatch")
             _require(result.get("bytes_received") == size, "sink byte count mismatch")
             _require(
@@ -1016,13 +1696,26 @@ class ContainerNodeRequestHandler(BaseHTTPRequestHandler):
                 })
                 return
             if self.path == "/v1/semantic/chat-completions":
+                media_type = (
+                    self.headers.get("Content-Type", "")
+                    .partition(";")[0]
+                    .strip()
+                    .casefold()
+                )
+                _require(
+                    media_type == "application/json",
+                    "semantic request Content-Type must be application/json",
+                )
                 _require(
                     length <= _MAX_SEMANTIC_PROMPT_BYTES + _MAX_JSON_BYTES,
                     "semantic request exceeds the local safety limit",
                 )
                 raw = self.rfile.read(length)
                 _require(len(raw) == length, "semantic request is truncated")
-                semantic_request = json.loads(raw.decode("utf-8"))
+                semantic_request = _strict_json_value(
+                    raw,
+                    "semantic request",
+                )
                 _require(
                     isinstance(semantic_request, Mapping),
                     "semantic request must be an object",
@@ -1036,7 +1729,7 @@ class ContainerNodeRequestHandler(BaseHTTPRequestHandler):
             _require(length <= _MAX_JSON_BYTES, "operation request is too large")
             raw = self.rfile.read(length)
             _require(len(raw) == length, "operation request is truncated")
-            operation = json.loads(raw.decode("utf-8"))
+            operation = _strict_json_value(raw, "operation request")
             _require(isinstance(operation, Mapping), "operation must be an object")
             self._write_json(200, self.server.runtime.execute(operation))
         except (ContainerNodeError, UnicodeError, json.JSONDecodeError, ValueError) as exc:

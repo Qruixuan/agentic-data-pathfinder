@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
+import http.client
 import io
 import json
 import os
@@ -16,6 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 import pathfinder.simulator.container_execution as container_execution
+import pathfinder.simulator.container_node as container_node
+import pathfinder.simulator.semantic_execution as semantic_execution
 from pathfinder.cli import main as cli_main
 from pathfinder.simulator import (
     CONTAINER_OPERATION_SCHEMA_VERSION,
@@ -38,6 +42,9 @@ from pathfinder.simulator import (
     verify_container_execution,
     verify_local_container_semantic_run,
     verify_local_container_semantic_score_alignment,
+)
+from pathfinder.simulator.container_node import (
+    semantic_frame_sequence_sha256,
 )
 
 
@@ -536,6 +543,10 @@ class LocalComposePackageTest(unittest.TestCase):
         self.assertTrue(verified["semantic_runtime_build"])
         self.assertEqual("N6", verified["semantic_executor_node_id"])
         self.assertEqual(["N3"], verified["semantic_artifact_source_node_ids"])
+        self.assertEqual(
+            "http://pathfinder-sim-n3-origin-cold:9080",
+            verified["verified_host_endpoints"]["N3"]["container_url"],
+        )
 
     def test_pinned_images_are_enforced_and_cannot_be_rebuilt(self) -> None:
         digest = "sha256:" + "a" * 64
@@ -1125,14 +1136,80 @@ class _FakeSemanticLLMHandler(BaseHTTPRequestHandler):
             "payload": payload,
             "authorization": self.headers.get("Authorization"),
         })
-        response = json.dumps({
-            "choices": [{"message": {"content": getattr(self.server, "answer", "B")}}],
-        }).encode("utf-8")
+        response = getattr(self.server, "raw_response", None)
+        if response is None:
+            response = json.dumps({
+                "model": getattr(
+                    self.server,
+                    "reported_model",
+                    payload["model"],
+                ),
+                "choices": [{
+                    "message": {
+                        "content": getattr(self.server, "answer", "B"),
+                    },
+                }],
+            }).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(response)))
         self.end_headers()
         self.wfile.write(response)
+
+
+_TEST_JPEG_BASE64 = (
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoM"
+    "DAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsN"
+    "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAAR"
+    "CAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA"
+    "AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkK"
+    "FhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWG"
+    "h4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl"
+    "5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA"
+    "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYk"
+    "NOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOE"
+    "hYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk"
+    "5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD7V+C37O3wp1v4OeBNR1H4ZeDr/ULzQbC4"
+    "ubu60C0klnle3Rnd3aMlmYkkknJJJNFFFf0xln+40P8ABH8keXiP40/V/mf/2Q=="
+)
+
+
+def _vision_frame(
+    frame_index: int,
+    timestamp_seconds: float,
+    *,
+    padding_bytes: int = 0,
+) -> dict:
+    payload = base64.b64decode(_TEST_JPEG_BASE64, validate=True)
+    comment_segments = []
+    distinguishing_comment = f"frame-{frame_index}".encode("ascii")
+    comment_segments.append(distinguishing_comment)
+    remaining_padding = padding_bytes
+    while remaining_padding:
+        chunk_size = min(remaining_padding, 65533)
+        comment_segments.append(b"p" * chunk_size)
+        remaining_padding -= chunk_size
+    if comment_segments:
+        encoded_comments = b"".join(
+            b"\xff\xfe"
+            + (len(comment) + 2).to_bytes(2, "big")
+            + comment
+            for comment in comment_segments
+        )
+        payload = (
+            payload[:2]
+            + encoded_comments
+            + payload[2:]
+        )
+    return {
+        "frame_index": frame_index,
+        "timestamp_seconds": timestamp_seconds,
+        "width": 2,
+        "height": 2,
+        "jpeg_size_bytes": len(payload),
+        "jpeg_sha256": sha256(payload).hexdigest(),
+        "jpeg_base64": base64.b64encode(payload).decode("ascii"),
+    }
 
 
 class LocalSemanticExecutionTest(unittest.TestCase):
@@ -1155,6 +1232,138 @@ class LocalSemanticExecutionTest(unittest.TestCase):
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
+
+    def test_legacy_loopback_transport_ignores_ambient_proxy(self) -> None:
+        direct_requests: list[str] = []
+        proxy_requests: list[str] = []
+
+        class DirectHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _send(self, value: dict[str, object]) -> None:
+                body = json.dumps(value).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:
+                direct_requests.append("GET " + self.path)
+                self._send({"status": "ok"})
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                direct_requests.append("POST " + self.path)
+                self._send({"status": "completed"})
+
+        class ProxyHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _reject(self) -> None:
+                proxy_requests.append(self.command + " " + self.path)
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = _reject
+            do_POST = _reject
+
+        direct = ThreadingHTTPServer(("127.0.0.1", 0), DirectHandler)
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+        self._start(direct)
+        self._start(proxy)
+        direct_url = f"http://127.0.0.1:{direct.server_port}"
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        with mock.patch.dict(os.environ, {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "ALL_PROXY": proxy_url,
+            "NO_PROXY": "",
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "all_proxy": proxy_url,
+            "no_proxy": "",
+        }, clear=False):
+            health = semantic_execution._get_json(
+                direct_url + "/healthz",
+                2.0,
+            )
+            result = semantic_execution._request_json(
+                direct_url + "/v1/semantic/chat-completions",
+                {"sentinel": "private"},
+                2.0,
+            )
+
+        self.assertEqual("ok", health["status"])
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(
+            ["GET /healthz", "POST /v1/semantic/chat-completions"],
+            direct_requests,
+        )
+        self.assertEqual([], proxy_requests)
+
+    def test_legacy_loopback_transport_refuses_redirects(self) -> None:
+        source_requests: list[str] = []
+        destination_requests: list[str] = []
+
+        class DestinationHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _record(self) -> None:
+                destination_requests.append(self.command)
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            do_GET = _record
+            do_POST = _record
+
+        destination = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            DestinationHandler,
+        )
+        self._start(destination)
+        destination_url = (
+            f"http://127.0.0.1:{destination.server_port}/redirected"
+        )
+
+        class SourceHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _redirect(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length:
+                    self.rfile.read(length)
+                source_requests.append(self.command)
+                self.send_response(302)
+                self.send_header("Location", destination_url)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = _redirect
+            do_POST = _redirect
+
+        source = ThreadingHTTPServer(("127.0.0.1", 0), SourceHandler)
+        self._start(source)
+        source_url = f"http://127.0.0.1:{source.server_port}"
+        with self.assertRaises(SemanticExecutionError):
+            semantic_execution._get_json(source_url + "/healthz", 2.0)
+        with self.assertRaises(SemanticExecutionError):
+            semantic_execution._request_json(
+                source_url + "/v1/semantic/chat-completions",
+                {"sentinel": "private"},
+                2.0,
+            )
+
+        self.assertEqual(["GET", "POST"], source_requests)
+        self.assertEqual([], destination_requests)
 
     def _semantic_inputs(self) -> tuple[Path, Path]:
         representations = self.root / "representations"
@@ -1183,6 +1392,73 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             }],
         }), encoding="utf-8")
         return representations, manifest
+
+    @staticmethod
+    def _vision_request(
+        frames: list[dict] | None = None,
+        *,
+        question: str = "Which option is correct? Return exactly one option ID.",
+    ) -> dict:
+        selected = (
+            frames
+            if frames is not None
+            else [
+                _vision_frame(0, 0.5),
+                _vision_frame(1, 1.5),
+            ]
+        )
+        prompt = ContainerNodeRuntime.build_semantic_vision_prompt(
+            "sampled_frame_bundle",
+            len(selected),
+            question,
+        )
+        return {
+            "schema_version": (
+                "pathfinder.container-node-semantic-request/v1alpha2"
+            ),
+            "semantic_request_id": "vision-test-v2",
+            "execution_node_id": "N6",
+            "representation_id": "sampled_frame_bundle",
+            "representation_sha256": "a" * 64,
+            "question": question,
+            "prompt_sha256": sha256(prompt.encode("utf-8")).hexdigest(),
+            "frame_sequence_sha256": semantic_frame_sequence_sha256(
+                selected
+            ),
+            "frames": selected,
+        }
+
+    def test_semantic_http_endpoint_requires_json_content_type(self) -> None:
+        node = create_container_node_server(
+            "N6",
+            self.root / "content-type-state",
+            enable_semantic_llm=True,
+        )
+        self._start(node)
+        body = json.dumps(self._vision_request()).encode("utf-8")
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            node.server_port,
+            timeout=2.0,
+        )
+        with mock.patch.object(
+            node.runtime,
+            "_call_semantic_llm",
+        ) as llm_call:
+            connection.request(
+                "POST",
+                "/v1/semantic/chat-completions",
+                body=body,
+                headers={"Content-Type": "text/plain"},
+            )
+            response = connection.getresponse()
+            response_body = response.read().decode("utf-8")
+        connection.close()
+
+        self.assertEqual(400, response.status)
+        self.assertIn("Content-Type must be application/json", response_body)
+        llm_call.assert_not_called()
+        self.assertEqual({}, node.runtime._semantic_results)
 
     def test_semantic_runner_calls_container_executor_and_scores_answer(self) -> None:
         node = create_container_node_server(
@@ -1240,6 +1516,709 @@ class LocalSemanticExecutionTest(unittest.TestCase):
         verified = verify_local_container_semantic_run(output)
         self.assertEqual("VERIFIED_OFFLINE", verified["status"])
         self.assertEqual(1.0, verified["task_accuracy"])
+
+    def test_semantic_runner_uses_the_verified_endpoint_snapshot(self) -> None:
+        node = create_container_node_server(
+            "N6",
+            self.root / "snapshot-n6-state",
+            enable_semantic_llm=True,
+        )
+        self._start(node)
+        node_port = int(node.server_address[1])
+        compose = self.root / "snapshot-semantic-compose"
+        build_local_container_compose(
+            self.container_plan,
+            output_dir=compose,
+            host_port_base=node_port - 6,
+            semantic_executor_node_id="N6",
+        )
+        llm = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _FakeSemanticLLMHandler,
+        )
+        llm.requests = []  # type: ignore[attr-defined]
+        self._start(llm)
+
+        unexpected_requests: list[str] = []
+
+        class UnexpectedEndpointHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def do_GET(self) -> None:
+                unexpected_requests.append(self.path)
+                self.send_response(500)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_POST = do_GET
+
+        unexpected = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            UnexpectedEndpointHandler,
+        )
+        self._start(unexpected)
+        unexpected_base = f"http://127.0.0.1:{unexpected.server_port}"
+
+        def verify_then_replace_endpoint(package: Path) -> dict[str, object]:
+            verified = verify_local_container_compose(package)
+            endpoint_path = package / "container_endpoints.json"
+            document = json.loads(endpoint_path.read_text(encoding="utf-8"))
+            endpoint = document["endpoints"]["N6"]
+            endpoint["host_health_url"] = unexpected_base + "/healthz"
+            endpoint["host_semantic_url"] = (
+                unexpected_base + "/v1/semantic/chat-completions"
+            )
+            endpoint_path.write_text(
+                json.dumps(document),
+                encoding="utf-8",
+            )
+            return verified
+
+        representations, manifest = self._semantic_inputs()
+        output = self.root / "snapshot-semantic-output"
+        with (
+            mock.patch.object(
+                semantic_execution,
+                "verify_local_container_compose",
+                side_effect=verify_then_replace_endpoint,
+            ),
+            mock.patch.dict(os.environ, {
+                "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                    f"http://127.0.0.1:{llm.server_port}"
+                ),
+                "PATHFINDER_SEMANTIC_LLM_MODEL": "test-text-model",
+                "PATHFINDER_SEMANTIC_LLM_API_KEY": "snapshot-test-secret",
+                "PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS": "10",
+            }, clear=False),
+        ):
+            report = execute_local_container_semantic_run(
+                compose,
+                manifest,
+                representations,
+                output_dir=output,
+                request_timeout_seconds=10.0,
+            )
+
+        self.assertEqual("COMPLETE_SEMANTIC_LOCAL", report["status"])
+        self.assertEqual([], unexpected_requests)
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+
+    def test_v2_vision_request_sends_ordered_openai_image_content_without_leaking_it(
+        self,
+    ) -> None:
+        llm = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _FakeSemanticLLMHandler,
+        )
+        llm.requests = []  # type: ignore[attr-defined]
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "n6-vision-state",
+            enable_semantic_llm=True,
+        )
+        request = self._vision_request()
+        frames = request["frames"]
+        with mock.patch.dict(os.environ, {
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                f"http://127.0.0.1:{llm.server_address[1]}"
+            ),
+            "PATHFINDER_SEMANTIC_LLM_MODEL": "test-vision-model",
+            "PATHFINDER_SEMANTIC_LLM_API_KEY": "vision-test-secret",
+            "PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS": "10",
+        }, clear=False):
+            result = runtime.semantic_complete(request)
+            replay = runtime.semantic_complete(request)
+
+        self.assertEqual(
+            "pathfinder.container-node-semantic-result/v1alpha2",
+            result["schema_version"],
+        )
+        self.assertEqual("ordered-jpeg-frames", result["semantic_input_kind"])
+        self.assertEqual(2, result["frame_count"])
+        self.assertEqual(
+            sum(frame["jpeg_size_bytes"] for frame in frames),
+            result["representation_delivery_bytes"],
+        )
+        self.assertEqual(
+            request["frame_sequence_sha256"],
+            result["frame_sequence_sha256"],
+        )
+        self.assertTrue(result["semantic_frame_payload_integrity_verified"])
+        self.assertFalse(result["data_plane_artifact_delivery_verified"])
+        self.assertFalse(result["idempotent_replay"])
+        self.assertTrue(replay["idempotent_replay"])
+        health = runtime.health()
+        self.assertTrue(
+            health["semantic_vision_request_adapter_supported"]
+        )
+        self.assertNotIn("semantic_vision_supported", health)
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+
+        sent = llm.requests[0]  # type: ignore[attr-defined]
+        self.assertEqual("Bearer vision-test-secret", sent["authorization"])
+        self.assertEqual("test-vision-model", sent["payload"]["model"])
+        content = sent["payload"]["messages"][0]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual("text", content[0]["type"])
+        self.assertEqual(
+            request["prompt_sha256"],
+            sha256(content[0]["text"].encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual(
+            [
+                "data:image/jpeg;base64," + frame["jpeg_base64"]
+                for frame in frames
+            ],
+            [entry["image_url"]["url"] for entry in content[1:]],
+        )
+        self.assertEqual(
+            ["image_url", "image_url"],
+            [entry["type"] for entry in content[1:]],
+        )
+
+        result_text = json.dumps(result, sort_keys=True)
+        self.assertNotIn(request["question"], result_text)
+        self.assertNotIn(content[0]["text"], result_text)
+        self.assertNotIn("vision-test-secret", result_text)
+        for frame in frames:
+            self.assertNotIn(frame["jpeg_base64"], result_text)
+
+    def test_semantic_llm_response_model_must_match_requested_model(self) -> None:
+        llm = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _FakeSemanticLLMHandler,
+        )
+        llm.requests = []  # type: ignore[attr-defined]
+        llm.reported_model = "different-model"  # type: ignore[attr-defined]
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "model-mismatch-state",
+            enable_semantic_llm=True,
+        )
+        with (
+            mock.patch.dict(os.environ, {
+                "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                    f"http://127.0.0.1:{llm.server_address[1]}"
+                ),
+                "PATHFINDER_SEMANTIC_LLM_MODEL": "requested-model",
+                "PATHFINDER_SEMANTIC_LLM_API_KEY": "model-test-secret",
+            }, clear=False),
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "response model differs from the requested model",
+            ),
+        ):
+            runtime.semantic_complete(self._vision_request())
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+
+    def test_semantic_llm_redirect_is_refused_without_forwarding_bearer(
+        self,
+    ) -> None:
+        source_requests: list[dict[str, object]] = []
+        destination_requests: list[dict[str, object]] = []
+
+        class DestinationHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def do_GET(self) -> None:
+                destination_requests.append({
+                    "method": self.command,
+                    "authorization": self.headers.get("Authorization"),
+                })
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_POST = do_GET
+
+        destination = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            DestinationHandler,
+        )
+        self._start(destination)
+        destination_url = (
+            f"http://127.0.0.1:{destination.server_address[1]}/steal"
+        )
+
+        class RedirectHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                self.rfile.read(length)
+                source_requests.append({
+                    "method": self.command,
+                    "authorization": self.headers.get("Authorization"),
+                })
+                self.send_response(302)
+                self.send_header("Location", destination_url)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        self._start(source)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "redirect-state",
+            enable_semantic_llm=True,
+        )
+        secret = "redirect-test-secret"
+        with (
+            mock.patch.dict(os.environ, {
+                "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                    f"http://127.0.0.1:{source.server_address[1]}"
+                ),
+                "PATHFINDER_SEMANTIC_LLM_MODEL": "redirect-test-model",
+                "PATHFINDER_SEMANTIC_LLM_API_KEY": secret,
+            }, clear=False),
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "failed with HTTP 302",
+            ) as context,
+        ):
+            runtime._call_semantic_llm("Return one option ID.")
+
+        self.assertEqual(1, len(source_requests))
+        self.assertEqual(
+            "Bearer " + secret,
+            source_requests[0]["authorization"],
+        )
+        self.assertEqual([], destination_requests)
+        self.assertNotIn(secret, str(context.exception))
+        self.assertNotIn("steal", str(context.exception))
+
+    def test_loopback_semantic_llm_ignores_ambient_proxy(self) -> None:
+        proxy_requests: list[str] = []
+
+        class ProxyHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def do_POST(self) -> None:
+                proxy_requests.append(self.path)
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+        self._start(proxy)
+        llm = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _FakeSemanticLLMHandler,
+        )
+        llm.requests = []  # type: ignore[attr-defined]
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "provider-proxy-state",
+            enable_semantic_llm=True,
+        )
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        with mock.patch.dict(os.environ, {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "ALL_PROXY": proxy_url,
+            "NO_PROXY": "",
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "all_proxy": proxy_url,
+            "no_proxy": "",
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                f"http://127.0.0.1:{llm.server_port}"
+            ),
+            "PATHFINDER_SEMANTIC_LLM_MODEL": "loopback-model",
+            "PATHFINDER_SEMANTIC_LLM_API_KEY": "loopback-secret",
+        }, clear=False):
+            answer, model = runtime._call_semantic_llm(
+                "Return one option ID."
+            )
+
+        self.assertEqual("B", answer)
+        self.assertEqual("loopback-model", model)
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+        self.assertEqual([], proxy_requests)
+
+    def test_external_semantic_llm_keeps_default_proxy_discovery(self) -> None:
+        sentinel = object()
+        with mock.patch.object(
+            container_node,
+            "build_opener",
+            return_value=sentinel,
+        ) as build:
+            self.assertIs(
+                sentinel,
+                container_node._semantic_llm_opener(
+                    "https://model.example/v1"
+                ),
+            )
+        external_handlers = build.call_args.args
+        self.assertEqual(1, len(external_handlers))
+        self.assertIsInstance(
+            external_handlers[0],
+            container_node._RejectRedirects,
+        )
+
+        with mock.patch.object(
+            container_node,
+            "build_opener",
+            return_value=sentinel,
+        ) as build:
+            container_node._semantic_llm_opener(
+                "http://127.0.0.1:8000/v1"
+            )
+        loopback_handlers = build.call_args.args
+        self.assertTrue(
+            any(
+                isinstance(handler, container_node.ProxyHandler)
+                for handler in loopback_handlers
+            )
+        )
+
+    def test_semantic_llm_answer_is_bounded_and_cannot_echo_api_key(self) -> None:
+        llm = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _FakeSemanticLLMHandler,
+        )
+        llm.requests = []  # type: ignore[attr-defined]
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "answer-boundary-state",
+            enable_semantic_llm=True,
+        )
+        secret = "answer-echo-secret"
+        environment = {
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                f"http://127.0.0.1:{llm.server_address[1]}"
+            ),
+            "PATHFINDER_SEMANTIC_LLM_MODEL": "answer-boundary-model",
+            "PATHFINDER_SEMANTIC_LLM_API_KEY": secret,
+        }
+
+        def request(request_id: str) -> dict[str, object]:
+            prompt = "Return one option ID."
+            return {
+                "schema_version": (
+                    "pathfinder.container-node-semantic-request/v1alpha1"
+                ),
+                "semantic_request_id": request_id,
+                "execution_node_id": "N6",
+                "representation_sha256": "a" * 64,
+                "prompt": prompt,
+                "prompt_sha256": sha256(prompt.encode("utf-8")).hexdigest(),
+            }
+
+        echoed_answers = (
+            secret,
+            "prefix-" + secret,
+            secret + "-suffix",
+            "prefix-" + secret + "-suffix",
+        )
+        for index, answer in enumerate(echoed_answers):
+            llm.answer = answer  # type: ignore[attr-defined]
+            with (
+                mock.patch.dict(os.environ, environment, clear=False),
+                self.subTest(answer_position=index),
+                self.assertRaisesRegex(
+                    ContainerNodeError,
+                    "contains a configured credential",
+                ) as context,
+            ):
+                runtime.semantic_complete(request(f"credential-echo-{index}"))
+            self.assertNotIn(secret, str(context.exception))
+            self.assertEqual({}, runtime._semantic_results)
+
+        llm.answer = "A" * (16 * 1024 + 1)  # type: ignore[attr-defined]
+        with (
+            mock.patch.dict(os.environ, environment, clear=False),
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "answer exceeds the local safety limit",
+            ),
+        ):
+            runtime.semantic_complete(request("oversized-answer"))
+        self.assertEqual({}, runtime._semantic_results)
+
+    def test_semantic_llm_response_rejects_duplicate_json_keys(self) -> None:
+        llm = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _FakeSemanticLLMHandler,
+        )
+        llm.requests = []  # type: ignore[attr-defined]
+        llm.raw_response = (  # type: ignore[attr-defined]
+            b'{"model":"vision-test-model",'
+            b'"model":"vision-test-model",'
+            b'"choices":[{"message":{"content":"B"}}]}'
+        )
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "duplicate-response-state",
+            enable_semantic_llm=True,
+        )
+        with (
+            mock.patch.dict(os.environ, {
+                "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                    f"http://127.0.0.1:{llm.server_address[1]}"
+                ),
+                "PATHFINDER_SEMANTIC_LLM_MODEL": "vision-test-model",
+                "PATHFINDER_SEMANTIC_LLM_API_KEY": "duplicate-test-secret",
+            }, clear=False),
+            self.assertRaisesRegex(ContainerNodeError, "duplicate key"),
+        ):
+            runtime.semantic_complete(self._vision_request())
+
+    def test_vision_decode_fails_closed_without_pillow(self) -> None:
+        frames = [_vision_frame(0, 0.5)]
+        with (
+            mock.patch.object(
+                container_node.importlib.util,
+                "find_spec",
+                return_value=None,
+            ),
+        ):
+            # The host coordinator can still bind canonical frame bytes; only
+            # the N6 semantic ingress makes the stronger full-decode claim.
+            self.assertRegex(
+                semantic_frame_sequence_sha256(frames),
+                r"^[0-9a-f]{64}$",
+            )
+            with self.assertRaisesRegex(
+                ContainerNodeError,
+                "Pillow is not installed",
+            ):
+                container_node._validated_semantic_frames(frames)
+
+    def test_vision_decode_timeout_fails_closed(self) -> None:
+        payload = base64.b64decode(_TEST_JPEG_BASE64, validate=True)
+        with (
+            mock.patch.object(
+                container_node,
+                "_semantic_vision_request_adapter_supported",
+                return_value=True,
+            ),
+            mock.patch.object(
+                container_node.subprocess,
+                "run",
+                side_effect=container_node.subprocess.TimeoutExpired(
+                    cmd="isolated-decoder",
+                    timeout=3.0,
+                ),
+            ),
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "decode timeout",
+            ),
+        ):
+            container_node._decoded_jpeg_dimensions(payload, 0)
+
+    def test_vision_decode_enforces_total_bundle_pixel_bound(self) -> None:
+        frames = [
+            _vision_frame(0, 0.5),
+            _vision_frame(1, 1.5),
+        ]
+        with (
+            mock.patch.object(
+                container_node,
+                "_MAX_SEMANTIC_TOTAL_IMAGE_PIXELS",
+                7,
+            ),
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "total decoded pixels exceed",
+            ),
+        ):
+            container_node._validated_semantic_frames(frames)
+
+    def test_vision_decode_treats_decompression_warning_as_error(self) -> None:
+        payload = base64.b64decode(_TEST_JPEG_BASE64, validate=True)
+        with (
+            mock.patch.object(
+                container_node,
+                "_MAX_SEMANTIC_IMAGE_PIXELS",
+                1,
+            ),
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "could not be safely decoded",
+            ),
+        ):
+            container_node._decoded_jpeg_dimensions(payload, 0)
+
+    def test_v2_vision_request_rejects_invalid_frames_before_calling_llm(
+        self,
+    ) -> None:
+        base_request = self._vision_request()
+
+        def clone() -> dict:
+            return json.loads(json.dumps(base_request))
+
+        cases: list[tuple[str, dict, str]] = []
+
+        unordered = clone()
+        unordered["frames"].reverse()
+        cases.append(("unordered", unordered, "ordered by contiguous"))
+
+        repeated_timestamp = clone()
+        repeated_timestamp["frames"][1]["timestamp_seconds"] = 0.5
+        cases.append(
+            ("timestamp", repeated_timestamp, "strictly increasing timestamps")
+        )
+
+        invalid_base64 = clone()
+        invalid_base64["frames"][0]["jpeg_base64"] = "not+canonical==="
+        cases.append(("base64", invalid_base64, "jpeg_base64 is invalid"))
+
+        noncanonical_base64 = clone()
+        noncanonical_base64["frames"][0]["jpeg_base64"] += "\n"
+        cases.append(
+            (
+                "base64-whitespace",
+                noncanonical_base64,
+                "jpeg_base64 is not canonical",
+            )
+        )
+
+        wrong_digest = clone()
+        wrong_digest["frames"][0]["jpeg_sha256"] = "0" * 64
+        cases.append(("jpeg-digest", wrong_digest, "does not match decoded bytes"))
+
+        non_jpeg = clone()
+        non_jpeg_bytes = b"\xff\xd8not-a-jpeg\xff\xd9"
+        non_jpeg["frames"][0].update({
+            "jpeg_size_bytes": len(non_jpeg_bytes),
+            "jpeg_sha256": sha256(non_jpeg_bytes).hexdigest(),
+            "jpeg_base64": base64.b64encode(non_jpeg_bytes).decode("ascii"),
+        })
+        cases.append(("jpeg", non_jpeg, "invalid JPEG marker"))
+
+        undecodable = clone()
+        valid_jpeg = bytearray(
+            base64.b64decode(_TEST_JPEG_BASE64, validate=True)
+        )
+        scan_marker = valid_jpeg.index(b"\xff\xda")
+        valid_jpeg[scan_marker + 5] = 0x7F
+        undecodable_bytes = bytes(valid_jpeg)
+        undecodable["frames"][0].update({
+            "jpeg_size_bytes": len(undecodable_bytes),
+            "jpeg_sha256": sha256(undecodable_bytes).hexdigest(),
+            "jpeg_base64": base64.b64encode(undecodable_bytes).decode("ascii"),
+        })
+        cases.append(
+            ("undecodable", undecodable, "could not be safely decoded")
+        )
+
+        wrong_dimensions = clone()
+        wrong_dimensions["frames"][0]["width"] = 3
+        cases.append(("dimensions", wrong_dimensions, "dimensions do not match"))
+
+        oversized_frame = clone()
+        oversized_frame["frames"][0]["jpeg_size_bytes"] = 512 * 1024 + 1
+        cases.append(("frame-limit", oversized_frame, "per-frame byte limit"))
+
+        wrong_sequence = clone()
+        wrong_sequence["frame_sequence_sha256"] = "0" * 64
+        cases.append(("sequence", wrong_sequence, "does not match the ordered"))
+
+        extra_field = clone()
+        extra_field["authorization"] = "must-not-be-accepted"
+        cases.append(("extra-field", extra_field, "fields do not match"))
+
+        too_many = clone()
+        too_many["frames"] = [
+            _vision_frame(index, index + 0.5)
+            for index in range(33)
+        ]
+        too_many["frame_sequence_sha256"] = "0" * 64
+        too_many_prompt = ContainerNodeRuntime.build_semantic_vision_prompt(
+            too_many["representation_id"],
+            len(too_many["frames"]),
+            too_many["question"],
+        )
+        too_many["prompt_sha256"] = sha256(
+            too_many_prompt.encode("utf-8")
+        ).hexdigest()
+        cases.append(("frame-count", too_many, "frame count exceeds"))
+
+        too_many_bytes = clone()
+        too_many_bytes["frames"] = [
+            _vision_frame(
+                index,
+                index + 0.5,
+                padding_bytes=360 * 1024,
+            )
+            for index in range(3)
+        ]
+        too_many_bytes["frame_sequence_sha256"] = "0" * 64
+        byte_limit_prompt = ContainerNodeRuntime.build_semantic_vision_prompt(
+            too_many_bytes["representation_id"],
+            len(too_many_bytes["frames"]),
+            too_many_bytes["question"],
+        )
+        too_many_bytes["prompt_sha256"] = sha256(
+            byte_limit_prompt.encode("utf-8")
+        ).hexdigest()
+        cases.append(
+            ("total-frame-bytes", too_many_bytes, "total JPEG bytes exceed")
+        )
+
+        for name, request, message in cases:
+            request["semantic_request_id"] = f"invalid-{name}"
+            runtime = ContainerNodeRuntime(
+                "N6",
+                self.root / f"invalid-{name}",
+                enable_semantic_llm=True,
+            )
+            with (
+                mock.patch.object(
+                    runtime,
+                    "_call_semantic_llm",
+                    side_effect=AssertionError("invalid input reached LLM"),
+                ),
+                self.subTest(name=name),
+                self.assertRaisesRegex(ContainerNodeError, message),
+            ):
+                runtime.semantic_complete(request)
+
+    def test_v2_vision_request_bounds_prompt_and_pins_sequence_digest(self) -> None:
+        frames = [
+            _vision_frame(0, 0.5),
+            _vision_frame(1, 1.5),
+        ]
+        digest = semantic_frame_sequence_sha256(frames)
+        self.assertEqual(
+            "85902fc17ded7544a273973ca883e342c4ec1236a7d4e84c5a5d31d91245536e",
+            digest,
+        )
+        changed = json.loads(json.dumps(frames))
+        changed[1]["timestamp_seconds"] = 1.75
+        self.assertNotEqual(digest, semantic_frame_sequence_sha256(changed))
+
+        long_question = "q" * (128 * 1024)
+        request = self._vision_request(frames, question=long_question)
+        request["semantic_request_id"] = "oversized-prompt"
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "oversized-prompt",
+            enable_semantic_llm=True,
+        )
+        with (
+            mock.patch.object(
+                runtime,
+                "_call_semantic_llm",
+                side_effect=AssertionError("oversized prompt reached LLM"),
+            ),
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "vision prompt exceeds",
+            ),
+        ):
+            runtime.semantic_complete(request)
 
     def test_semantic_runner_refuses_compose_without_explicit_executor(self) -> None:
         compose = self.root / "infrastructure-compose"

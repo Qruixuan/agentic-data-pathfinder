@@ -3,6 +3,9 @@
 Pathfinder's `DataAgentClient` is the control/data-plane boundary between the
 Access Gateway and a node-local or remote Data Agent. The first client
 implementation is synchronous HTTP and uses only the Python standard library.
+Plain HTTP is accepted only for loopback endpoints. A non-loopback Data Agent
+must be exposed through HTTPS/TLS termination; alternatively, tunnel a private
+lab service to a local `127.0.0.1` port before starting Pathfinder.
 
 The repository now includes a single-node, manifest-backed server with a
 standard-library HTTP implementation, persistent SQLite idempotency, bearer
@@ -32,8 +35,10 @@ python -m pathfinder serve-data-agent `
   --public-base-url http://127.0.0.1:8780
 ```
 
-Set `--public-base-url` to an address reachable by the artifact consumer. The
-server exposes:
+Set `--public-base-url` to an address reachable by the artifact consumer. If
+the consumer is on another host, that public origin must be HTTPS. The built-in
+plain-HTTP server is suitable for same-host use or for the loopback end of an
+SSH tunnel, as in the example above. The server exposes:
 
 ```text
 GET  /healthz

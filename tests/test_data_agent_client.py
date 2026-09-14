@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -9,8 +10,10 @@ from io import BytesIO
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Mapping
+from unittest import mock
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 
 from pathfinder.config import load_config
 from pathfinder.data_agent_client import (
@@ -24,6 +27,7 @@ from pathfinder.data_agent_client import (
     DataAgentAccessResult,
     DataAgentAccessTelemetry,
     DataAgentClientSettings,
+    DataAgentHTTPError,
     DataAgentPayload,
     DataAgentProtocolError,
     DataAgentTelemetryQuiescenceError,
@@ -371,6 +375,314 @@ class ConnectionErrorReportingTest(unittest.TestCase):
         self.assertNotIn("/telemetry", str(context.exception))
 
 
+class AuthenticatedJSONRedirectTest(unittest.TestCase):
+    """Bearer-authenticated JSON requests must never follow redirects."""
+
+    def setUp(self) -> None:
+        self.source_requests: list[dict[str, Any]] = []
+        self.destination_requests: list[dict[str, Any]] = []
+        owner = self
+
+        class DestinationHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _record(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length:
+                    self.rfile.read(length)
+                owner.destination_requests.append({
+                    "method": self.command,
+                    "authorization": self.headers.get("Authorization"),
+                })
+                payload = b'{}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = _record
+            do_POST = _record
+
+        self.destination = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            DestinationHandler,
+        )
+        destination_url = (
+            f"http://127.0.0.1:{self.destination.server_address[1]}/steal"
+        )
+
+        class SourceHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _redirect(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length:
+                    self.rfile.read(length)
+                owner.source_requests.append({
+                    "method": self.command,
+                    "authorization": self.headers.get("Authorization"),
+                })
+                self.send_response(302)
+                self.send_header("Location", destination_url)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = _redirect
+            do_POST = _redirect
+
+        self.source = ThreadingHTTPServer(("127.0.0.1", 0), SourceHandler)
+        for server in (self.source, self.destination):
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+
+        self.client = HttpDataAgentClient(
+            DataAgentClientSettings(
+                base_url=(
+                    f"http://127.0.0.1:{self.source.server_address[1]}"
+                ),
+                token="redirect-test-token",
+                max_retries=0,
+            ),
+            sleep=lambda _seconds: None,
+        )
+
+    @staticmethod
+    def request() -> DataAgentAccessRequest:
+        return DataAgentAccessRequest(
+            access_id="redirect-access",
+            session_id="redirect-session",
+            trial_id="redirect-trial",
+            plan_id="D_structured_digest",
+            plan_epoch=0,
+            task_class_id="video_qa",
+            representation_id="multimodal_digest",
+            event_index=0,
+            latency_multiplier=1.0,
+            binding={"location": "remote_digest_service"},
+        )
+
+    def test_access_redirect_is_refused_without_contacting_destination(self) -> None:
+        with self.assertRaisesRegex(
+            DataAgentHTTPError,
+            "redirects are not allowed",
+        ) as context:
+            self.client.access(self.request())
+
+        self.assertEqual(302, context.exception.status_code)
+        self.assertEqual(1, len(self.source_requests))
+        self.assertEqual(
+            "Bearer redirect-test-token",
+            self.source_requests[0]["authorization"],
+        )
+        self.assertEqual([], self.destination_requests)
+        self.assertNotIn("redirect-test-token", str(context.exception))
+
+    def test_telemetry_redirect_is_refused_without_contacting_destination(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            DataAgentHTTPError,
+            "redirects are not allowed",
+        ) as context:
+            self.client.get_access_telemetry("redirect-access")
+
+        self.assertEqual(302, context.exception.status_code)
+        self.assertEqual(1, len(self.source_requests))
+        self.assertEqual(
+            "Bearer redirect-test-token",
+            self.source_requests[0]["authorization"],
+        )
+        self.assertEqual([], self.destination_requests)
+        self.assertNotIn("redirect-test-token", str(context.exception))
+
+    def test_authenticated_error_body_cannot_echo_configured_token(self) -> None:
+        secret = "error-echo-test-token"
+
+        def failing_opener(request: Any, timeout: float | None = None) -> Any:
+            del timeout
+            raise HTTPError(
+                request.full_url,
+                400,
+                "Bad Request",
+                {},
+                BytesIO(("Bearer " + secret).encode("utf-8")),
+            )
+
+        client = HttpDataAgentClient(
+            DataAgentClientSettings(
+                base_url="https://data-agent.test",
+                token=secret,
+                max_retries=0,
+            ),
+            opener=failing_opener,
+            sleep=lambda _seconds: None,
+        )
+        with self.assertRaises(DataAgentHTTPError) as context:
+            client.access(self.request())
+
+        message = str(context.exception)
+        self.assertNotIn(secret, message)
+        self.assertIn("[REDACTED]", message)
+
+
+class LoopbackDataAgentProxyIsolationTest(unittest.TestCase):
+    """Loopback access, telemetry, and artifacts ignore ambient proxies."""
+
+    def test_default_openers_bypass_proxy_for_all_loopback_calls(self) -> None:
+        proxy_requests: list[str] = []
+        data_agent_requests: list[str] = []
+        artifact = b'{"frame":"verified"}'
+        artifact_sha256 = sha256(artifact).hexdigest()
+
+        class ProxyHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _reject(self) -> None:
+                proxy_requests.append(self.path)
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = _reject
+            do_POST = _reject
+
+        class DataAgentHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def _send_json(self, value: Mapping[str, Any]) -> None:
+                body = json.dumps(value).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(length))
+                data_agent_requests.append(self.path)
+                self._send_json({
+                    "api_version": DATA_AGENT_API_VERSION,
+                    "status": "succeeded",
+                    "access_id": request["access_id"],
+                    "object_id": "video-001",
+                    "object_catalog_version": "catalog-v1",
+                    "payload": {
+                        "kind": "artifact_uri",
+                        "media_type": "application/json",
+                        "value": (
+                            f"http://127.0.0.1:{self.server.server_port}"
+                            "/v1/artifacts/proxy-isolation-access"
+                        ),
+                        "sha256": artifact_sha256,
+                    },
+                    "telemetry": {
+                        "service_latency_ms": 1.0,
+                        "realized_cost": 0.0,
+                        "bytes_read": len(artifact),
+                        "location": "loopback",
+                    },
+                })
+
+            def do_GET(self) -> None:
+                data_agent_requests.append(self.path)
+                if self.path.startswith("/v1/artifacts/"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(artifact)))
+                    self.end_headers()
+                    self.wfile.write(artifact)
+                    return
+                self._send_json({
+                    "api_version": DATA_AGENT_API_VERSION,
+                    "status": "succeeded",
+                    "access_id": "proxy-isolation-access",
+                    "object_id": "video-001",
+                    "representation_id": "sampled_frames",
+                    "object_catalog_version": "catalog-v1",
+                    "artifact_download": {
+                        "download_request_count": 1,
+                        "completed_request_count": 1,
+                        "full_download_count": 1,
+                        "bytes_sent": len(artifact),
+                        "transfer_latency_ms": 1.0,
+                        "latest_completed_at": 1.0,
+                        "in_flight_request_count": 0,
+                        "telemetry_complete": True,
+                    },
+                })
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+        data_agent = ThreadingHTTPServer(("127.0.0.1", 0), DataAgentHandler)
+        threads: list[threading.Thread] = []
+        for server in (proxy, data_agent):
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            threads.append(thread)
+            self.addCleanup(thread.join, 2.0)
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)
+        proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+        environment = {
+            "HTTP_PROXY": proxy_url,
+            "HTTPS_PROXY": proxy_url,
+            "ALL_PROXY": proxy_url,
+            "NO_PROXY": "",
+            "http_proxy": proxy_url,
+            "https_proxy": proxy_url,
+            "all_proxy": proxy_url,
+            "no_proxy": "",
+        }
+        request = DataAgentAccessRequest(
+            access_id="proxy-isolation-access",
+            session_id="proxy-isolation-session",
+            trial_id="proxy-isolation-trial",
+            plan_id="D_frames",
+            plan_epoch=0,
+            task_class_id="video_qa",
+            representation_id="sampled_frames",
+            event_index=0,
+            latency_multiplier=1.0,
+            binding={"location": "loopback"},
+            object_id="video-001",
+        )
+
+        with mock.patch.dict(os.environ, environment, clear=False):
+            client = HttpDataAgentClient(
+                DataAgentClientSettings(
+                    base_url=(
+                        f"http://127.0.0.1:{data_agent.server_port}"
+                    ),
+                    token="proxy-isolation-token",
+                    max_retries=0,
+                )
+            )
+            fetched = client.fetch_artifact(request)
+            telemetry = client.get_access_telemetry(
+                request.access_id,
+                wait_for_quiescence=True,
+            )
+
+        self.assertEqual({"frame": "verified"}, fetched.content)
+        self.assertTrue(telemetry.telemetry_complete)
+        self.assertEqual(
+            [
+                "/v1/access",
+                "/v1/artifacts/proxy-isolation-access",
+                "/v1/accesses/proxy-isolation-access/telemetry",
+            ],
+            data_agent_requests,
+        )
+        self.assertEqual([], proxy_requests)
+
+
 class ArtifactHTTPResponse:
     def __init__(
         self,
@@ -416,7 +728,7 @@ class RecordingArtifactOpener:
 
 class DataAgentArtifactFetchTest(unittest.TestCase):
     ACCESS_ID = "artifact-access"
-    BASE_URL = "http://data-agent.test"
+    BASE_URL = "https://data-agent.test"
 
     def request(self) -> DataAgentAccessRequest:
         return DataAgentAccessRequest(
@@ -1018,6 +1330,19 @@ class DataAgentClientTest(unittest.TestCase):
     def test_settings_reject_non_http_url(self) -> None:
         with self.assertRaises(ValueError):
             DataAgentClientSettings(base_url="file:///tmp/data-agent")
+
+    def test_settings_require_https_for_non_loopback_hosts(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must use HTTPS"):
+            DataAgentClientSettings(base_url="http://data-agent.example")
+
+        loopback = DataAgentClientSettings(
+            base_url="http://127.0.0.1:8765"
+        )
+        remote = DataAgentClientSettings(
+            base_url="https://data-agent.example"
+        )
+        self.assertEqual("http", urlparse(loopback.base_url).scheme)
+        self.assertEqual("https", urlparse(remote.base_url).scheme)
 
 
 class RemoteDataAgentBackendTest(unittest.TestCase):

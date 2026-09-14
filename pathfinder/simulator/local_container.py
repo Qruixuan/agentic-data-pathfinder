@@ -232,7 +232,9 @@ def _checksum_bytes(documents: Mapping[str, bytes]) -> bytes:
     )
 
 
-def _verify_checksums(root: Path) -> dict[str, str]:
+def _verify_checksums(
+    root: Path,
+) -> tuple[dict[str, str], dict[str, bytes]]:
     expected = _OUTPUT_FILES
     actual = {
         path.name
@@ -241,6 +243,7 @@ def _verify_checksums(root: Path) -> dict[str, str]:
     }
     _require(actual == expected, "local Compose package file set changed")
     checksums: dict[str, str] = {}
+    documents: dict[str, bytes] = {}
     try:
         lines = (root / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -249,13 +252,71 @@ def _verify_checksums(root: Path) -> dict[str, str]:
         digest, separator, name = line.partition("  ")
         _require(separator == "  " and name in expected, "malformed checksum row")
         _require(name not in checksums, f"duplicate checksum entry: {name}")
+        content = (root / name).read_bytes()
         _require(
-            _sha256_bytes((root / name).read_bytes()) == digest,
+            _sha256_bytes(content) == digest,
             f"local Compose checksum mismatch: {name}",
         )
         checksums[name] = digest
+        documents[name] = content
     _require(set(checksums) == expected, "local Compose checksums are incomplete")
-    return checksums
+    return checksums, documents
+
+
+def _compose_service_blocks(
+    compose: str,
+    nodes: list[Mapping[str, Any]],
+) -> dict[str, list[str]]:
+    """Return each generated service block without trusting YAML aliases."""
+
+    lines = compose.splitlines()
+    network_markers = [
+        index for index, line in enumerate(lines) if line == "networks:"
+    ]
+    _require(
+        len(network_markers) == 1,
+        "Compose top-level network section changed",
+    )
+    network_start = network_markers[0]
+    starts: dict[str, int] = {}
+    for node in nodes:
+        service = str(node["container_name"])
+        marker = f"  {service}:"
+        positions = [
+            index for index, line in enumerate(lines) if line == marker
+        ]
+        _require(
+            len(positions) == 1 and positions[0] < network_start,
+            f"Compose service block changed for {node['node_id']}",
+        )
+        starts[service] = positions[0]
+
+    ordered = sorted((start, service) for service, start in starts.items())
+    blocks: dict[str, list[str]] = {}
+    for index, (start, service) in enumerate(ordered):
+        end = ordered[index + 1][0] if index + 1 < len(ordered) else network_start
+        blocks[service] = lines[start:end]
+    return blocks
+
+
+def _compose_published_ports(service_block: list[str]) -> list[str]:
+    """Read the scalar entries in the one generated ``ports`` section."""
+
+    positions = [
+        index
+        for index, line in enumerate(service_block)
+        if line == "    ports:"
+    ]
+    _require(len(positions) == 1, "Compose service ports section changed")
+    entries: list[str] = []
+    for line in service_block[positions[0] + 1:]:
+        if line.startswith("      - "):
+            entries.append(line)
+            continue
+        if not line.strip():
+            continue
+        break
+    return entries
 
 
 def build_local_container_compose(
@@ -402,10 +463,8 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
 
     root = Path(output_dir).resolve()
     _require(root.is_dir(), f"local Compose output does not exist: {root}")
-    checksums = _verify_checksums(root)
-    manifest = json.loads(
-        (root / "local_container_manifest.json").read_text(encoding="utf-8")
-    )
+    checksums, documents = _verify_checksums(root)
+    manifest = json.loads(documents["local_container_manifest.json"])
     _require(
         manifest.get("schema_version") in (
             LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION,
@@ -456,18 +515,42 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
         },
         "local Compose manifest digests disagree",
     )
-    endpoints = json.loads(
-        (root / "container_endpoints.json").read_text(encoding="utf-8")
-    )
+    endpoints = json.loads(documents["container_endpoints.json"])
     rows = endpoints.get("endpoints")
     _require(isinstance(rows, dict) and len(rows) == 8, "endpoint count changed")
-    compose = (root / "compose.yaml").read_text(encoding="utf-8")
-    topology = json.loads(
-        (root / "container_topology.json").read_text(encoding="utf-8")
-    )
+    compose = documents["compose.yaml"].decode("utf-8")
+    topology = json.loads(documents["container_topology.json"])
     nodes = topology.get("nodes")
     _require(isinstance(nodes, list) and len(nodes) == 8, "topology node count changed")
     node_ids = {str(node.get("node_id")) for node in nodes}
+    has_host_port_base = "host_port_base" in manifest
+    _require(
+        manifest["schema_version"] != LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION
+        or has_host_port_base,
+        "current local Compose manifest is missing host_port_base",
+    )
+    _require(
+        not semantic_quality_enabled or has_host_port_base,
+        "semantic-enabled local Compose manifest is missing host_port_base",
+    )
+    _require(
+        not semantic_quality_enabled
+        or manifest["schema_version"] == LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION,
+        "semantic-enabled local Compose package must use the current schema",
+    )
+    host_port_base = manifest.get("host_port_base")
+    if has_host_port_base:
+        _require(
+            type(host_port_base) is int
+            and 1024 <= host_port_base
+            and host_port_base + len(nodes) <= 65535,
+            "host_port_base must reserve eight non-privileged ports",
+        )
+    service_blocks = (
+        _compose_service_blocks(compose, nodes)
+        if has_host_port_base
+        else {}
+    )
     _require(
         (semantic_executor_node_id is not None) is semantic_quality_enabled,
         "semantic quality configuration is inconsistent",
@@ -484,6 +567,20 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
         not semantic_artifact_source_node_ids or semantic_executor_node_id is not None,
         "semantic artifact sources lack an executor",
     )
+    if manifest["schema_version"] == LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION:
+        _require(
+            semantic_runtime_build is semantic_quality_enabled,
+            "semantic runtime build flag differs from semantic quality",
+        )
+        _require(
+            manifest.get("semantic_runtime_image")
+            == (
+                "pathfinder-simulator-node:semantic-local"
+                if semantic_quality_enabled
+                else None
+            ),
+            "semantic runtime image differs from semantic quality",
+        )
     if manifest["schema_version"] == LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION:
         pinned_count = sum(node.get("image_digest") is not None for node in nodes)
         expected_pinned_count = 0 if semantic_runtime_build else pinned_count
@@ -509,13 +606,7 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
             ),
             "Compose build blocks do not match unpinned nodes",
         )
-        compose_lines = compose.splitlines()
-        service_starts = [
-            compose_lines.index(f"  {node['container_name']}:")
-            for node in nodes
-        ]
-        network_start = compose_lines.index("networks:")
-        for index, node in enumerate(nodes):
+        for node in nodes:
             image_ref = str(node["image_ref"])
             image_digest = node.get("image_digest")
             expected_image = (
@@ -527,12 +618,7 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
                     else image_ref
                 )
             )
-            block_end = (
-                service_starts[index + 1]
-                if index + 1 < len(service_starts)
-                else network_start
-            )
-            service_block = compose_lines[service_starts[index]:block_end]
+            service_block = service_blocks[str(node["container_name"])]
             _require(
                 f"    image: {_yaml_scalar(expected_image)}" in service_block,
                 f"Compose image identity changed for {node['node_id']}",
@@ -583,14 +669,89 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
                     ),
                     f"missing semantic artifact mount for {node['node_id']}",
                 )
-    for node_id, endpoint in rows.items():
+        if semantic_quality_enabled:
+            expected_compose, expected_endpoint_rows = _compose_bytes(
+                nodes,
+                host_port_base=host_port_base,
+                semantic_executor_node_id=semantic_executor_node_id,
+                semantic_artifact_source_node_ids=(
+                    semantic_artifact_source_node_ids
+                ),
+                semantic_runtime_build=True,
+            )
+            _require(
+                documents["compose.yaml"] == expected_compose,
+                "semantic Compose document differs from deterministic output",
+            )
+            expected_endpoint_document = {
+                "schema_version": "pathfinder.local-container-endpoints/v1alpha1",
+                "backend_id": manifest["backend_id"],
+                "scenario_id": manifest["scenario_id"],
+                "endpoints": expected_endpoint_rows,
+                "credentials_recorded": False,
+            }
+            _require(
+                documents["container_endpoints.json"]
+                == _json_bytes(expected_endpoint_document),
+                "semantic endpoint document differs from deterministic output",
+            )
+    _require(set(rows) == node_ids, "endpoint topology coverage changed")
+    verified_host_endpoints: dict[str, dict[str, str]] = {}
+    verified_semantic_endpoint: dict[str, str] | None = None
+    for offset, node in enumerate(nodes, start=1):
+        node_id = str(node["node_id"])
+        endpoint = rows[node_id]
+        _require(isinstance(endpoint, dict), f"bad endpoint row for {node_id}")
         container_name = endpoint["container_name"]
+        _require(
+            container_name == str(node["container_name"]),
+            f"bad container identity for {node_id}",
+        )
         _require(f"  {container_name}:" in compose, f"missing service for {node_id}")
         _require(
             endpoint["container_url"] == f"http://{container_name}:9080",
             f"bad container endpoint for {node_id}",
         )
-        if "host_semantic_url" in endpoint:
+        if has_host_port_base:
+            expected_port = host_port_base + offset
+            expected_base_url = f"http://127.0.0.1:{expected_port}"
+            _require(
+                endpoint.get("host_health_url")
+                == f"{expected_base_url}/healthz",
+                f"bad host health endpoint for {node_id}",
+            )
+            _require(
+                endpoint.get("host_operation_url")
+                == f"{expected_base_url}/v1/operations/execute",
+                f"bad host operation endpoint for {node_id}",
+            )
+            _require(
+                endpoint.get("host_semantic_url")
+                == f"{expected_base_url}/v1/semantic/chat-completions",
+                f"bad host semantic endpoint for {node_id}",
+            )
+            expected_port_entry = (
+                f'      - "127.0.0.1:{expected_port}:9080"'
+            )
+            _require(
+                _compose_published_ports(
+                    service_blocks[str(node["container_name"])]
+                )
+                == [expected_port_entry],
+                f"bad Compose host port binding for {node_id}",
+            )
+            verified_host_endpoints[node_id] = {
+                "container_url": endpoint["container_url"],
+                "host_health_url": endpoint["host_health_url"],
+                "host_operation_url": endpoint["host_operation_url"],
+                "host_semantic_url": endpoint["host_semantic_url"],
+            }
+            if node_id == semantic_executor_node_id:
+                verified_semantic_endpoint = {
+                    "host_health_url": endpoint["host_health_url"],
+                    "host_semantic_url": endpoint["host_semantic_url"],
+                }
+        elif "host_semantic_url" in endpoint:
             _require(
                 endpoint.get("host_semantic_url")
                 == endpoint["host_operation_url"].replace(
@@ -618,6 +779,8 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
         "semantic_runtime_build": semantic_runtime_build,
         "semantic_executor_node_id": semantic_executor_node_id,
         "semantic_artifact_source_node_ids": list(semantic_artifact_source_node_ids),
+        "verified_host_endpoints": verified_host_endpoints,
+        "verified_semantic_endpoint": verified_semantic_endpoint,
         "checked_files": len(_OUTPUT_FILES),
         "docker_called": False,
         "container_started": False,

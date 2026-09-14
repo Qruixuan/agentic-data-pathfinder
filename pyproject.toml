@@ -15,6 +15,10 @@ data-prep = [
     "av==17.0.1",
     "Pillow>=10.4,<13",
 ]
+semantic-runtime = [
+    # The container vision ingress performs an isolated, bounded full decode.
+    "Pillow==12.3.0",
+]
 flowmesh = [
     # Must match the deployed FlowMesh control plane (v0.1.8-rc.1).
     "flowmesh-sdk==0.1.8rc1",

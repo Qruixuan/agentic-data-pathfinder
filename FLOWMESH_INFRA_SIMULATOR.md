@@ -2,6 +2,16 @@
 
 Status: **offline MVP; development evidence only**
 
+The repository also contains a separate semantic coupling slice that routes
+a real sampled-frame bundle through a Data Agent, validates it, invokes the
+vision-capable N6 container, scores the answer, and associates that observation
+with one verified matrix trial.  The host invokes N6 directly, bypassing
+FlowMesh semantic scheduling, and only associates the two evidence layers
+posthoc.  It provides no cost basis, AWM/OED input, or scientific eligibility;
+credentials, questions, and base64 frame payloads are excluded from its
+generated evidence.  Its full boundary and claim limits are documented in
+[DATA_AGENT_SIMULATOR_COUPLING.md](DATA_AGENT_SIMULATOR_COUPLING.md).
+
 ## Purpose
 
 This package is a deterministic, single-process discrete-event simulator for

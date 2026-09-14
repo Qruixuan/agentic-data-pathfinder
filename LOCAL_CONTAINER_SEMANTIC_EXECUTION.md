@@ -38,8 +38,14 @@ It supports the current textual Pathfinder representations:
 - `multimodal_digest.txt`;
 - UTF-8 `sampled_frames.json` containing sampled-frame descriptions.
 
-Frame-bundle image inputs and artifact-backed, route-coupled transfer are
-deliberately future work.
+The legacy runner described on this page remains text-only.  A separate,
+strictly bounded frame-bundle path now connects a routed Data Agent artifact
+to the container vision endpoint and frozen scoring contract; see
+[DATA_AGENT_SIMULATOR_COUPLING.md](DATA_AGENT_SIMULATOR_COUPLING.md).  That
+new slice fetches through the host and invokes N6 directly, bypassing FlowMesh
+semantic scheduling.  Its evidence is associated with the matrix only
+posthoc, excludes credentials, questions, and base64 frame payloads, and has
+no cost basis, AWM/OED eligibility, or scientific eligibility.
 
 ## Build a semantic-enabled Compose package
 

@@ -1497,6 +1497,143 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_semantic_score_alignment.add_argument("--compact", action="store_true")
 
+    data_agent_semantic_trial = subcommands.add_parser(
+        "run-data-agent-frame-bundle-semantic-trial",
+        help=(
+            "run one matrix-bound frame-bundle trial through a routed Data "
+            "Agent and an enabled container vision executor"
+        ),
+    )
+    data_agent_semantic_trial.add_argument(
+        "--matrix-plan-dir", type=Path, required=True
+    )
+    data_agent_semantic_trial.add_argument(
+        "--semantic-spec", type=Path, required=True
+    )
+    data_agent_semantic_trial.add_argument(
+        "--endpoint-registry", type=Path, required=True
+    )
+    data_agent_semantic_trial.add_argument(
+        "--compose-package-dir", type=Path, required=True
+    )
+    data_agent_semantic_trial.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    data_agent_semantic_trial.add_argument(
+        "--request-timeout", type=float, default=240.0
+    )
+    data_agent_semantic_trial.add_argument(
+        "--telemetry-quiescence-timeout", type=float, default=5.0
+    )
+    data_agent_semantic_trial.add_argument(
+        "--max-artifact-bytes", type=int, default=8 * 1024 * 1024
+    )
+    data_agent_semantic_trial.add_argument(
+        "--event-index",
+        type=int,
+        default=0,
+        help=(
+            "non-negative Data Agent access attempt index; increment it "
+            "when retrying after a post-download semantic failure"
+        ),
+    )
+    data_agent_semantic_trial.add_argument("--compact", action="store_true")
+
+    verify_data_agent_semantic_trial = subcommands.add_parser(
+        "verify-data-agent-frame-bundle-semantic-trial",
+        help=(
+            "verify a matrix-bound Data Agent and container-vision semantic "
+            "trial without network, container, or LLM access"
+        ),
+    )
+    verify_data_agent_semantic_trial.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_data_agent_semantic_trial.add_argument(
+        "--matrix-plan-dir", type=Path, required=True
+    )
+    verify_data_agent_semantic_trial.add_argument(
+        "--semantic-spec", type=Path, required=True
+    )
+    verify_data_agent_semantic_trial.add_argument(
+        "--endpoint-registry", type=Path, required=True
+    )
+    verify_data_agent_semantic_trial.add_argument(
+        "--compact", action="store_true"
+    )
+
+    build_pathfinder_evidence = subcommands.add_parser(
+        "build-flowmesh-pathfinder-evidence",
+        help=(
+            "bind verified matrix infrastructure results to separately "
+            "verified Data Agent semantic trials (offline association only)"
+        ),
+    )
+    build_pathfinder_evidence.add_argument(
+        "--binding-spec", type=Path, required=True
+    )
+    build_pathfinder_evidence.add_argument(
+        "--matrix-plan-dir", type=Path, required=True
+    )
+    build_pathfinder_evidence.add_argument(
+        "--matrix-run-dir", type=Path, required=True
+    )
+    build_pathfinder_evidence.add_argument(
+        "--endpoint-registry", type=Path, required=True
+    )
+    build_pathfinder_evidence.add_argument(
+        "--data-agent-semantic-dir",
+        type=Path,
+        action="append",
+        required=True,
+    )
+    build_pathfinder_evidence.add_argument(
+        "--data-agent-semantic-spec",
+        type=Path,
+        action="append",
+        required=True,
+    )
+    build_pathfinder_evidence.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    build_pathfinder_evidence.add_argument("--compact", action="store_true")
+
+    verify_pathfinder_evidence = subcommands.add_parser(
+        "verify-flowmesh-pathfinder-evidence",
+        help=(
+            "rebuild and verify a simulator-specific Pathfinder evidence "
+            "association from its immutable sources"
+        ),
+    )
+    verify_pathfinder_evidence.add_argument(
+        "--evidence-dir", type=Path, required=True
+    )
+    verify_pathfinder_evidence.add_argument(
+        "--binding-spec", type=Path, required=True
+    )
+    verify_pathfinder_evidence.add_argument(
+        "--matrix-plan-dir", type=Path, required=True
+    )
+    verify_pathfinder_evidence.add_argument(
+        "--matrix-run-dir", type=Path, required=True
+    )
+    verify_pathfinder_evidence.add_argument(
+        "--endpoint-registry", type=Path, required=True
+    )
+    verify_pathfinder_evidence.add_argument(
+        "--data-agent-semantic-dir",
+        type=Path,
+        action="append",
+        required=True,
+    )
+    verify_pathfinder_evidence.add_argument(
+        "--data-agent-semantic-spec",
+        type=Path,
+        action="append",
+        required=True,
+    )
+    verify_pathfinder_evidence.add_argument("--compact", action="store_true")
+
     verify_container_run = subcommands.add_parser(
         "verify-local-container-simulation",
         help="verify an infrastructure-only container execution ledger offline",
@@ -2353,6 +2490,166 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             payload = verify_local_container_semantic_score_alignment(
                 args.output_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-data-agent-frame-bundle-semantic-trial":
+            from dataclasses import replace as _replace
+            from urllib.parse import urlsplit as _urlsplit
+
+            from .data_agent_client import HttpDataAgentClient
+            from .distributed.registry import load_endpoint_registry
+            from .frame_bundle_ingest import DEFAULT_FRAME_BUNDLE_LIMITS
+            from .simulator.data_agent_semantic_vertical import (
+                HttpContainerSemanticVisionAdapter,
+                execute_data_agent_frame_bundle_semantic_trial,
+                load_data_agent_frame_bundle_semantic_spec,
+            )
+            from .simulator.local_container import (
+                verify_local_container_compose,
+            )
+
+            registry = load_endpoint_registry(args.endpoint_registry)
+            spec = load_data_agent_frame_bundle_semantic_spec(
+                args.semantic_spec
+            )
+            route = registry.route(
+                design_id=spec.document["data_agent_route_design_id"],
+                representation_id=spec.document["representation_id"],
+            )
+            endpoint = registry.endpoint(route.endpoint_id)
+            client_settings = _replace(
+                endpoint.client_settings(),
+                max_artifact_bytes=args.max_artifact_bytes,
+            )
+            compose = verify_local_container_compose(
+                args.compose_package_dir
+            )
+            expected_executor = spec.document["semantic_executor_node_id"]
+            if compose.get("semantic_quality_enabled") is not True:
+                raise ConfigError(
+                    "the Compose package does not enable semantic quality"
+                )
+            if compose.get("semantic_executor_node_id") != expected_executor:
+                raise ConfigError(
+                    "the Compose semantic executor differs from the frozen "
+                    "semantic spec"
+                )
+            semantic_endpoint = compose.get("verified_semantic_endpoint")
+            if not isinstance(semantic_endpoint, dict):
+                raise ConfigError(
+                    "the verified Compose package has no semantic endpoint"
+                )
+            semantic_url = semantic_endpoint.get("host_semantic_url")
+            health_url = semantic_endpoint.get("host_health_url")
+            if not isinstance(semantic_url, str) or not isinstance(
+                health_url, str
+            ):
+                raise ConfigError(
+                    "the verified Compose semantic endpoint is invalid"
+                )
+            try:
+                semantic_port = _urlsplit(semantic_url).port
+            except ValueError as exc:
+                raise ConfigError(
+                    "the verified Compose semantic endpoint is invalid"
+                ) from exc
+            if (
+                semantic_port is None
+                or not 1024 <= semantic_port <= 65535
+                or semantic_url
+                != (
+                    f"http://127.0.0.1:{semantic_port}"
+                    "/v1/semantic/chat-completions"
+                )
+                or health_url
+                != f"http://127.0.0.1:{semantic_port}/healthz"
+            ):
+                raise ConfigError(
+                    "the verified Compose semantic endpoint must use the "
+                    "expected literal loopback URL"
+                )
+            adapter = HttpContainerSemanticVisionAdapter(
+                semantic_url=semantic_url,
+                health_url=health_url,
+                expected_execution_node_id=expected_executor,
+                timeout_seconds=args.request_timeout,
+            )
+            payload = execute_data_agent_frame_bundle_semantic_trial(
+                matrix_plan_dir=args.matrix_plan_dir,
+                semantic_spec=args.semantic_spec,
+                endpoint_registry=registry,
+                clients_by_endpoint_id={
+                    route.endpoint_id: HttpDataAgentClient(client_settings)
+                },
+                adapter=adapter,
+                output_dir=args.output_dir,
+                event_index=args.event_index,
+                limits=_replace(
+                    DEFAULT_FRAME_BUNDLE_LIMITS,
+                    max_artifact_bytes=args.max_artifact_bytes,
+                ),
+                quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout
+                ),
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-data-agent-frame-bundle-semantic-trial":
+            from .distributed.registry import load_endpoint_registry
+            from .simulator.data_agent_semantic_vertical import (
+                verify_data_agent_frame_bundle_semantic_trial,
+            )
+
+            payload = verify_data_agent_frame_bundle_semantic_trial(
+                output_dir=args.output_dir,
+                matrix_plan_dir=args.matrix_plan_dir,
+                endpoint_registry=load_endpoint_registry(
+                    args.endpoint_registry
+                ),
+                semantic_spec=args.semantic_spec,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-flowmesh-pathfinder-evidence":
+            from .distributed.registry import load_endpoint_registry
+            from .integrations.flowmesh.pathfinder_evidence_bridge import (
+                build_flowmesh_pathfinder_evidence,
+            )
+
+            payload = build_flowmesh_pathfinder_evidence(
+                binding_spec=args.binding_spec,
+                matrix_plan_dir=args.matrix_plan_dir,
+                matrix_run_dir=args.matrix_run_dir,
+                endpoint_registry=load_endpoint_registry(
+                    args.endpoint_registry
+                ),
+                data_agent_semantic_dirs=(
+                    args.data_agent_semantic_dir
+                ),
+                data_agent_semantic_specs=(
+                    args.data_agent_semantic_spec
+                ),
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-pathfinder-evidence":
+            from .distributed.registry import load_endpoint_registry
+            from .integrations.flowmesh.pathfinder_evidence_bridge import (
+                verify_flowmesh_pathfinder_evidence,
+            )
+
+            payload = verify_flowmesh_pathfinder_evidence(
+                evidence_dir=args.evidence_dir,
+                binding_spec=args.binding_spec,
+                matrix_plan_dir=args.matrix_plan_dir,
+                matrix_run_dir=args.matrix_run_dir,
+                endpoint_registry=load_endpoint_registry(
+                    args.endpoint_registry
+                ),
+                data_agent_semantic_dirs=(
+                    args.data_agent_semantic_dir
+                ),
+                data_agent_semantic_specs=(
+                    args.data_agent_semantic_spec
+                ),
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "verify-local-container-simulation":

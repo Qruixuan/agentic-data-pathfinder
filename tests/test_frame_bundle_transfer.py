@@ -1101,7 +1101,7 @@ class BinaryDownloadSecurityTest(unittest.TestCase):
     """The binary path must inherit the artifact trust boundary intact."""
 
     ACCESS_ID = "frame-bundle-access"
-    BASE_URL = "http://data-agent.test"
+    BASE_URL = "https://data-agent.test"
     SIGNED_QUERY = "?expires=9999999999&signature=do-not-expose"
 
     def request(self) -> DataAgentAccessRequest:
@@ -1367,7 +1367,7 @@ class FakeBundleClient:
         artifact: Any,
         telemetry: Any,
         *,
-        base_url: str = "http://data-agent.test",
+        base_url: str = "https://data-agent.test",
     ) -> None:
         self.artifact = artifact
         self.telemetry = telemetry

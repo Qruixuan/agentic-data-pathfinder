@@ -5,7 +5,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY pathfinder ./pathfinder
 
-RUN pip install --no-cache-dir --no-deps . \
+RUN pip install --no-cache-dir ".[semantic-runtime]" \
     && useradd --uid 10001 --create-home --shell /usr/sbin/nologin pathfinder \
     && mkdir /state \
     && chown 10001:10001 /state

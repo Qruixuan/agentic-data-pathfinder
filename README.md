@@ -15,6 +15,15 @@ It can also generate a non-launching local Docker Compose package whose node
 protocol performs bounded real file I/O and exact-byte HTTP transfer with
 semantic quality explicitly disabled. See
 [FLOWMESH_INFRA_SIMULATOR.md](FLOWMESH_INFRA_SIMULATOR.md).
+An additional one-trial integration slice now binds a frozen simulator trial
+to a routed Data Agent frame bundle, a vision-capable container execution, a
+frozen multiple-choice score, and an offline cross-layer evidence package.
+The host calls N6 directly rather than through FlowMesh semantic scheduling,
+so the association is posthoc and the infrastructure and semantic routes
+remain explicitly non-unified. It supplies no cost basis, AWM/OED input, or
+scientific eligibility, and its evidence excludes credentials, questions, and
+base64 frame payloads. See
+[DATA_AGENT_SIMULATOR_COUPLING.md](DATA_AGENT_SIMULATOR_COUPLING.md).
 
 This repository now includes a minimal, runnable Python implementation of the
 causal access-response harness described in the research documents. It is the

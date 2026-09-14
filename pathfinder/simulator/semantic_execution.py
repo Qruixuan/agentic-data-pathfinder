@@ -19,7 +19,7 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from pathfinder.distributed.scoring import (
     MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
@@ -64,6 +64,29 @@ _SEMANTIC_SCORING_RULES = frozenset({
 
 class SemanticExecutionError(RuntimeError):
     """Raised when a local semantic execution is malformed or unsafe."""
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """Keep private loopback semantic traffic on its verified endpoint."""
+
+    def redirect_request(
+        self,
+        request: Any,
+        file_pointer: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> None:
+        del request, file_pointer, code, message, headers, new_url
+        return None
+
+
+def _loopback_opener() -> Any:
+    # The local semantic endpoint carries the full rendered question and
+    # representation.  It must neither follow redirects nor honor ambient
+    # HTTP_PROXY/ALL_PROXY configuration.
+    return build_opener(ProxyHandler({}), _NoRedirect())
 
 
 def _require(condition: bool, message: str) -> None:
@@ -183,7 +206,10 @@ def _request_json(url: str, payload: Mapping[str, Any], timeout_seconds: float) 
         headers={"Content-Type": "application/json", "Accept": "application/json"},
     )
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:
+        with _loopback_opener().open(
+            request,
+            timeout=timeout_seconds,
+        ) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
     except HTTPError as exc:
         raise SemanticExecutionError(
@@ -204,7 +230,7 @@ def _request_json(url: str, payload: Mapping[str, Any], timeout_seconds: float) 
 
 def _get_json(url: str, timeout_seconds: float) -> dict[str, Any]:
     try:
-        with urlopen(url, timeout=timeout_seconds) as response:
+        with _loopback_opener().open(url, timeout=timeout_seconds) as response:
             raw = response.read(64 * 1024)
     except (HTTPError, URLError, TimeoutError, OSError) as exc:
         raise SemanticExecutionError(
@@ -266,10 +292,12 @@ def execute_local_container_semantic_run(
     )
     root = Path(representation_root).resolve()
     _require(root.is_dir(), "representation root does not exist")
-    endpoint_document = _read_json(compose_root / "container_endpoints.json", "container endpoints")
-    _require(isinstance(endpoint_document, Mapping), "container endpoints must be an object")
-    endpoints = endpoint_document.get("endpoints")
-    _require(isinstance(endpoints, Mapping), "container endpoints are invalid")
+    # Consume the verifier's in-memory endpoint snapshot.  Reopening the
+    # package after verification would create a check/use gap in which the
+    # endpoint document could be replaced before the question and
+    # representation are sent.
+    endpoints = compose.get("verified_host_endpoints")
+    _require(isinstance(endpoints, Mapping), "verified container endpoints are invalid")
     executor_endpoint = endpoints.get(executor_node_id)
     _require(isinstance(executor_endpoint, Mapping), "semantic executor endpoint is missing")
     health_url = _text(executor_endpoint.get("host_health_url"), "semantic executor health URL")

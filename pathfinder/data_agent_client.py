@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import math
@@ -12,7 +13,12 @@ from hashlib import sha256
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 
 DATA_AGENT_API_VERSION = "pathfinder.data-agent/v1alpha1"
@@ -23,6 +29,17 @@ DATA_AGENT_API_VERSION = "pathfinder.data-agent/v1alpha1"
 _AGENT_ARTIFACT_ACCEPT = "application/json, text/*;q=0.9"
 
 logger = logging.getLogger("pathfinder.data_agent_client")
+
+
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    if hostname is None:
+        return False
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 class DataAgentClientError(RuntimeError):
@@ -166,6 +183,13 @@ class DataAgentClientSettings:
             raise ValueError(
                 "Data Agent base_url cannot contain credentials; use "
                 "PATHFINDER_DATA_AGENT_TOKEN"
+            )
+        if (
+            parsed_url.scheme == "http"
+            and not _is_loopback_hostname(parsed_url.hostname)
+        ):
+            raise ValueError(
+                "Data Agent base_url must use HTTPS unless it is loopback"
             )
         if (
             not isinstance(self.timeout_seconds, (int, float))
@@ -849,22 +873,42 @@ class HttpDataAgentClient:
         self,
         settings: DataAgentClientSettings,
         *,
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] | None = None,
         artifact_opener: Callable[..., Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.settings = settings
-        self._opener = opener
+        # Access and telemetry calls carry the bearer token.  urllib's
+        # default opener follows redirects and may replay Authorization to a
+        # redirected destination, so the safe default must reject every 3xx
+        # response just like the artifact path already does.  Explicit
+        # opener injection remains supported for deterministic tests and
+        # embedding applications that provide an equivalent transport.
+        self._opener = (
+            opener
+            if opener is not None
+            else self._default_opener()
+        )
         self._artifact_opener = (
             artifact_opener
             if artifact_opener is not None
-            else build_opener(_RejectRedirects()).open
+            else self._default_opener()
         )
         self._sleep = sleep
         self._access_url = urljoin(
             settings.base_url.rstrip("/") + "/",
             "v1/access",
         )
+
+    def _default_opener(self) -> Callable[..., Any]:
+        handlers: list[Any] = []
+        if _is_loopback_hostname(urlparse(self.settings.base_url).hostname):
+            # Access JSON can contain object identifiers and artifact URLs;
+            # artifact responses carry the bytes themselves.  Never let
+            # ambient proxy configuration export loopback Data Agent traffic.
+            handlers.append(ProxyHandler({}))
+        handlers.append(_RejectRedirects())
+        return build_opener(*handlers).open
 
     def access(
         self,
@@ -1298,13 +1342,25 @@ class HttpDataAgentClient:
             ) as response:
                 raw = response.read(self.settings.max_response_bytes + 1)
         except HTTPError as exc:
+            if 300 <= exc.code < 400:
+                exc.close()
+                raise DataAgentHTTPError(
+                    exc.code,
+                    "redirects are not allowed",
+                ) from None
             try:
                 message = exc.read(4096).decode("utf-8", errors="replace")
             finally:
                 exc.close()
+            safe_message = message.strip() or str(exc.reason)
+            if self.settings.token:
+                safe_message = safe_message.replace(
+                    self.settings.token,
+                    "[REDACTED]",
+                )
             raise DataAgentHTTPError(
                 exc.code,
-                message.strip() or exc.reason,
+                safe_message,
             ) from exc
         except (URLError, TimeoutError, socket.timeout) as exc:
             # The URL that actually failed, not the access endpoint: a
