@@ -52,8 +52,10 @@ from .full_flow_semantic_matrix import (
 )
 from .n4_derived_data_plane import (
     CHECKSUMS_NAME as N4_CHECKSUMS_NAME,
+    DATA_AGENT_MANIFEST_PATH,
     GENERATIONS_DIRECTORY_NAME,
     MULTIMODAL_DIGEST_REPRESENTATION_ID,
+    N4_LOGICAL_LOCATION,
     OBJECT_CATALOG_PATH,
     PACKAGE_MANIFEST_NAME,
     STORE_DATABASE_NAME,
@@ -64,7 +66,7 @@ from .n4_derived_data_plane import (
 
 
 N4_LIVE_SERVE_GATE_SCHEMA_VERSION = (
-    "pathfinder.full-flow-n4-live-serve-gate/v1alpha1"
+    "pathfinder.full-flow-n4-live-serve-gate/v1alpha2"
 )
 GATE_NAME = "n4-live-serve-gate.json"
 CHECKSUMS_NAME = "SHA256SUMS"
@@ -76,6 +78,7 @@ _DERIVED_REPRESENTATIONS = {
     FRAME_BUNDLE_REPRESENTATION_ID,
     MULTIMODAL_DIGEST_REPRESENTATION_ID,
 }
+_EXPLICIT_N4_ACCESS_PLAN_IDS = "explicit"
 _FRAME_BINDING_FIELDS = {"kind", "receipt_dir", "n5_plan"}
 _DIGEST_BINDING_FIELDS = {
     "kind",
@@ -140,6 +143,21 @@ def _identifier(value: Any, name: str) -> str:
         f"{name} is invalid",
     )
     return str(value)
+
+
+def _canonical_plan_ids(value: Any, name: str) -> list[str]:
+    _require(
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and bool(value),
+        f"{name} must be a non-empty sequence",
+    )
+    plan_ids = [_identifier(item, f"{name} item") for item in value]
+    _require(
+        plan_ids == sorted(set(plan_ids)),
+        f"{name} are not canonical",
+    )
+    return plan_ids
 
 
 def _strict_json(path: Path, name: str) -> dict[str, Any]:
@@ -263,7 +281,7 @@ def _receipt_summary(binding: Mapping[str, Any]) -> dict[str, Any]:
         plan = binding.get("n5_plan")
         _require(isinstance(plan, Mapping), "frame-bundle N5 plan is missing")
         try:
-            verify_n5_n4_live_frame_bundle_provisioning_smoke(
+            verified_live = verify_n5_n4_live_frame_bundle_provisioning_smoke(
                 receipt_root,
                 n5_plan=plan,
             )
@@ -297,10 +315,14 @@ def _receipt_summary(binding: Mapping[str, Any]) -> dict[str, Any]:
         )
         receipt_root = Path(binding["receipt_dir"]).resolve()
         try:
-            verify_n5_n4_live_multimodal_digest_provisioning_smoke(
+            verified_live = verify_n5_n4_live_multimodal_digest_provisioning_smoke(
                 receipt_root,
-                n5_digest_plan_dir=Path(binding["n5_digest_plan_dir"]).resolve(),
-                source_video_path=Path(binding["source_video_path"]).resolve(),
+                n5_digest_plan_dir=Path(
+                    binding["n5_digest_plan_dir"]
+                ).resolve(),
+                source_video_path=Path(
+                    binding["source_video_path"]
+                ).resolve(),
             )
         except Exception as exc:
             raise FullFlowN4LiveServeGateError(
@@ -374,6 +396,23 @@ def _receipt_summary(binding: Mapping[str, Any]) -> dict[str, Any]:
         and document.get("n4_package_sha256") == n4_receipt["package_sha256"],
         "outer live receipt and N4 publication receipt disagree",
     )
+    n4_access_plan_ids = _canonical_plan_ids(
+        document.get("n4_access_plan_ids"),
+        "receipt N4 access plan IDs",
+    )
+    _require(
+        document.get("n4_access_plan_ids_source")
+        == _EXPLICIT_N4_ACCESS_PLAN_IDS,
+        "live serve authorization requires explicit N4 access plan IDs; "
+        "the N5 materialization plan ID is provenance only",
+    )
+    _require(
+        isinstance(verified_live, Mapping)
+        and verified_live.get("n4_access_plan_ids") == n4_access_plan_ids
+        and verified_live.get("n4_access_plan_ids_source")
+        == _EXPLICIT_N4_ACCESS_PLAN_IDS,
+        "verified receipt and recorded N4 access plan contract disagree",
+    )
     return {
         "receipt_kind": str(kind),
         "receipt_sha256": outer_sha256,
@@ -385,8 +424,9 @@ def _receipt_summary(binding: Mapping[str, Any]) -> dict[str, Any]:
         "artifact_sha256": _digest(
             document.get("artifact_sha256"), "artifact_sha256"
         ),
-        "n5_plan_id": plan_id,
-        "n5_plan_sha256": plan_sha256,
+        "n5_lineage_plan_id": plan_id,
+        "n5_lineage_plan_sha256": plan_sha256,
+        "n5_lineage_plan_role": "materialization-provenance-only",
         "n5_source_representation_id": _identifier(
             document.get("source_representation_id"),
             "source_representation_id",
@@ -396,6 +436,8 @@ def _receipt_summary(binding: Mapping[str, Any]) -> dict[str, Any]:
         "n5_derivation_id": derivation_id,
         "n5_derivation_sha256": derivation_sha256,
         "n5_idempotent_replay": n5_replay,
+        "n4_access_plan_ids": n4_access_plan_ids,
+        "n4_access_plan_ids_source": _EXPLICIT_N4_ACCESS_PLAN_IDS,
         "n4_publication_id": n4_receipt["publication_id"],
         "n4_publication_receipt_sha256": n4_receipt["receipt_sha256"],
         "n4_request_sha256": n4_receipt["request_sha256"],
@@ -697,6 +739,14 @@ def _expected_document(
         final_package / PACKAGE_MANIFEST_NAME,
         "final N4 package manifest",
     )
+    data_agent_manifest = _strict_json(
+        final_package / DATA_AGENT_MANIFEST_PATH,
+        "final N4 Data Agent manifest",
+    )
+    object_catalog = _strict_json(
+        final_package / OBJECT_CATALOG_PATH,
+        "final N4 object catalog",
+    )
     final_rows = {
         (row["object_id"], row["representation_id"]): row
         for row in final_manifest["objects"]
@@ -709,15 +759,41 @@ def _expected_document(
         "live receipts, final N4 snapshot, and rebound bindings do not have "
         "exact derived-representation coverage",
     )
+    manifest_representations = data_agent_manifest.get("representations")
+    catalog_objects = object_catalog.get("objects")
+    _require(
+        data_agent_manifest.get("node_id") == "N4"
+        and data_agent_manifest.get("require_plan_binding") is True
+        and isinstance(manifest_representations, Mapping)
+        and object_catalog.get("catalog_version") == current["catalog_version"]
+        and isinstance(catalog_objects, Mapping),
+        "final N4 Data Agent serving configuration changed",
+    )
+    access_plan_ids_by_representation: dict[str, list[str]] = {}
+    final_artifact_bindings: list[dict[str, Any]] = []
     for identity in sorted(required):
         final = final_rows[identity]
         receipt = receipt_rows[identity]
         provenance_row = final.get("provenance")
         _require(isinstance(provenance_row, Mapping), "N4 lineage is missing")
+        access_plan_ids = _canonical_plan_ids(
+            final.get("plan_ids"),
+            f"final N4 access plan IDs for {identity}",
+        )
+        _require(
+            access_plan_ids == receipt["n4_access_plan_ids"],
+            f"explicit receipt and final N4 access plans differ for {identity}",
+        )
+        previous_access_plan_ids = access_plan_ids_by_representation.setdefault(
+            identity[1], access_plan_ids
+        )
+        _require(
+            previous_access_plan_ids == access_plan_ids,
+            "final N4 access plan IDs differ within one representation",
+        )
         _require(
             final.get("artifact_sha256") == receipt["artifact_sha256"]
             and final.get("artifact_size_bytes") == receipt["artifact_size_bytes"]
-            and receipt["n5_plan_id"] in final.get("plan_ids", [])
             and provenance_row.get("producer_node_id") == "N5"
             and provenance_row.get("publication_source_id")
             == receipt["n5_publication_source_id"]
@@ -730,6 +806,34 @@ def _expected_document(
             and provenance_row.get("derivation_sha256")
             == receipt["n5_derivation_sha256"],
             f"final N4 content or N5 lineage changed for {identity}",
+        )
+        representation_contract = manifest_representations.get(identity[1])
+        catalog_object = catalog_objects.get(identity[0])
+        catalog_representations = (
+            catalog_object.get("representations")
+            if isinstance(catalog_object, Mapping)
+            else None
+        )
+        catalog_representation = (
+            catalog_representations.get(identity[1])
+            if isinstance(catalog_representations, Mapping)
+            else None
+        )
+        expected_path = "../" + str(final["artifact_package_path"])
+        _require(
+            isinstance(representation_contract, Mapping)
+            and representation_contract.get("default_binding")
+            == {"location": N4_LOGICAL_LOCATION}
+            and representation_contract.get("plan_bindings")
+            == {
+                plan_id: {"location": N4_LOGICAL_LOCATION}
+                for plan_id in access_plan_ids
+            }
+            and isinstance(catalog_representation, Mapping)
+            and catalog_representation.get("path") == expected_path
+            and catalog_representation.get("plan_paths")
+            == {plan_id: expected_path for plan_id in access_plan_ids},
+            f"final N4 serving bindings changed for {identity}",
         )
         binding_item = next(
             item
@@ -750,6 +854,18 @@ def _expected_document(
             == current["catalog_version"],
             f"rebound artifact identity changed for {identity}",
         )
+        final_artifact_bindings.append({
+            "object_id": identity[0],
+            "representation_id": identity[1],
+            "artifact_size_bytes": final["artifact_size_bytes"],
+            "artifact_sha256": final["artifact_sha256"],
+            "n4_access_plan_ids": access_plan_ids,
+        })
+
+    access_plan_ids_by_representation = {
+        representation_id: access_plan_ids_by_representation[representation_id]
+        for representation_id in sorted(access_plan_ids_by_representation)
+    }
 
     after_sha256, after_inventory = _source_inventory(n4_publication_store_root)
     _require(
@@ -769,6 +885,12 @@ def _expected_document(
         "n4_catalog_file_sha256": _sha256(catalog_raw),
         "n4_package_manifest_file_sha256": _sha256(manifest_raw),
         "n4_package_checksums_sha256": _sha256(n4_checksums_raw),
+        "n4_access_plan_ids_by_representation_sha256": _sha256(
+            _canonical(access_plan_ids_by_representation)
+        ),
+        "final_n4_artifact_bindings_sha256": _sha256(
+            _canonical(final_artifact_bindings)
+        ),
         "artifact_binding_set_sha256": provenance[
             "artifact_binding_set_sha256"
         ],
@@ -806,11 +928,19 @@ def _expected_document(
         "final_n4_object_count": final_report["object_count"],
         "final_n4_artifact_count": final_report["artifact_count"],
         "live_receipt_bindings": summaries,
+        "n4_access_plan_ids_by_representation": (
+            access_plan_ids_by_representation
+        ),
+        "final_n4_artifact_bindings": final_artifact_bindings,
         "source_commitments": source_commitments,
         "live_receipt_chain_contiguous": True,
         "live_receipts_exactly_cover_rebound_n4_artifacts": True,
         "final_n4_generation_verified": True,
         "rebound_artifact_bindings_verified": True,
+        "n5_lineage_plan_ids_provenance_only": True,
+        "n4_access_plan_ids_explicit": True,
+        "final_n4_artifact_access_bindings_verified": True,
+        "final_n4_data_agent_serving_bindings_verified": True,
         "rebound_semantic_matrix_verified": True,
         "rebound_semantic_admission_verified": True,
         "live_n5_materialization_executed": True,
@@ -887,6 +1017,11 @@ def _verify_gate_files(root: Path) -> dict[str, Any]:
         and document.get("publication_mutation_during_trials_allowed") is False
         and document.get("n4_data_agent_rebind_inputs_verified") is True
         and document.get("n4_data_agent_runtime_rebind_executed") is False
+        and document.get("n5_lineage_plan_ids_provenance_only") is True
+        and document.get("n4_access_plan_ids_explicit") is True
+        and document.get("final_n4_artifact_access_bindings_verified") is True
+        and document.get("final_n4_data_agent_serving_bindings_verified")
+        is True
         and document.get("source_artifacts_modified") is False
         and document.get("services_started") is False
         and document.get("workflow_submitted") is False
@@ -1001,6 +1136,16 @@ def verify_full_flow_n4_live_serve_gate(
         "n4_generation_id": commitments["n4_generation_id"],
         "n4_package_sha256": commitments["n4_package_sha256"],
         "n4_catalog_version": commitments["n4_catalog_version"],
+        "n4_access_plan_ids_by_representation": document[
+            "n4_access_plan_ids_by_representation"
+        ],
+        "final_n4_artifact_binding_count": len(
+            document["final_n4_artifact_bindings"]
+        ),
+        "n5_lineage_plan_ids_provenance_only": True,
+        "n4_access_plan_ids_explicit": True,
+        "final_n4_artifact_access_bindings_verified": True,
+        "final_n4_data_agent_serving_bindings_verified": True,
         "live_n5_materialization_executed": True,
         "authorized_compose_profile": "serve-frozen",
         "publication_companion_excluded": True,

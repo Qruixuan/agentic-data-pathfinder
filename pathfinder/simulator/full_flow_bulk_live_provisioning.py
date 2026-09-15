@@ -43,6 +43,7 @@ from .full_flow_provisioning_catalog import (
 from .n4_derived_data_plane import (
     FRAME_BUNDLE_REPRESENTATION_ID,
     MULTIMODAL_DIGEST_REPRESENTATION_ID,
+    PACKAGE_MANIFEST_NAME as N4_PACKAGE_MANIFEST_NAME,
     verify_n4_publication_receipt,
 )
 from .n5_digest_materialization import (
@@ -62,17 +63,29 @@ SOURCE_MANIFEST_SCHEMA_VERSION = (
 SOURCE_MAPPING_SCHEMA_VERSION = (
     "pathfinder.full-flow-live-provisioning-source-mapping/v1alpha1"
 )
-BULK_RUN_SCHEMA_VERSION = (
+_LEGACY_BULK_RUN_SCHEMA_VERSION = (
     "pathfinder.full-flow-bulk-live-provisioning/v1alpha1"
 )
-JOURNAL_SCHEMA_VERSION = (
+BULK_RUN_SCHEMA_VERSION = (
+    "pathfinder.full-flow-bulk-live-provisioning/v1alpha2"
+)
+_LEGACY_JOURNAL_SCHEMA_VERSION = (
     "pathfinder.full-flow-bulk-live-provisioning-journal/v1alpha1"
 )
-CHECKPOINT_SCHEMA_VERSION = (
+JOURNAL_SCHEMA_VERSION = (
+    "pathfinder.full-flow-bulk-live-provisioning-journal/v1alpha2"
+)
+_LEGACY_CHECKPOINT_SCHEMA_VERSION = (
     "pathfinder.full-flow-bulk-live-provisioning-checkpoint/v1alpha1"
 )
-AGGREGATE_RECEIPT_SCHEMA_VERSION = (
+CHECKPOINT_SCHEMA_VERSION = (
+    "pathfinder.full-flow-bulk-live-provisioning-checkpoint/v1alpha2"
+)
+_LEGACY_AGGREGATE_RECEIPT_SCHEMA_VERSION = (
     "pathfinder.full-flow-bulk-live-provisioning-receipt/v1alpha1"
+)
+AGGREGATE_RECEIPT_SCHEMA_VERSION = (
+    "pathfinder.full-flow-bulk-live-provisioning-receipt/v1alpha2"
 )
 
 JOURNAL_NAME = "bulk-live-provisioning-journal.jsonl"
@@ -195,6 +208,7 @@ _CHECKPOINT_FIELDS = {
     "expected_artifact_sha256",
     "source_video_sha256",
     "plan_sha256",
+    "n4_access_plan_ids",
     "receipt_relative_dir",
     "receipt_file_sha256",
     "n4_previous_catalog_version",
@@ -206,6 +220,7 @@ _CHECKPOINT_FIELDS = {
     "crash_window_receipt_adopted",
     "checkpoint_sha256",
 }
+_LEGACY_CHECKPOINT_FIELDS = _CHECKPOINT_FIELDS - {"n4_access_plan_ids"}
 _FINAL_FILES = {
     AGGREGATE_RECEIPT_NAME,
     LIVE_RECEIPT_BINDINGS_NAME,
@@ -213,6 +228,8 @@ _FINAL_FILES = {
 }
 _RESUMABLE_FAILURE_CLASS = "infrastructure"
 _FAILURE_CLASSES = {"infrastructure", "semantic", "data", "internal"}
+_EXPLICIT_N4_ACCESS_PLAN_IDS = "explicit"
+_DEFAULT_N4_ACCESS_PLAN_IDS = "n5-materialization-plan-default"
 
 
 class FullFlowBulkLiveProvisioningError(RuntimeError):
@@ -430,6 +447,8 @@ class BulkProvisioningOperation:
     plan_sha256: str
     expected_artifact_size_bytes: int
     expected_artifact_sha256: str
+    n4_access_plan_ids: tuple[str, ...]
+    n4_access_plan_ids_source: str
     frame_plan: Mapping[str, Any] | None = field(default=None, repr=False)
     digest_plan_dir: Path | None = field(default=None, repr=False)
     smoke_id: str = ""
@@ -506,6 +525,7 @@ class ExistingFrameBundleBulkExecutor:
                 expected_current_catalog_version=(
                     operation.expected_current_catalog_version
                 ),
+                n4_access_plan_ids=operation.n4_access_plan_ids,
                 output_dir=operation.output_dir,
             )
         except Exception as exc:
@@ -539,6 +559,7 @@ class ExistingDigestBulkExecutor:
                 expected_current_catalog_version=(
                     operation.expected_current_catalog_version
                 ),
+                n4_access_plan_ids=operation.n4_access_plan_ids,
                 output_dir=operation.output_dir,
             )
         except Exception as exc:
@@ -559,10 +580,15 @@ class _SourceRow:
     digest_plan_file_sha256: str
     digest_plan_checksums_file_sha256: str
     digest_plan_sha256: str
+    digest_plan_id: str
 
 
 @dataclass(frozen=True)
 class _RunContext:
+    schema_version: str
+    journal_schema_version: str
+    checkpoint_schema_version: str
+    aggregate_receipt_schema_version: str
     run_id: str
     catalog_sha256: str
     catalog_file_sha256: str
@@ -681,6 +707,91 @@ def _catalog_required(
         },
         "every catalog object must require both derived representations",
     )
+    n4_manifest_path = n4_package_dir / N4_PACKAGE_MANIFEST_NAME
+    n4_manifest_payload = (
+        n4_manifest_path.read_bytes()
+        if n4_manifest_path.is_file() and not n4_manifest_path.is_symlink()
+        else b""
+    )
+    _require(
+        bool(n4_manifest_payload)
+        and _sha256(n4_manifest_payload)
+        == value.get("n4_package_manifest_sha256"),
+        "frozen N4 package manifest binding failed",
+    )
+    n4_manifest = _strict_json_bytes(
+        n4_manifest_payload,
+        "frozen N4 package manifest",
+    )
+    _require(
+        isinstance(n4_manifest, dict),
+        "frozen N4 package manifest must be an object",
+    )
+    n4_rows = n4_manifest.get("objects")
+    _require(
+        isinstance(n4_rows, list) and bool(n4_rows),
+        "frozen N4 package has no artifact rows",
+    )
+    n4_bindings: dict[tuple[str, str], tuple[str, ...]] = {}
+    n4_identities: dict[tuple[str, str], tuple[int, str]] = {}
+    for raw in n4_rows:
+        _require(
+            isinstance(raw, dict),
+            "frozen N4 package artifact row is invalid",
+        )
+        object_id = _identifier(raw.get("object_id"), "N4 object_id")
+        representation_id = _identifier(
+            raw.get("representation_id"),
+            "N4 representation_id",
+        )
+        key = (object_id, representation_id)
+        _require(
+            key not in n4_bindings,
+            "frozen N4 package repeats an artifact identity",
+        )
+        raw_plan_ids = raw.get("plan_ids")
+        _require(
+            isinstance(raw_plan_ids, list)
+            and bool(raw_plan_ids)
+            and all(isinstance(plan_id, str) for plan_id in raw_plan_ids)
+            and raw_plan_ids == sorted(set(raw_plan_ids)),
+            "frozen N4 access plan IDs are not canonical",
+        )
+        plan_ids = tuple(
+            _identifier(plan_id, "N4 access plan_id")
+            for plan_id in raw_plan_ids
+        )
+        n4_bindings[key] = plan_ids
+        n4_identities[key] = (
+            _integer(
+                raw.get("artifact_size_bytes"),
+                "N4 artifact_size_bytes",
+                minimum=1,
+            ),
+            _digest(raw.get("artifact_sha256"), "N4 artifact_sha256"),
+        )
+    _require(
+        set(n4_bindings) == identities,
+        "frozen N4 package identity set differs from the provisioning catalog",
+    )
+    for representation_id in _REPRESENTATION_ORDER:
+        binding_sets = {
+            n4_bindings[key]
+            for key in sorted(n4_bindings)
+            if key[1] == representation_id
+        }
+        _require(
+            len(binding_sets) == 1,
+            "frozen N4 access plan bindings differ within a representation",
+        )
+    for row in required:
+        key = (row["object_id"], row["representation_id"])
+        _require(
+            n4_identities[key]
+            == (row["artifact_size_bytes"], row["artifact_sha256"]),
+            "frozen N4 artifact identity differs from the provisioning catalog",
+        )
+        row["n4_access_plan_ids"] = list(n4_bindings[key])
     required.sort(
         key=lambda row: (
             row["object_id"],
@@ -1030,6 +1141,9 @@ def _source_manifest(
         digest_plan_sha = _digest(
             raw.get("digest_plan_sha256"), "digest_plan_sha256"
         )
+        digest_plan_id = _identifier(
+            digest_verified.get("plan_id"), "digest plan_id"
+        )
         _require(
             digest_verified.get("plan_sha256") == digest_plan_sha
             and digest_verified.get("object_id") == object_id
@@ -1051,6 +1165,7 @@ def _source_manifest(
                 raw["digest_plan_checksums_file_sha256"]
             ),
             digest_plan_sha256=digest_plan_sha,
+            digest_plan_id=digest_plan_id,
         )
     _require(
         sorted(rows) == required_objects,
@@ -1067,8 +1182,28 @@ def _run_context(
     *,
     run_id: str,
     output_dir: Path,
+    schema_version: str = BULK_RUN_SCHEMA_VERSION,
 ) -> _RunContext:
     run_id = _identifier(run_id, "run_id")
+    _require(
+        schema_version
+        in {BULK_RUN_SCHEMA_VERSION, _LEGACY_BULK_RUN_SCHEMA_VERSION},
+        "bulk run schema version is unsupported",
+    )
+    legacy = schema_version == _LEGACY_BULK_RUN_SCHEMA_VERSION
+    journal_schema_version = (
+        _LEGACY_JOURNAL_SCHEMA_VERSION if legacy else JOURNAL_SCHEMA_VERSION
+    )
+    checkpoint_schema_version = (
+        _LEGACY_CHECKPOINT_SCHEMA_VERSION
+        if legacy
+        else CHECKPOINT_SCHEMA_VERSION
+    )
+    aggregate_receipt_schema_version = (
+        _LEGACY_AGGREGATE_RECEIPT_SCHEMA_VERSION
+        if legacy
+        else AGGREGATE_RECEIPT_SCHEMA_VERSION
+    )
     _require(
         len(run_id) <= 180,
         "run_id is too long for deterministic operation identifiers",
@@ -1082,6 +1217,14 @@ def _run_context(
         operator_source_manifest,
         catalog_sha256=catalog_sha,
         required=required,
+    )
+    context_required = tuple(
+        {
+            key: value
+            for key, value in row.items()
+            if not legacy or key != "n4_access_plan_ids"
+        }
+        for row in required
     )
     protected_directories = {
         provisioning_catalog_dir,
@@ -1122,12 +1265,12 @@ def _run_context(
         for object_id, row in sorted(sources.items())
     ]
     context_document = {
-        "schema_version": BULK_RUN_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "run_id": run_id,
         "provisioning_catalog_sha256": catalog_sha,
         "provisioning_catalog_file_sha256": catalog_file_sha,
         "source_manifest_file_sha256": source_manifest_sha,
-        "required_derived_identities": list(required),
+        "required_derived_identities": list(context_required),
         "source_content_commitments": source_commitments,
         "credentials_recorded": False,
     }
@@ -1148,6 +1291,19 @@ def _run_context(
             if representation == FRAME_BUNDLE_REPRESENTATION_ID
             else source.digest_plan_sha256
         )
+        if legacy:
+            if representation == FRAME_BUNDLE_REPRESENTATION_ID:
+                access_plan_ids = (
+                    _identifier(
+                        source.frame_plan.get("plan_id"), "frame plan_id"
+                    ),
+                )
+            else:
+                access_plan_ids = (source.digest_plan_id,)
+            access_plan_ids_source = _DEFAULT_N4_ACCESS_PLAN_IDS
+        else:
+            access_plan_ids = tuple(required_row["n4_access_plan_ids"])
+            access_plan_ids_source = _EXPLICIT_N4_ACCESS_PLAN_IDS
         catalog_version = f"{run_id}-n4-catalog-{index:04d}"
         operations.append(BulkProvisioningOperation(
             run_id=run_id,
@@ -1162,6 +1318,8 @@ def _run_context(
                 required_row["artifact_size_bytes"]
             ),
             expected_artifact_sha256=str(required_row["artifact_sha256"]),
+            n4_access_plan_ids=access_plan_ids,
+            n4_access_plan_ids_source=access_plan_ids_source,
             frame_plan=(
                 source.frame_plan
                 if representation == FRAME_BUNDLE_REPRESENTATION_ID
@@ -1186,12 +1344,16 @@ def _run_context(
         ))
         previous_catalog = catalog_version
     return _RunContext(
+        schema_version=schema_version,
+        journal_schema_version=journal_schema_version,
+        checkpoint_schema_version=checkpoint_schema_version,
+        aggregate_receipt_schema_version=aggregate_receipt_schema_version,
         run_id=run_id,
         catalog_sha256=catalog_sha,
         catalog_file_sha256=catalog_file_sha,
         source_manifest_file_sha256=source_manifest_sha,
         source_rows=sources,
-        required=required,
+        required=context_required,
         operations=tuple(operations),
         context_sha256=context_sha,
     )
@@ -1214,7 +1376,7 @@ def _journal_row(
         _require(failure_class in _FAILURE_CLASSES, "failure class is invalid")
         _identifier(failure_code, "failure_code")
     value: dict[str, Any] = {
-        "schema_version": JOURNAL_SCHEMA_VERSION,
+        "schema_version": context.journal_schema_version,
         "sequence": sequence,
         "previous_entry_sha256": previous,
         "state": state,
@@ -1256,7 +1418,7 @@ def _read_journal(path: Path, context: _RunContext) -> list[dict[str, Any]]:
         _require(
             isinstance(value, dict)
             and set(value) == _JOURNAL_FIELDS
-            and value.get("schema_version") == JOURNAL_SCHEMA_VERSION
+            and value.get("schema_version") == context.journal_schema_version
             and value.get("sequence") == index
             and value.get("previous_entry_sha256") == previous
             and value.get("run_id") == context.run_id
@@ -1434,6 +1596,7 @@ def _verify_operation_receipt(
             verify_n5_n4_live_frame_bundle_provisioning_smoke(
                 operation.output_dir,
                 n5_plan=operation.frame_plan,
+                n4_access_plan_ids=operation.n4_access_plan_ids,
             )
         else:
             _require(
@@ -1444,6 +1607,7 @@ def _verify_operation_receipt(
                 operation.output_dir,
                 n5_digest_plan_dir=operation.digest_plan_dir,
                 source_video_path=operation.source_video_path,
+                n4_access_plan_ids=operation.n4_access_plan_ids,
             )
     except Exception as exc:
         raise FullFlowBulkLiveProvisioningError(
@@ -1456,9 +1620,22 @@ def _verify_operation_receipt(
         document.get("n4_publication_receipt")
     )
     published = n4.get("published_artifacts")
+    if operation.n4_access_plan_ids_source == _EXPLICIT_N4_ACCESS_PLAN_IDS:
+        access_contract_matches = (
+            document.get("n4_access_plan_ids")
+            == list(operation.n4_access_plan_ids)
+            and document.get("n4_access_plan_ids_source")
+            == _EXPLICIT_N4_ACCESS_PLAN_IDS
+        )
+    else:
+        access_contract_matches = (
+            "n4_access_plan_ids" not in document
+            and "n4_access_plan_ids_source" not in document
+        )
     _require(
         document.get("object_id") == operation.object_id
         and document.get("representation_id") == operation.representation_id
+        and access_contract_matches
         and document.get("artifact_size_bytes")
         == operation.expected_artifact_size_bytes
         and document.get("artifact_sha256")
@@ -1528,7 +1705,7 @@ def _checkpoint_document(
     adopted: bool,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "schema_version": context.checkpoint_schema_version,
         "run_id": context.run_id,
         "context_sha256": context.context_sha256,
         "operation_index": operation.operation_index,
@@ -1554,6 +1731,8 @@ def _checkpoint_document(
         "n4_idempotent_replay": summary["n4_idempotent_replay"],
         "crash_window_receipt_adopted": adopted,
     }
+    if context.schema_version != _LEGACY_BULK_RUN_SCHEMA_VERSION:
+        value["n4_access_plan_ids"] = list(operation.n4_access_plan_ids)
     value["checkpoint_sha256"] = _sha256(_canonical(value))
     return value
 
@@ -1584,8 +1763,15 @@ def _verify_checkpoint(
     value = _strict_json_file(
         path, f"checkpoint {operation.operation_index}"
     )
+    expected_fields = (
+        _LEGACY_CHECKPOINT_FIELDS
+        if context.schema_version == _LEGACY_BULK_RUN_SCHEMA_VERSION
+        else _CHECKPOINT_FIELDS
+    )
     _require(
-        isinstance(value, dict) and set(value) == _CHECKPOINT_FIELDS,
+        isinstance(value, dict)
+        and set(value) == expected_fields
+        and value.get("schema_version") == context.checkpoint_schema_version,
         "checkpoint field set changed",
     )
     supplied = _digest(
@@ -1687,6 +1873,24 @@ def _state_inventory(root: Path) -> list[dict[str, Any]]:
     )
 
 
+def _n4_access_plan_ids_by_representation(
+    context: _RunContext,
+) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for representation_id in _REPRESENTATION_ORDER:
+        binding_sets = {
+            operation.n4_access_plan_ids
+            for operation in context.operations
+            if operation.representation_id == representation_id
+        }
+        _require(
+            len(binding_sets) == 1,
+            "bulk N4 access plan bindings differ within a representation",
+        )
+        result[representation_id] = list(next(iter(binding_sets)))
+    return result
+
+
 def _aggregate_document(
     root: Path,
     context: _RunContext,
@@ -1702,7 +1906,7 @@ def _aggregate_document(
         or row["crash_window_receipt_adopted"]
     )
     value: dict[str, Any] = {
-        "schema_version": AGGREGATE_RECEIPT_SCHEMA_VERSION,
+        "schema_version": context.aggregate_receipt_schema_version,
         "status": "COMPLETE",
         "evidence_class": "local-bulk-data-protocol-conformance",
         "run_id": context.run_id,
@@ -1748,6 +1952,10 @@ def _aggregate_document(
         "llm_reasoning_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if context.schema_version != _LEGACY_BULK_RUN_SCHEMA_VERSION:
+        value["n4_access_plan_ids_by_representation"] = (
+            _n4_access_plan_ids_by_representation(context)
+        )
     value["aggregate_receipt_sha256"] = _sha256(_canonical(value))
     return value
 
@@ -1864,6 +2072,35 @@ def _prepare_root(root: Path, context: _RunContext, *, resume: bool) -> None:
     _append_journal(root, context, state="RUN_STARTED")
 
 
+def _bulk_schema_and_run_id_from_journal(path: Path) -> tuple[str, str]:
+    _require(path.is_file() and not path.is_symlink(), "journal is missing")
+    try:
+        first = path.read_bytes().splitlines()[0]
+    except (OSError, IndexError) as exc:
+        raise FullFlowBulkLiveProvisioningError("journal is empty") from exc
+    value = _strict_json_bytes(first, "journal start")
+    _require(
+        isinstance(value, dict)
+        and set(value) == _JOURNAL_FIELDS
+        and value.get("sequence") == 1
+        and value.get("state") == "RUN_STARTED",
+        "journal start is invalid",
+    )
+    journal_schema = value.get("schema_version")
+    by_journal_schema = {
+        JOURNAL_SCHEMA_VERSION: BULK_RUN_SCHEMA_VERSION,
+        _LEGACY_JOURNAL_SCHEMA_VERSION: _LEGACY_BULK_RUN_SCHEMA_VERSION,
+    }
+    _require(
+        journal_schema in by_journal_schema,
+        "journal schema version is unsupported",
+    )
+    return (
+        by_journal_schema[str(journal_schema)],
+        _identifier(value.get("run_id"), "run_id"),
+    )
+
+
 def run_full_flow_bulk_live_provisioning(
     provisioning_catalog_dir: str | Path,
     artifact_binding_dir: str | Path,
@@ -1879,6 +2116,15 @@ def run_full_flow_bulk_live_provisioning(
     """Provision every required derived identity with durable recovery."""
 
     root = Path(output_dir).resolve()
+    if resume and root.exists() and (root / JOURNAL_NAME).exists():
+        existing_schema, _existing_run_id = (
+            _bulk_schema_and_run_id_from_journal(root / JOURNAL_NAME)
+        )
+        _require(
+            existing_schema == BULK_RUN_SCHEMA_VERSION,
+            "legacy v1alpha1 bulk evidence is verify-only; start a new "
+            "v1alpha2 run",
+        )
     context = _run_context(
         Path(provisioning_catalog_dir).resolve(),
         Path(artifact_binding_dir).resolve(),
@@ -2038,23 +2284,9 @@ def verify_full_flow_bulk_live_provisioning(
         },
         "bulk run top-level file set changed",
     )
-    rows = _read_journal(
-        root / JOURNAL_NAME,
-        _run_context(
-            Path(provisioning_catalog_dir).resolve(),
-            Path(artifact_binding_dir).resolve(),
-            Path(n4_package_dir).resolve(),
-            Path(operator_source_manifest).resolve(),
-            run_id=str(
-                _strict_json_bytes(
-                    (root / JOURNAL_NAME).read_bytes().splitlines()[0],
-                    "journal start",
-                )["run_id"]
-            ),
-            output_dir=root,
-        ),
+    schema_version, run_id = _bulk_schema_and_run_id_from_journal(
+        root / JOURNAL_NAME
     )
-    run_id = str(rows[0]["run_id"])
     context = _run_context(
         Path(provisioning_catalog_dir).resolve(),
         Path(artifact_binding_dir).resolve(),
@@ -2062,7 +2294,9 @@ def verify_full_flow_bulk_live_provisioning(
         Path(operator_source_manifest).resolve(),
         run_id=run_id,
         output_dir=root,
+        schema_version=schema_version,
     )
+    rows = _read_journal(root / JOURNAL_NAME, context)
     _require(rows[-1]["state"] == "RUN_COMPLETED", "bulk run is incomplete")
     _require(
         _checkpoint_set(root, len(context.operations))
@@ -2103,7 +2337,7 @@ def verify_full_flow_bulk_live_provisioning(
         previous = str(checkpoint["n4_committed_catalog_version"])
     aggregate = _verify_final_files(root, context, checkpoints)
     failure_rows = [row for row in rows if row["state"] == "RUN_FAILED"]
-    return {
+    result = {
         "status": "VERIFIED",
         "run_id": run_id,
         "object_count": aggregate["object_count"],
@@ -2146,6 +2380,11 @@ def verify_full_flow_bulk_live_provisioning(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if schema_version != _LEGACY_BULK_RUN_SCHEMA_VERSION:
+        result["n4_access_plan_ids_by_representation"] = aggregate[
+            "n4_access_plan_ids_by_representation"
+        ]
+    return result
 
 
 __all__ = [

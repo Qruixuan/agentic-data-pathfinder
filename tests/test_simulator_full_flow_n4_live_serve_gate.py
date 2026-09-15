@@ -162,6 +162,8 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
                 "object_id": source.object_id,
                 "artifact_size_bytes": len(source.artifact_bytes),
                 "artifact_sha256": _sha256(source.artifact_bytes),
+                "n4_access_plan_ids": list(source.plan_ids),
+                "n4_access_plan_ids_source": "explicit",
                 "n4_publication_id": n4_receipt["publication_id"],
                 "n4_previous_catalog_version": n4_receipt[
                     "previous_catalog_version"
@@ -174,9 +176,10 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
                 "n4_publication_receipt": n4_receipt,
                 "n4_publication_idempotent_replay": False,
             }
+            n5_lineage_plan_id = f"n5-lineage-plan-{index:02d}"
             if source.representation_id == FRAME_BUNDLE_REPRESENTATION_ID:
                 plan = {
-                    "plan_id": "D2",
+                    "plan_id": n5_lineage_plan_id,
                     "plan_sha256": plan_sha256,
                     "idempotency_key": publication_source_id,
                     "input": {
@@ -186,7 +189,7 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
                 }
                 document = {
                     **common,
-                    "n5_plan_id": "D2",
+                    "n5_plan_id": n5_lineage_plan_id,
                     "n5_plan_sha256": plan_sha256,
                     "n5_transformation_contract_sha256": derivation_sha256,
                     "n5_materialization_idempotent_replay": False,
@@ -204,7 +207,7 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
                 source_video.write_bytes(f"source-{index:02d}".encode())
                 document = {
                     **common,
-                    "n5_digest_plan_id": "D2",
+                    "n5_digest_plan_id": n5_lineage_plan_id,
                     "n5_digest_plan_sha256": plan_sha256,
                     "n5_digest_result": {
                         "request_id": publication_source_id,
@@ -311,15 +314,31 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
         }
 
     def _patch_verifiers(self):
+        def verified(receipt_root: Path, **_kwargs: object) -> dict:
+            root = Path(receipt_root)
+            name = (
+                RECEIPT_NAME
+                if (root / RECEIPT_NAME).is_file()
+                else DIGEST_RECEIPT_NAME
+            )
+            document = json.loads((root / name).read_text(encoding="utf-8"))
+            return {
+                "status": "VERIFIED",
+                "n4_access_plan_ids": document.get("n4_access_plan_ids"),
+                "n4_access_plan_ids_source": document.get(
+                    "n4_access_plan_ids_source"
+                ),
+            }
+
         frame = patch(
             "pathfinder.simulator.full_flow_n4_live_serve_gate."
             "verify_n5_n4_live_frame_bundle_provisioning_smoke",
-            return_value={"status": "VERIFIED"},
+            side_effect=verified,
         )
         digest = patch(
             "pathfinder.simulator.full_flow_n4_live_serve_gate."
             "verify_n5_n4_live_multimodal_digest_provisioning_smoke",
-            return_value={"status": "VERIFIED"},
+            side_effect=verified,
         )
         return frame, digest
 
@@ -342,6 +361,35 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
         frame, digest = self._patch_verifiers()
         with frame, digest:
             return verify_full_flow_n4_live_serve_gate(output, **arguments)
+
+    def _changed_receipt_binding(
+        self,
+        index: int,
+        name: str,
+        **changes: object,
+    ) -> list[dict[str, object]]:
+        bindings = [dict(value) for value in self.receipt_bindings]
+        binding = bindings[index]
+        source = Path(binding["receipt_dir"])
+        copied = self.case_root / name
+        shutil.copytree(source, copied)
+        receipt_name = (
+            RECEIPT_NAME
+            if binding["kind"] == "frame_bundle"
+            else DIGEST_RECEIPT_NAME
+        )
+        receipt_path = copied / receipt_name
+        document = json.loads(receipt_path.read_text(encoding="utf-8"))
+        document.update(changes)
+        document.pop("receipt_sha256", None)
+        document["receipt_sha256"] = _sha256(_canonical(document))
+        _write_json(receipt_path, document)
+        (copied / CHECKSUMS_NAME).write_text(
+            f"{_sha256(receipt_path.read_bytes())}  {receipt_name}\n",
+            encoding="utf-8",
+        )
+        binding["receipt_dir"] = copied
+        return bindings
 
     def test_freezes_complete_live_chain_and_exact_rebound_inputs(self) -> None:
         before = {
@@ -366,6 +414,27 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
         self.assertTrue(report["publication_companion_excluded"])
         self.assertTrue(report["n4_data_agent_rebind_inputs_verified"])
         self.assertFalse(report["n4_data_agent_runtime_rebind_executed"])
+        self.assertTrue(report["n5_lineage_plan_ids_provenance_only"])
+        self.assertTrue(report["n4_access_plan_ids_explicit"])
+        self.assertTrue(
+            report["final_n4_artifact_access_bindings_verified"]
+        )
+        self.assertTrue(
+            report["final_n4_data_agent_serving_bindings_verified"]
+        )
+        self.assertEqual(6, report["final_n4_artifact_binding_count"])
+        self.assertEqual(
+            {
+                FRAME_BUNDLE_REPRESENTATION_ID: ["D2", "D3", "D6", "D7"],
+                MULTIMODAL_DIGEST_REPRESENTATION_ID: [
+                    "D2",
+                    "D3",
+                    "D6",
+                    "D7",
+                ],
+            },
+            report["n4_access_plan_ids_by_representation"],
+        )
         self.assertEqual(before, after)
         self.assertEqual(3, gate["frame_bundle_receipt_count"])
         self.assertEqual(3, gate["multimodal_digest_receipt_count"])
@@ -373,12 +442,60 @@ class FullFlowN4LiveServeGateTest(unittest.TestCase):
         self.assertFalse(gate["upcloud_ready"])
         self.assertFalse(gate["performance_measured"])
         self.assertFalse(gate["eligible_for_scientific_claims"])
+        self.assertTrue(gate["n5_lineage_plan_ids_provenance_only"])
+        for receipt in gate["live_receipt_bindings"]:
+            self.assertEqual(
+                "materialization-provenance-only",
+                receipt["n5_lineage_plan_role"],
+            )
+            self.assertNotIn(
+                receipt["n5_lineage_plan_id"],
+                receipt["n4_access_plan_ids"],
+            )
 
     def test_missing_receipt_fails_exact_coverage(self) -> None:
         with self.assertRaises(FullFlowN4LiveServeGateError):
             self._freeze(
                 "missing-receipt",
                 live_receipt_bindings=self.receipt_bindings[:-1],
+            )
+
+    def test_n5_default_cannot_authorize_n4_serving(self) -> None:
+        index = next(
+            position
+            for position, binding in enumerate(self.receipt_bindings)
+            if binding["kind"] == "frame_bundle"
+        )
+        n5_plan_id = self.receipt_bindings[index]["n5_plan"]["plan_id"]
+        bindings = self._changed_receipt_binding(
+            index,
+            "n5-default-receipt",
+            n4_access_plan_ids=[n5_plan_id],
+            n4_access_plan_ids_source="n5-materialization-plan-default",
+        )
+        with self.assertRaisesRegex(
+            FullFlowN4LiveServeGateError,
+            "requires explicit N4 access plan IDs",
+        ):
+            self._freeze(
+                "n5-default-gate",
+                live_receipt_bindings=bindings,
+            )
+
+    def test_explicit_access_plan_must_match_final_n4_serving_binding(self) -> None:
+        bindings = self._changed_receipt_binding(
+            0,
+            "wrong-access-plan-receipt",
+            n4_access_plan_ids=["D2"],
+            n4_access_plan_ids_source="explicit",
+        )
+        with self.assertRaisesRegex(
+            FullFlowN4LiveServeGateError,
+            "explicit receipt and final N4 access plans differ",
+        ):
+            self._freeze(
+                "wrong-access-plan-gate",
+                live_receipt_bindings=bindings,
             )
 
     def test_noncontiguous_or_reordered_chain_fails_closed(self) -> None:

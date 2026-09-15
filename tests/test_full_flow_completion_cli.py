@@ -114,6 +114,10 @@ class FullFlowCompletionCliTest(unittest.TestCase):
                     "package-v1",
                     "--catalog-version",
                     "catalog-v1",
+                    "--n4-access-plan-id",
+                    "D3",
+                    "--n4-access-plan-id",
+                    "D7",
                     "--output-dir",
                     str(root / "receipt"),
                 ])
@@ -127,6 +131,9 @@ class FullFlowCompletionCliTest(unittest.TestCase):
             )
             self.assertEqual(
                 "n4-runtime-token", call.kwargs["n4_config"].bearer_token
+            )
+            self.assertEqual(
+                ["D3", "D7"], call.kwargs["n4_access_plan_ids"]
             )
 
     def test_w4_lexical_ranker_binds_three_runtime_index_clients(self) -> None:
@@ -320,11 +327,16 @@ class FullFlowCompletionCliTest(unittest.TestCase):
                     str(root / "receipt"),
                     "--n5-plan",
                     str(plan),
+                    "--n4-access-plan-id",
+                    "D3",
+                    "--n4-access-plan-id",
+                    "D7",
                 ])
             self.assertEqual(0, status)
             verify.assert_called_once_with(
                 root / "receipt",
                 n5_plan={"plan_id": "plan-v1"},
+                n4_access_plan_ids=["D3", "D7"],
             )
 
     def test_live_n4_serve_gate_commands_are_wired(self) -> None:
@@ -427,6 +439,10 @@ class FullFlowCompletionCliTest(unittest.TestCase):
                 "digest-package-v1",
                 "--catalog-version",
                 "digest-catalog-v1",
+                "--n4-access-plan-id",
+                "D3",
+                "--n4-access-plan-id",
+                "D7",
                 "--output-dir",
                 "digest-receipt",
             ])
@@ -437,6 +453,9 @@ class FullFlowCompletionCliTest(unittest.TestCase):
         self.assertEqual(Path("video.mp4"), call.args[1])
         self.assertEqual(
             "n4-runtime-token", call.kwargs["n4_config"].bearer_token
+        )
+        self.assertEqual(
+            ["D3", "D7"], call.kwargs["n4_access_plan_ids"]
         )
 
     def test_live_digest_receipt_verifier_is_wired(self) -> None:
@@ -453,12 +472,17 @@ class FullFlowCompletionCliTest(unittest.TestCase):
                 "digest-plan",
                 "--source-video",
                 "video.mp4",
+                "--n4-access-plan-id",
+                "D3",
+                "--n4-access-plan-id",
+                "D7",
             ])
         self.assertEqual(0, status)
         verify.assert_called_once_with(
             Path("digest-receipt"),
             n5_digest_plan_dir=Path("digest-plan"),
             source_video_path=Path("video.mp4"),
+            n4_access_plan_ids=["D3", "D7"],
         )
 
 

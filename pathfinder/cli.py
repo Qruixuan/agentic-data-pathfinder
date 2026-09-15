@@ -2350,6 +2350,14 @@ def _parser() -> argparse.ArgumentParser:
     live_provisioning_run.add_argument("--catalog-version", required=True)
     live_provisioning_run.add_argument("--expected-current-catalog-version")
     live_provisioning_run.add_argument(
+        "--n4-access-plan-id",
+        action="append",
+        help=(
+            "N4 Data Agent access/serving plan ID; repeat for multiple IDs; "
+            "explicit IDs are required for formal live-serve evidence"
+        ),
+    )
+    live_provisioning_run.add_argument(
         "--output-dir", type=Path, required=True
     )
     live_provisioning_run.add_argument("--compact", action="store_true")
@@ -2363,6 +2371,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     live_provisioning_verify.add_argument(
         "--n5-plan", type=Path, required=True
+    )
+    live_provisioning_verify.add_argument(
+        "--n4-access-plan-id",
+        action="append",
+        help="expected N4 Data Agent access/serving plan ID; repeatable",
     )
     live_provisioning_verify.add_argument("--compact", action="store_true")
 
@@ -2393,6 +2406,14 @@ def _parser() -> argparse.ArgumentParser:
     live_digest_run.add_argument("--package-id", required=True)
     live_digest_run.add_argument("--catalog-version", required=True)
     live_digest_run.add_argument("--expected-current-catalog-version")
+    live_digest_run.add_argument(
+        "--n4-access-plan-id",
+        action="append",
+        help=(
+            "N4 Data Agent access/serving plan ID; repeat for multiple IDs; "
+            "explicit IDs are required for formal live-serve evidence"
+        ),
+    )
     live_digest_run.add_argument("--output-dir", type=Path, required=True)
     live_digest_run.add_argument("--compact", action="store_true")
 
@@ -2408,6 +2429,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     live_digest_verify.add_argument(
         "--source-video", type=Path, required=True
+    )
+    live_digest_verify.add_argument(
+        "--n4-access-plan-id",
+        action="append",
+        help="expected N4 Data Agent access/serving plan ID; repeatable",
     )
     live_digest_verify.add_argument("--compact", action="store_true")
 
@@ -4691,6 +4717,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_current_catalog_version=(
                     args.expected_current_catalog_version
                 ),
+                n4_access_plan_ids=args.n4_access_plan_id,
                 output_dir=args.output_dir,
             )
             return _print_payload(payload, compact=args.compact)
@@ -4707,6 +4734,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = verify_n5_n4_live_frame_bundle_provisioning_smoke(
                 args.output_dir,
                 n5_plan=n5_plan,
+                n4_access_plan_ids=args.n4_access_plan_id,
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "run-simulator-n5-n4-live-digest-smoke":
@@ -4751,6 +4779,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_current_catalog_version=(
                     args.expected_current_catalog_version
                 ),
+                n4_access_plan_ids=args.n4_access_plan_id,
                 output_dir=args.output_dir,
             )
             return _print_payload(payload, compact=args.compact)
@@ -4763,6 +4792,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.output_dir,
                 n5_digest_plan_dir=args.n5_digest_plan_dir,
                 source_video_path=args.source_video,
+                n4_access_plan_ids=args.n4_access_plan_id,
             )
             return _print_payload(payload, compact=args.compact)
         if (

@@ -4,9 +4,10 @@ This module exercises the deployment boundary which the normal semantic
 matrix deliberately replaces with a frozen, preprovisioned N4 snapshot.  It
 can materialize either a frame bundle or a multimodal digest through the
 authenticated N5 HTTP APIs and publish those exact bytes through the
-authenticated, compare-and-swap N4 HTTP API.  Each portable receipt binds
-the N5 plan and result, the derived bytes, and the N4 atomic-publication
-receipt.
+authenticated, compare-and-swap N4 HTTP API.  Each portable receipt records
+the N5 materialization plan as lineage separately from the N4 Data Agent
+access/serving plan IDs, and binds the derived bytes and N4
+atomic-publication receipt.
 
 The receipt proves local protocol and content-lineage conformance only.  It
 does not authorize the N4 ``serve-frozen`` profile, replace the separately
@@ -67,11 +68,17 @@ from .n5_digest_materialization import (
 )
 
 
-LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION = (
+_LEGACY_LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION = (
     "pathfinder.local-n5-n4-live-provisioning-smoke/v1alpha1"
 )
-LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION = (
+LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION = (
+    "pathfinder.local-n5-n4-live-provisioning-smoke/v1alpha2"
+)
+_LEGACY_LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION = (
     "pathfinder.local-n5-n4-live-digest-provisioning-smoke/v1alpha1"
+)
+LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION = (
+    "pathfinder.local-n5-n4-live-digest-provisioning-smoke/v1alpha2"
 )
 N5_DIGEST_TRANSPORT_RECEIPT_SCHEMA_VERSION = (
     "pathfinder.local-n5-digest-http-transport-receipt/v1alpha1"
@@ -92,7 +99,7 @@ _SENSITIVE_KEY = re.compile(
     re.IGNORECASE,
 )
 
-_RECEIPT_FIELDS = {
+_LEGACY_RECEIPT_FIELDS = {
     "schema_version",
     "status",
     "evidence_class",
@@ -144,8 +151,14 @@ _RECEIPT_FIELDS = {
     "eligible_for_scientific_claims",
     "receipt_sha256",
 }
+_RECEIPT_FIELDS = _LEGACY_RECEIPT_FIELDS | {
+    "n4_access_plan_ids",
+    "n4_access_plan_ids_source",
+    "n4_package_id",
+    "n4_publication_request_sha256",
+}
 
-_DIGEST_RECEIPT_FIELDS = {
+_LEGACY_DIGEST_RECEIPT_FIELDS = {
     "schema_version",
     "status",
     "evidence_class",
@@ -199,6 +212,16 @@ _DIGEST_RECEIPT_FIELDS = {
     "eligible_for_scientific_claims",
     "receipt_sha256",
 }
+_DIGEST_RECEIPT_FIELDS = _LEGACY_DIGEST_RECEIPT_FIELDS | {
+    "n4_access_plan_ids",
+    "n4_access_plan_ids_source",
+    "n4_package_id",
+    "n4_publication_request_sha256",
+}
+
+_EXPLICIT_N4_ACCESS_PLAN_IDS = "explicit"
+_DEFAULT_N4_ACCESS_PLAN_IDS = "n5-materialization-plan-default"
+_LEGACY_INFERRED_N4_ACCESS_PLAN_IDS = "legacy-schema-inference"
 
 _N5_DIGEST_RESULT_FIELDS = {
     "schema_version",
@@ -302,6 +325,192 @@ def _identifier(value: Any, name: str) -> str:
         f"{name} is invalid",
     )
     return str(value)
+
+
+def _canonical_n4_access_plan_ids(value: Any) -> list[str]:
+    _require(
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and bool(value),
+        "n4_access_plan_ids must be a non-empty sequence",
+    )
+    checked = [
+        _identifier(item, "n4_access_plan_id") for item in value
+    ]
+    _require(
+        len(checked) == len(set(checked)),
+        "n4_access_plan_ids contain a duplicate",
+    )
+    return sorted(checked)
+
+
+def _n4_access_plan_contract(
+    value: Sequence[str] | None,
+    *,
+    n5_materialization_plan_id: str,
+    expected_current_catalog_version: str | None,
+) -> tuple[list[str], str]:
+    """Resolve the explicit serving contract without confusing lineage.
+
+    The historical one-object smoke used the N5 materialization plan ID as
+    the N4 Data Agent access plan ID.  Preserve that default for diagnostic
+    single-object runs, but label it explicitly: it is not sufficient for a
+    formal live-serve gate.  Formal and multi-object callers supply the
+    representation-wide access contract explicitly.
+    """
+
+    materialization_plan_id = _identifier(
+        n5_materialization_plan_id,
+        "n5_materialization_plan_id",
+    )
+    if value is None:
+        if expected_current_catalog_version is not None:
+            _identifier(
+                expected_current_catalog_version,
+                "expected_current_catalog_version",
+            )
+            raise FullFlowLiveProvisioningSmokeError(
+                "cumulative N4 publication requires explicit "
+                "n4_access_plan_ids before N5 materialization; the N5 "
+                "materialization plan ID is provenance only"
+            )
+        return [materialization_plan_id], _DEFAULT_N4_ACCESS_PLAN_IDS
+    return _canonical_n4_access_plan_ids(value), _EXPLICIT_N4_ACCESS_PLAN_IDS
+
+
+def _recorded_n4_access_plan_contract(
+    document: Mapping[str, Any],
+    *,
+    legacy_schema_version: str,
+    n5_materialization_plan_id: str,
+) -> tuple[list[str], str]:
+    if document.get("schema_version") == legacy_schema_version:
+        return (
+            [_identifier(
+                n5_materialization_plan_id,
+                "n5_materialization_plan_id",
+            )],
+            _LEGACY_INFERRED_N4_ACCESS_PLAN_IDS,
+        )
+    plan_ids = _canonical_n4_access_plan_ids(
+        document.get("n4_access_plan_ids")
+    )
+    _require(
+        plan_ids == document.get("n4_access_plan_ids"),
+        "recorded n4_access_plan_ids are not canonical",
+    )
+    source = document.get("n4_access_plan_ids_source")
+    _require(
+        source in {
+            _EXPLICIT_N4_ACCESS_PLAN_IDS,
+            _DEFAULT_N4_ACCESS_PLAN_IDS,
+        },
+        "n4_access_plan_ids_source is invalid",
+    )
+    if source == _DEFAULT_N4_ACCESS_PLAN_IDS:
+        _require(
+            plan_ids == [n5_materialization_plan_id],
+            "the N5-plan default does not match materialization lineage",
+        )
+    return plan_ids, str(source)
+
+
+def _n4_publication_request_commitment(
+    *,
+    publication_id: Any,
+    package_id: Any,
+    catalog_version: Any,
+    expected_current_catalog_version: Any,
+    object_id: Any,
+    representation_id: Any,
+    artifact_size_bytes: Any,
+    artifact_sha256: Any,
+    n4_access_plan_ids: Sequence[str],
+    provenance: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Rebuild the exact endpoint-free request hashed by the N4 store."""
+
+    previous = expected_current_catalog_version
+    if previous is not None:
+        previous = _identifier(previous, "expected_current_catalog_version")
+    _require(
+        type(artifact_size_bytes) is int and artifact_size_bytes > 0,
+        "N4 artifact_size_bytes must be a positive integer",
+    )
+    try:
+        checked_provenance = N4ArtifactProvenance.from_dict(
+            provenance
+        ).to_dict()
+    except Exception as exc:
+        raise FullFlowLiveProvisioningSmokeError(
+            "N4 artifact provenance is invalid"
+        ) from exc
+    return {
+        "publication_id": _identifier(publication_id, "publication_id"),
+        "package_id": _identifier(package_id, "package_id"),
+        "catalog_version": _identifier(
+            catalog_version,
+            "catalog_version",
+        ),
+        "expected_current_catalog_version": previous,
+        "artifacts": [{
+            "object_id": _identifier(object_id, "object_id"),
+            "representation_id": _identifier(
+                representation_id,
+                "representation_id",
+            ),
+            "artifact_size_bytes": artifact_size_bytes,
+            "artifact_sha256": _digest(
+                artifact_sha256,
+                "artifact_sha256",
+            ),
+            "plan_ids": _canonical_n4_access_plan_ids(
+                n4_access_plan_ids
+            ),
+            "provenance": checked_provenance,
+        }],
+    }
+
+
+def _verify_n4_publication_request_commitment(
+    document: Mapping[str, Any],
+    n4_receipt: Mapping[str, Any],
+    *,
+    schema_version: str,
+    legacy_schema_version: str,
+    object_id: str,
+    representation_id: str,
+    artifact_size_bytes: int,
+    artifact_sha256: str,
+    n4_access_plan_ids: Sequence[str],
+    provenance: Mapping[str, Any],
+) -> None:
+    if schema_version == legacy_schema_version:
+        return
+    commitment = _n4_publication_request_commitment(
+        publication_id=document.get("n4_publication_id"),
+        package_id=document.get("n4_package_id"),
+        catalog_version=document.get("n4_committed_catalog_version"),
+        expected_current_catalog_version=document.get(
+            "n4_previous_catalog_version"
+        ),
+        object_id=object_id,
+        representation_id=representation_id,
+        artifact_size_bytes=artifact_size_bytes,
+        artifact_sha256=artifact_sha256,
+        n4_access_plan_ids=n4_access_plan_ids,
+        provenance=provenance,
+    )
+    commitment_sha256 = _sha256(_canonical(commitment))
+    _require(
+        _digest(
+            document.get("n4_publication_request_sha256"),
+            "n4_publication_request_sha256",
+        )
+        == commitment_sha256
+        == n4_receipt.get("request_sha256"),
+        "recorded N4 access plans do not match the publication request",
+    )
 
 
 def _strict_json(payload: bytes, name: str) -> dict[str, Any]:
@@ -1002,6 +1211,7 @@ def _publication_request(
     *,
     plan: Mapping[str, Any],
     artifact: bytes,
+    n4_access_plan_ids: Sequence[str],
     publication_id: str,
     package_id: str,
     catalog_version: str,
@@ -1035,7 +1245,7 @@ def _publication_request(
                 "artifact_base64": base64.b64encode(artifact).decode("ascii"),
                 "artifact_sha256": _sha256(artifact),
                 "artifact_size_bytes": len(artifact),
-                "plan_ids": [plan["plan_id"]],
+                "plan_ids": list(n4_access_plan_ids),
                 "provenance": provenance.to_dict(),
             }
         ],
@@ -1047,6 +1257,9 @@ def _receipt_document(
     smoke_id: str,
     plan: Mapping[str, Any],
     n5_execution: Any,
+    n4_request: Mapping[str, Any],
+    n4_access_plan_ids: Sequence[str],
+    n4_access_plan_ids_source: str,
     n4_before: Mapping[str, Any],
     n4_result: Mapping[str, Any],
     n4_after: Mapping[str, Any],
@@ -1085,6 +1298,22 @@ def _receipt_document(
         "N5 HTTP transport evidence is incomplete",
     )
     published = n4_receipt["published_artifacts"]
+    request_artifact = n4_request["artifacts"][0]
+    request_commitment = _n4_publication_request_commitment(
+        publication_id=n4_request["publication_id"],
+        package_id=n4_request["package_id"],
+        catalog_version=n4_request["catalog_version"],
+        expected_current_catalog_version=n4_request[
+            "expected_current_catalog_version"
+        ],
+        object_id=request_artifact["object_id"],
+        representation_id=request_artifact["representation_id"],
+        artifact_size_bytes=request_artifact["artifact_size_bytes"],
+        artifact_sha256=request_artifact["artifact_sha256"],
+        n4_access_plan_ids=request_artifact["plan_ids"],
+        provenance=request_artifact["provenance"],
+    )
+    request_commitment_sha256 = _sha256(_canonical(request_commitment))
     _require(
         len(published) == 1
         and published[0]
@@ -1094,6 +1323,7 @@ def _receipt_document(
             "artifact_size_bytes": expected["artifact_size_bytes"],
             "artifact_sha256": expected["artifact_sha256"],
         }
+        and request_commitment_sha256 == n4_receipt["request_sha256"]
         and n4_receipt["atomic_visibility"] is True
         and (
             n4_before["current_generation_present"] is True
@@ -1131,6 +1361,10 @@ def _receipt_document(
         "n5_http_authentication_observed": True,
         "artifact_size_bytes": expected["artifact_size_bytes"],
         "artifact_sha256": expected["artifact_sha256"],
+        "n4_access_plan_ids": list(n4_access_plan_ids),
+        "n4_access_plan_ids_source": n4_access_plan_ids_source,
+        "n4_package_id": request_commitment["package_id"],
+        "n4_publication_request_sha256": request_commitment_sha256,
         "n4_publication_id": n4_receipt["publication_id"],
         "n4_previous_catalog_version": n4_receipt[
             "previous_catalog_version"
@@ -1201,12 +1435,18 @@ def run_n5_n4_live_frame_bundle_provisioning_smoke(
     package_id: str,
     catalog_version: str,
     expected_current_catalog_version: str | None,
+    n4_access_plan_ids: Sequence[str] | None = None,
     output_dir: str | Path,
 ) -> dict[str, Any]:
     """Execute one fresh authenticated frame-bundle provision and freeze it."""
 
     plan = verify_n5_materialization_plan(n5_plan)
     _identifier(smoke_id, "smoke_id")
+    access_plan_ids, access_plan_ids_source = _n4_access_plan_contract(
+        n4_access_plan_ids,
+        n5_materialization_plan_id=plan["plan_id"],
+        expected_current_catalog_version=expected_current_catalog_version,
+    )
     _require(
         isinstance(source_video_bytes, bytes)
         and len(source_video_bytes) == plan["input"]["size_bytes"]
@@ -1234,6 +1474,7 @@ def run_n5_n4_live_frame_bundle_provisioning_smoke(
     request = _publication_request(
         plan=plan,
         artifact=artifact,
+        n4_access_plan_ids=access_plan_ids,
         publication_id=publication_id,
         package_id=package_id,
         catalog_version=catalog_version,
@@ -1245,6 +1486,9 @@ def run_n5_n4_live_frame_bundle_provisioning_smoke(
         smoke_id=smoke_id,
         plan=plan,
         n5_execution=n5_execution,
+        n4_request=request,
+        n4_access_plan_ids=access_plan_ids,
+        n4_access_plan_ids_source=access_plan_ids_source,
         n4_before=n4_before,
         n4_result=n4_result,
         n4_after=n4_after,
@@ -1254,6 +1498,7 @@ def run_n5_n4_live_frame_bundle_provisioning_smoke(
     verified = verify_n5_n4_live_frame_bundle_provisioning_smoke(
         output,
         n5_plan=plan,
+        n4_access_plan_ids=access_plan_ids,
     )
     return verified | {"output_dir": str(output)}
 
@@ -1262,6 +1507,7 @@ def verify_n5_n4_live_frame_bundle_provisioning_smoke(
     output_dir: str | Path,
     *,
     n5_plan: Mapping[str, Any],
+    n4_access_plan_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Verify one frozen receipt against its exact portable N5 plan."""
 
@@ -1281,8 +1527,19 @@ def verify_n5_n4_live_frame_bundle_provisioning_smoke(
         "live provisioning receipt checksum failed",
     )
     document = _strict_json(payload, "live provisioning receipt")
+    schema_version = document.get("schema_version")
+    expected_fields = (
+        _LEGACY_RECEIPT_FIELDS
+        if schema_version == _LEGACY_LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION
+        else _RECEIPT_FIELDS
+    )
     _require(
-        set(document) == _RECEIPT_FIELDS,
+        schema_version
+        in {
+            _LEGACY_LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION,
+            LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION,
+        }
+        and set(document) == expected_fields,
         "live provisioning receipt field set changed",
     )
     _require(
@@ -1299,11 +1556,47 @@ def verify_n5_n4_live_frame_bundle_provisioning_smoke(
     n4_receipt = verify_n4_publication_receipt(
         document.get("n4_publication_receipt")
     )
+    recorded_access_plan_ids, recorded_access_plan_ids_source = (
+        _recorded_n4_access_plan_contract(
+            document,
+            legacy_schema_version=(
+                _LEGACY_LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION
+            ),
+            n5_materialization_plan_id=plan["plan_id"],
+        )
+    )
+    if n4_access_plan_ids is not None:
+        _require(
+            recorded_access_plan_ids
+            == _canonical_n4_access_plan_ids(n4_access_plan_ids),
+            "live provisioning N4 access-plan binding changed",
+        )
     expected = plan["expected_output"]
+    _verify_n4_publication_request_commitment(
+        document,
+        n4_receipt,
+        schema_version=str(schema_version),
+        legacy_schema_version=(
+            _LEGACY_LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION
+        ),
+        object_id=str(plan["input"]["object_id"]),
+        representation_id=FRAME_BUNDLE_REPRESENTATION_ID,
+        artifact_size_bytes=int(expected["artifact_size_bytes"]),
+        artifact_sha256=str(expected["artifact_sha256"]),
+        n4_access_plan_ids=recorded_access_plan_ids,
+        provenance=N4ArtifactProvenance(
+            producer_node_id="N5",
+            publication_source_id=str(plan["idempotency_key"]),
+            source_representation_id="raw_video",
+            source_content_sha256=str(plan["input"]["sha256"]),
+            derivation_id="n5-uniform-midpoint-frame-bundle-v1",
+            derivation_sha256=str(
+                plan["transformation_contract_sha256"]
+            ),
+        ).to_dict(),
+    )
     _require(
-        document.get("schema_version")
-        == LIVE_PROVISIONING_SMOKE_SCHEMA_VERSION
-        and document.get("status") == "VERIFIED_LOCAL_LIVE_PROVISIONING"
+        document.get("status") == "VERIFIED_LOCAL_LIVE_PROVISIONING"
         and document.get("evidence_class")
         == "local-container-protocol-conformance"
         and document.get("representation_id")
@@ -1445,6 +1738,8 @@ def verify_n5_n4_live_frame_bundle_provisioning_smoke(
         "object_id": document["object_id"],
         "artifact_size_bytes": document["artifact_size_bytes"],
         "artifact_sha256": document["artifact_sha256"],
+        "n4_access_plan_ids": recorded_access_plan_ids,
+        "n4_access_plan_ids_source": recorded_access_plan_ids_source,
         "n4_committed_catalog_version": document[
             "n4_committed_catalog_version"
         ],
@@ -1540,6 +1835,7 @@ def run_n5_n4_live_multimodal_digest_provisioning_smoke(
     package_id: str,
     catalog_version: str,
     expected_current_catalog_version: str | None,
+    n4_access_plan_ids: Sequence[str] | None = None,
     output_dir: str | Path,
 ) -> dict[str, Any]:
     """Execute one authenticated digest generation and atomic N4 publish.
@@ -1555,6 +1851,11 @@ def run_n5_n4_live_multimodal_digest_provisioning_smoke(
     verified, plan = _digest_plan(plan_root, source)
     smoke_id = _identifier(smoke_id, "smoke_id")
     request_id = _identifier(request_id, "request_id")
+    access_plan_ids, access_plan_ids_source = _n4_access_plan_contract(
+        n4_access_plan_ids,
+        n5_materialization_plan_id=verified["plan_id"],
+        expected_current_catalog_version=expected_current_catalog_version,
+    )
     _require(
         callable(getattr(n5_executor, "execute", None)),
         "N5 digest runtime executor is invalid",
@@ -1666,7 +1967,7 @@ def run_n5_n4_live_multimodal_digest_provisioning_smoke(
                 "artifact_base64": base64.b64encode(artifact).decode("ascii"),
                 "artifact_sha256": _sha256(artifact),
                 "artifact_size_bytes": len(artifact),
-                "plan_ids": [verified["plan_id"]],
+                "plan_ids": access_plan_ids,
                 "provenance": provenance.to_dict(),
             }
         ],
@@ -1675,6 +1976,21 @@ def run_n5_n4_live_multimodal_digest_provisioning_smoke(
     n4_after = n4.health()
     n4_receipt = verify_n4_publication_receipt(n4_result["receipt"])
     published = n4_receipt["published_artifacts"]
+    request_commitment = _n4_publication_request_commitment(
+        publication_id=n4_request["publication_id"],
+        package_id=n4_request["package_id"],
+        catalog_version=n4_request["catalog_version"],
+        expected_current_catalog_version=n4_request[
+            "expected_current_catalog_version"
+        ],
+        object_id=verified["object_id"],
+        representation_id=MULTIMODAL_DIGEST_REPRESENTATION_ID,
+        artifact_size_bytes=len(artifact),
+        artifact_sha256=_sha256(artifact),
+        n4_access_plan_ids=access_plan_ids,
+        provenance=provenance.to_dict(),
+    )
+    request_commitment_sha256 = _sha256(_canonical(request_commitment))
     _require(
         len(published) == 1
         and published[0]
@@ -1684,6 +2000,7 @@ def run_n5_n4_live_multimodal_digest_provisioning_smoke(
             "artifact_size_bytes": len(artifact),
             "artifact_sha256": _sha256(artifact),
         }
+        and request_commitment_sha256 == n4_receipt["request_sha256"]
         and n4_receipt["atomic_visibility"] is True
         and (
             n4_before["current_generation_present"] is True
@@ -1722,6 +2039,10 @@ def run_n5_n4_live_multimodal_digest_provisioning_smoke(
         "n5_http_authentication_observed": True,
         "artifact_size_bytes": len(artifact),
         "artifact_sha256": _sha256(artifact),
+        "n4_access_plan_ids": access_plan_ids,
+        "n4_access_plan_ids_source": access_plan_ids_source,
+        "n4_package_id": request_commitment["package_id"],
+        "n4_publication_request_sha256": request_commitment_sha256,
         "n4_publication_id": n4_receipt["publication_id"],
         "n4_previous_catalog_version": n4_receipt[
             "previous_catalog_version"
@@ -1771,6 +2092,7 @@ def run_n5_n4_live_multimodal_digest_provisioning_smoke(
         output,
         n5_digest_plan_dir=plan_root,
         source_video_path=source,
+        n4_access_plan_ids=access_plan_ids,
     )
     return verified_output | {"output_dir": str(output)}
 
@@ -1780,6 +2102,7 @@ def verify_n5_n4_live_multimodal_digest_provisioning_smoke(
     *,
     n5_digest_plan_dir: str | Path,
     source_video_path: str | Path,
+    n4_access_plan_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Verify one digest receipt against its exact plan and source video."""
 
@@ -1801,9 +2124,21 @@ def verify_n5_n4_live_multimodal_digest_provisioning_smoke(
         "live digest receipt checksum failed",
     )
     document = _strict_json(payload, "live digest receipt")
+    schema_version = document.get("schema_version")
+    expected_fields = (
+        _LEGACY_DIGEST_RECEIPT_FIELDS
+        if schema_version
+        == _LEGACY_LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION
+        else _DIGEST_RECEIPT_FIELDS
+    )
     _require(
         payload == _json_bytes(document)
-        and set(document) == _DIGEST_RECEIPT_FIELDS,
+        and schema_version
+        in {
+            _LEGACY_LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION,
+            LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION,
+        }
+        and set(document) == expected_fields,
         "live digest receipt is noncanonical or its field set changed",
     )
     recorded = _digest(document.get("receipt_sha256"), "receipt_sha256")
@@ -1873,9 +2208,7 @@ def verify_n5_n4_live_multimodal_digest_provisioning_smoke(
         "recorded N5 digest transport receipt is invalid",
     )
     _require(
-        document.get("schema_version")
-        == LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION
-        and document.get("status")
+        document.get("status")
         == "VERIFIED_LOCAL_LIVE_DIGEST_PROVISIONING"
         and document.get("evidence_class")
         == "local-container-protocol-conformance"
@@ -1906,6 +2239,42 @@ def verify_n5_n4_live_multimodal_digest_provisioning_smoke(
         _digest(document.get(name), name)
     n4_receipt = verify_n4_publication_receipt(
         document.get("n4_publication_receipt")
+    )
+    recorded_access_plan_ids, recorded_access_plan_ids_source = (
+        _recorded_n4_access_plan_contract(
+            document,
+            legacy_schema_version=(
+                _LEGACY_LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION
+            ),
+            n5_materialization_plan_id=verified["plan_id"],
+        )
+    )
+    if n4_access_plan_ids is not None:
+        _require(
+            recorded_access_plan_ids
+            == _canonical_n4_access_plan_ids(n4_access_plan_ids),
+            "live digest N4 access-plan binding changed",
+        )
+    _verify_n4_publication_request_commitment(
+        document,
+        n4_receipt,
+        schema_version=str(schema_version),
+        legacy_schema_version=(
+            _LEGACY_LIVE_DIGEST_PROVISIONING_SMOKE_SCHEMA_VERSION
+        ),
+        object_id=str(verified["object_id"]),
+        representation_id=MULTIMODAL_DIGEST_REPRESENTATION_ID,
+        artifact_size_bytes=int(result["artifact_size_bytes"]),
+        artifact_sha256=str(result["artifact_sha256"]),
+        n4_access_plan_ids=recorded_access_plan_ids,
+        provenance=N4ArtifactProvenance(
+            producer_node_id="N5",
+            publication_source_id=str(result["request_id"]),
+            source_representation_id=DIGEST_SOURCE_REPRESENTATION_ID,
+            source_content_sha256=str(verified["source_video_sha256"]),
+            derivation_id="n5-multimodal-digest-v1",
+            derivation_sha256=str(verified["plan_sha256"]),
+        ).to_dict(),
     )
     _require(
         n4_receipt["published_artifacts"]
@@ -1988,6 +2357,8 @@ def verify_n5_n4_live_multimodal_digest_provisioning_smoke(
         "model_id": document["n5_digest_model_id"],
         "artifact_size_bytes": document["artifact_size_bytes"],
         "artifact_sha256": document["artifact_sha256"],
+        "n4_access_plan_ids": recorded_access_plan_ids,
+        "n4_access_plan_ids_source": recorded_access_plan_ids_source,
         "n4_committed_catalog_version": document[
             "n4_committed_catalog_version"
         ],

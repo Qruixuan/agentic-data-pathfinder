@@ -69,12 +69,20 @@ class _Fixture:
 
     def _write_catalog(self) -> dict[str, Any]:
         entries: list[dict[str, Any]] = []
+        n4_objects: list[dict[str, Any]] = []
         for object_id in self.object_ids:
             for representation_id in (
                 FRAME_BUNDLE_REPRESENTATION_ID,
                 MULTIMODAL_DIGEST_REPRESENTATION_ID,
             ):
                 size, digest = _artifact(object_id, representation_id)
+                n4_objects.append({
+                    "object_id": object_id,
+                    "representation_id": representation_id,
+                    "artifact_sha256": digest,
+                    "artifact_size_bytes": size,
+                    "plan_ids": ["D2", "D3", "D6", "D7"],
+                })
                 identity = {
                     "object_id": object_id,
                     "representation_id": representation_id,
@@ -103,12 +111,17 @@ class _Fixture:
                 }
                 entry["entry_sha256"] = _sha256(_canonical(entry))
                 entries.append(entry)
+        n4_manifest = {"objects": n4_objects}
+        n4_manifest_payload = _json_bytes(n4_manifest)
+        (self.n4 / bulk.N4_PACKAGE_MANIFEST_NAME).write_bytes(
+            n4_manifest_payload
+        )
         document: dict[str, Any] = {
             "schema_version": bulk.PROVISIONING_CATALOG_SCHEMA_VERSION,
             "status": "FROZEN_PREPROVISIONED_DERIVED_ARTIFACTS",
             "catalog_id": "synthetic-provisioning-v1",
             "artifact_binding_set_sha256": "a" * 64,
-            "n4_package_manifest_sha256": "b" * 64,
+            "n4_package_manifest_sha256": _sha256(n4_manifest_payload),
             "n4_package_sha256": "c" * 64,
             "entry_count": len(entries),
             "entries": entries,
@@ -138,6 +151,7 @@ class _Fixture:
             )
             frame_plan_sha = _sha256(f"frame-plan|{object_id}".encode())
             frame_plan = {
+                "plan_id": f"frame-plan-{object_id}",
                 "plan_sha256": frame_plan_sha,
                 "input": {
                     "object_id": object_id,
@@ -204,6 +218,40 @@ class _Fixture:
             "output_dir": output,
         }
 
+    def rewrite_n4_plan_ids(
+        self,
+        *,
+        object_id: str,
+        representation_id: str,
+        plan_ids: list[str],
+    ) -> None:
+        manifest_path = self.n4 / bulk.N4_PACKAGE_MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        row = next(
+            item
+            for item in manifest["objects"]
+            if item["object_id"] == object_id
+            and item["representation_id"] == representation_id
+        )
+        row["plan_ids"] = plan_ids
+        manifest_payload = _json_bytes(manifest)
+        manifest_path.write_bytes(manifest_payload)
+
+        self.catalog_document["n4_package_manifest_sha256"] = _sha256(
+            manifest_payload
+        )
+        self.catalog_document.pop("catalog_sha256", None)
+        self.catalog_document["catalog_sha256"] = _sha256(
+            _canonical(self.catalog_document)
+        )
+        (self.catalog / bulk.PROVISIONING_CATALOG_NAME).write_bytes(
+            _json_bytes(self.catalog_document)
+        )
+        self.source_document["provisioning_catalog_sha256"] = (
+            self.catalog_document["catalog_sha256"]
+        )
+        self.source_manifest.write_bytes(_json_bytes(self.source_document))
+
 
 class _FakeExecutor:
     def __init__(
@@ -264,6 +312,11 @@ class _FakeExecutor:
             "n4_publication_receipt": n4_receipt,
             "n4_publication_idempotent_replay": False,
         }
+        if operation.n4_access_plan_ids_source == "explicit":
+            document["n4_access_plan_ids"] = list(
+                operation.n4_access_plan_ids
+            )
+            document["n4_access_plan_ids_source"] = "explicit"
         if operation.representation_id == FRAME_BUNDLE_REPRESENTATION_ID:
             name = bulk.RECEIPT_NAME
             document["n5_plan_sha256"] = operation.plan_sha256
@@ -288,6 +341,11 @@ class _FakeExecutor:
     ) -> dict[str, Any]:
         if operation.representation_id != self.representation_id:
             raise AssertionError("wrong fake executor")
+        if (
+            operation.n4_access_plan_ids_source == "explicit"
+            and operation.n4_access_plan_ids != ("D2", "D3", "D6", "D7")
+        ):
+            raise AssertionError("wrong frozen N4 access plan binding")
         self.calls.append((
             operation.operation_index,
             operation.object_id,
@@ -335,7 +393,7 @@ class FullFlowBulkLiveProvisioningTest(unittest.TestCase):
                 )
                 return {
                     "status": "VERIFIED",
-                    "plan_id": "digest-plan",
+                    "plan_id": f"digest-plan-{value['object_id']}",
                     "plan_sha256": value["plan_sha256"],
                     "object_id": value["object_id"],
                     "model_id": "offline-test-model",
@@ -405,6 +463,18 @@ class FullFlowBulkLiveProvisioningTest(unittest.TestCase):
         self.assertEqual(72, report["completed_operation_count"])
         self.assertEqual(36, report["frame_bundle_operation_count"])
         self.assertEqual(36, report["multimodal_digest_operation_count"])
+        self.assertEqual(
+            {
+                FRAME_BUNDLE_REPRESENTATION_ID: ["D2", "D3", "D6", "D7"],
+                MULTIMODAL_DIGEST_REPRESENTATION_ID: [
+                    "D2",
+                    "D3",
+                    "D6",
+                    "D7",
+                ],
+            },
+            report["n4_access_plan_ids_by_representation"],
+        )
         self.assertEqual(list(range(1, 73)), [row[0] for row in calls])
         self.assertEqual(
             [
@@ -439,6 +509,25 @@ class FullFlowBulkLiveProvisioningTest(unittest.TestCase):
         )
         self.assertGreaterEqual(mocks["frame_receipt"].call_count, 36)
         self.assertGreaterEqual(mocks["digest_receipt"].call_count, 36)
+        self.assertTrue(all(
+            call.kwargs["n4_access_plan_ids"]
+            == ("D2", "D3", "D6", "D7")
+            for call in (
+                mocks["frame_receipt"].call_args_list
+                + mocks["digest_receipt"].call_args_list
+            )
+        ))
+        checkpoint = json.loads(
+            (
+                output
+                / bulk.CHECKPOINTS_DIRECTORY_NAME
+                / "0001.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            ["D2", "D3", "D6", "D7"],
+            checkpoint["n4_access_plan_ids"],
+        )
         combined = b"\n".join(
             path.read_bytes()
             for path in output.rglob("*")
@@ -448,6 +537,149 @@ class FullFlowBulkLiveProvisioningTest(unittest.TestCase):
         self.assertNotIn(b"http://", combined)
         self.assertNotIn(b"https://", combined)
         self.assertNotIn(b"reasoning_content", combined)
+
+    def test_completed_v1alpha1_bulk_evidence_remains_verifiable(self) -> None:
+        fixture = _Fixture(self.root / "legacy", 2)
+        output = fixture.root / "run"
+        calls: list[tuple[int, str, str]] = []
+        frame, digest = self.executors(calls)
+        with self.patched_authorities(fixture):
+            context = bulk._run_context(
+                fixture.catalog,
+                fixture.bindings,
+                fixture.n4,
+                fixture.source_manifest,
+                run_id="legacy-bulk-live-v1",
+                output_dir=output,
+                schema_version=bulk._LEGACY_BULK_RUN_SCHEMA_VERSION,
+            )
+            bulk._prepare_root(output, context, resume=False)
+            checkpoints = []
+            for operation in context.operations:
+                bulk._append_journal(
+                    output,
+                    context,
+                    state="OPERATION_INTENT",
+                    operation=operation,
+                )
+                executor = (
+                    frame
+                    if operation.representation_id
+                    == FRAME_BUNDLE_REPRESENTATION_ID
+                    else digest
+                )
+                executor.execute(operation)
+                summary = bulk._verify_operation_receipt(operation)
+                checkpoint = bulk._write_checkpoint(
+                    output,
+                    context,
+                    operation,
+                    summary,
+                    adopted=False,
+                )
+                checkpoints.append(checkpoint)
+                bulk._append_journal(
+                    output,
+                    context,
+                    state="OPERATION_COMPLETED",
+                    operation=operation,
+                    receipt_file_sha256=checkpoint["receipt_file_sha256"],
+                    n4_committed_catalog_version=checkpoint[
+                        "n4_committed_catalog_version"
+                    ],
+                )
+            bulk._append_journal(output, context, state="RUN_COMPLETED")
+            bulk._write_final(output, context, checkpoints)
+            report = bulk.verify_full_flow_bulk_live_provisioning(
+                output,
+                provisioning_catalog_dir=fixture.catalog,
+                artifact_binding_dir=fixture.bindings,
+                n4_package_dir=fixture.n4,
+                operator_source_manifest=fixture.source_manifest,
+            )
+
+        self.assertEqual("VERIFIED", report["status"])
+        self.assertNotIn("n4_access_plan_ids_by_representation", report)
+        legacy_checkpoint = json.loads(
+            (
+                output / bulk.CHECKPOINTS_DIRECTORY_NAME / "0001.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            bulk._LEGACY_CHECKPOINT_SCHEMA_VERSION,
+            legacy_checkpoint["schema_version"],
+        )
+        self.assertNotIn("n4_access_plan_ids", legacy_checkpoint)
+        legacy_aggregate = json.loads(
+            (
+                output
+                / bulk.FINAL_DIRECTORY_NAME
+                / bulk.AGGREGATE_RECEIPT_NAME
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            bulk._LEGACY_AGGREGATE_RECEIPT_SCHEMA_VERSION,
+            legacy_aggregate["schema_version"],
+        )
+        self.assertNotIn(
+            "n4_access_plan_ids_by_representation", legacy_aggregate
+        )
+        with self.patched_authorities(fixture):
+            with self.assertRaisesRegex(
+                bulk.FullFlowBulkLiveProvisioningError,
+                "verify-only",
+            ):
+                bulk.run_full_flow_bulk_live_provisioning(
+                    **fixture.arguments(output),
+                    frame_executor=frame,
+                    digest_executor=digest,
+                    resume=True,
+                )
+
+    def test_n4_access_plan_ids_are_bound_to_the_verified_frozen_package(
+        self,
+    ) -> None:
+        fixture = _Fixture(self.root / "access-plans", 2)
+        fixture.rewrite_n4_plan_ids(
+            object_id=fixture.object_ids[1],
+            representation_id=MULTIMODAL_DIGEST_REPRESENTATION_ID,
+            plan_ids=["D2", "D6"],
+        )
+        calls: list[tuple[int, str, str]] = []
+        frame, digest = self.executors(calls)
+        with self.patched_authorities(fixture):
+            with self.assertRaisesRegex(
+                bulk.FullFlowBulkLiveProvisioningError,
+                "bindings differ within a representation",
+            ):
+                bulk.run_full_flow_bulk_live_provisioning(
+                    **fixture.arguments(fixture.root / "run"),
+                    frame_executor=frame,
+                    digest_executor=digest,
+                )
+        self.assertEqual([], calls)
+
+    def test_n4_access_plan_manifest_hash_mismatch_fails_before_execution(
+        self,
+    ) -> None:
+        fixture = _Fixture(self.root / "access-plan-hash", 1)
+        manifest_path = fixture.n4 / bulk.N4_PACKAGE_MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["objects"][0]["plan_ids"] = ["D2"]
+        manifest_path.write_bytes(_json_bytes(manifest))
+        calls: list[tuple[int, str, str]] = []
+        frame, digest = self.executors(calls)
+        with self.patched_authorities(fixture):
+            with self.assertRaisesRegex(
+                bulk.FullFlowBulkLiveProvisioningError,
+                "manifest binding failed",
+            ):
+                bulk.run_full_flow_bulk_live_provisioning(
+                    **fixture.arguments(fixture.root / "run"),
+                    frame_executor=frame,
+                    digest_executor=digest,
+                )
+        self.assertEqual([], calls)
 
     def test_offline_helper_freezes_36_source_rows_without_handwritten_hashes(
         self,
