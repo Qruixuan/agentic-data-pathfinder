@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import re
 import signal
 import tempfile
 import threading
@@ -467,6 +468,28 @@ class ContainerNodeRuntimeTest(unittest.TestCase):
         self.assertTrue(server.closed)
         self.assertEqual(0.1, server.poll_interval)
         self.assertEqual(old_handlers, restored_handlers)
+
+
+class InfraNodeDockerfileContractTest(unittest.TestCase):
+    def test_n5_image_installs_frame_and_digest_extras(self) -> None:
+        dockerfile = (
+            ROOT / "containers" / "pathfinder-infra-node" / "Dockerfile"
+        ).read_text(encoding="utf-8")
+        logical = dockerfile.replace("\\\n", " ")
+        match = re.search(
+            r'pip install\b.*?"\.\[([^]]+)\]"',
+            logical,
+        )
+        self.assertIsNotNone(match, "infra-node pip install was not found")
+        assert match is not None
+        installed = {
+            value.strip() for value in match.group(1).split(",")
+        }
+        required = {"data-prep", "semantic-runtime"}
+        self.assertFalse(
+            required - installed,
+            f"infra-node image is missing extras: {required - installed}",
+        )
 
 
 class LocalComposePackageTest(unittest.TestCase):
