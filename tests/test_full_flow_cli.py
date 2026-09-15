@@ -1284,7 +1284,7 @@ class FullFlowCliTest(unittest.TestCase):
             "--n1-verification-base-url",
             (
                 "http://pathfinder-full-flow-n1-hidden-score-"
-                "full-flow-n1-remote-verification:9181"
+                "n1-remote-verification:9181"
             ),
             "--semantic-model",
             "qwen3.8-27b",

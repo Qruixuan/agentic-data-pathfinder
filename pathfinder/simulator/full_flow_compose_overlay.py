@@ -51,8 +51,11 @@ from .full_flow_service_bootstrap import (
 LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION = (
     "pathfinder.full-flow-local-compose-overlay/v1alpha2"
 )
-COMPOSE_OVERLAY_SCHEMA_VERSION = (
+LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3 = (
     "pathfinder.full-flow-local-compose-overlay/v1alpha3"
+)
+COMPOSE_OVERLAY_SCHEMA_VERSION = (
+    "pathfinder.full-flow-local-compose-overlay/v1alpha4"
 )
 LEGACY_COMPOSE_GATE_SCHEMA_VERSION = (
     "pathfinder.full-flow-local-compose-stage-gate/v1alpha1"
@@ -70,6 +73,14 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 _PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]{0,127})\}")
 _EXPECTED_NODES = [f"N{index}" for index in range(1, 9)]
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+_UNBOUNDED_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\Z")
+_DNS_LABEL_MAX_LENGTH = 63
+_SERVICE_NAME_DIGEST_LENGTH = 12
+_SERVICE_NAME_POLICY = (
+    "preserve-or-remove-redundant-full-flow-prefix-or-"
+    "sha256-suffixed-truncation-v1"
+)
 
 _IMAGE_ENV = "PATHFINDER_FULL_FLOW_SERVICE_IMAGE"
 _NETWORK_ENV = "PATHFINDER_FULL_FLOW_NETWORK_NAME"
@@ -216,16 +227,55 @@ def _required_command_argument(value: str) -> str:
     )
 
 
-def _service_name(contract_id: str, implementation_id: str, primary: bool) -> str:
+def _bounded_service_name(value: str) -> str:
+    """Return a stable Docker DNS label without changing short names."""
+
+    _require(
+        _UNBOUNDED_DNS_LABEL.fullmatch(value) is not None,
+        "Compose service name is not a lowercase DNS label",
+    )
+    if len(value) <= _DNS_LABEL_MAX_LENGTH:
+        return value
+    digest = _sha256(value.encode("utf-8"))[:_SERVICE_NAME_DIGEST_LENGTH]
+    prefix_length = _DNS_LABEL_MAX_LENGTH - len(digest) - 1
+    prefix = value[:prefix_length].rstrip("-")
+    _require(prefix, "Compose service name has no truncatable prefix")
+    result = f"{prefix}-{digest}"
+    _require(
+        len(result) <= _DNS_LABEL_MAX_LENGTH
+        and _DNS_LABEL.fullmatch(result) is not None,
+        "Compose service name could not be made DNS-safe",
+    )
+    return result
+
+
+def _service_name(
+    contract_id: str,
+    implementation_id: str,
+    primary: bool,
+    *,
+    dns_safe: bool,
+) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", contract_id.casefold()).strip("-")
     if primary:
-        return f"pathfinder-full-flow-{base}"
-    suffix = re.sub(
-        r"[^a-z0-9]+",
-        "-",
-        implementation_id.rsplit(".", 1)[-1].casefold(),
-    ).strip("-")
-    return f"pathfinder-full-flow-{base}-{suffix}"
+        value = f"pathfinder-full-flow-{base}"
+    else:
+        suffix = re.sub(
+            r"[^a-z0-9]+",
+            "-",
+            implementation_id.rsplit(".", 1)[-1].casefold(),
+        ).strip("-")
+        value = f"pathfinder-full-flow-{base}-{suffix}"
+        if (
+            dns_safe
+            and len(value) > _DNS_LABEL_MAX_LENGTH
+            and suffix.startswith("full-flow-")
+        ):
+            value = (
+                f"pathfinder-full-flow-{base}-"
+                f"{suffix.removeprefix('full-flow-')}"
+            )
+    return _bounded_service_name(value) if dns_safe else value
 
 
 def _host_port_env(service_name: str) -> str:
@@ -406,6 +456,7 @@ def _component(
     *,
     process: Mapping[str, Any] | None,
     runtime_binding: Mapping[str, Any] | None = None,
+    dns_safe_service_names: bool,
 ) -> dict[str, Any]:
     contract_id = _identifier(
         launcher.get("service_contract_id"),
@@ -531,7 +582,12 @@ def _component(
     )
     for name in environment_names:
         _env_name(name, f"{contract_id} environment")
-    service_name = _service_name(contract_id, implementation_id, primary)
+    service_name = _service_name(
+        contract_id,
+        implementation_id,
+        primary,
+        dns_safe=dns_safe_service_names,
+    )
     host_port_name = _host_port_env(service_name)
     ephemeral_state_names = (
         []
@@ -633,6 +689,8 @@ def _build_components(
     launchers: Sequence[Mapping[str, Any]],
     bindings: Mapping[str, Mapping[str, Any]],
     runtime_bindings: Mapping[str, Mapping[str, Any]],
+    *,
+    dns_safe_service_names: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     components: list[dict[str, Any]] = []
     embedded: list[dict[str, Any]] = []
@@ -664,7 +722,12 @@ def _build_components(
             and launcher.get("missing_actions") == [],
             f"{contract_id} is not locally complete",
         )
-        components.append(_component(launcher, binding, process=None))
+        components.append(_component(
+            launcher,
+            binding,
+            process=None,
+            dns_safe_service_names=dns_safe_service_names,
+        ))
         companions = launcher.get("companion_processes")
         _require(isinstance(companions, list), f"{contract_id} companions changed")
         for process in companions:
@@ -679,6 +742,7 @@ def _build_components(
                     binding,
                     process=process,
                     runtime_binding=runtime_bindings.get(runtime_id),
+                    dns_safe_service_names=dns_safe_service_names,
                 )
             )
     components.sort(key=lambda row: row["service_name"])
@@ -712,6 +776,11 @@ def _build_components(
         service_names == sorted(set(service_names)),
         "Compose service names collide",
     )
+    if dns_safe_service_names:
+        _require(
+            all(_DNS_LABEL.fullmatch(name) is not None for name in service_names),
+            "Compose service names exceed the Docker DNS label limit",
+        )
     covered = sorted({row["logical_node_id"] for row in components})
     _require(covered == _EXPECTED_NODES, "Compose services do not cover N1--N8")
     companions = {
@@ -1267,11 +1336,19 @@ def _documents(
         schema_version
         in {
             LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
+            LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
             COMPOSE_OVERLAY_SCHEMA_VERSION,
         },
         "Compose overlay schema is unsupported",
     )
     complete_data_agent_package_mounts = (
+        schema_version
+        in {
+            LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
+            COMPOSE_OVERLAY_SCHEMA_VERSION,
+        }
+    )
+    dns_safe_service_names = (
         schema_version == COMPOSE_OVERLAY_SCHEMA_VERSION
     )
     overlay_id = _identifier(overlay_id, "overlay_id")
@@ -1307,6 +1384,7 @@ def _documents(
         launchers,
         bindings,
         runtime_bindings,
+        dns_safe_service_names=dns_safe_service_names,
     )
     compose = _compose_bytes(
         components,
@@ -1519,6 +1597,13 @@ def _documents(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if dns_safe_service_names:
+        manifest.update({
+            "compose_service_name_dns_label_limit": _DNS_LABEL_MAX_LENGTH,
+            "compose_service_name_policy": _SERVICE_NAME_POLICY,
+            "compose_service_names_dns_safe": True,
+            "compose_service_names_preserved_when_within_limit": True,
+        })
     if complete_data_agent_package_mounts:
         data_agent_mounts = [
             mount
@@ -1706,6 +1791,7 @@ def verify_full_flow_local_compose_overlay(
         schema_version
         in {
             LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
+            LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
             COMPOSE_OVERLAY_SCHEMA_VERSION,
         },
         "Compose overlay schema is unsupported",
@@ -1794,6 +1880,15 @@ def verify_full_flow_local_compose_overlay(
         "data_agent_complete_package_mount_count": manifest.get(
             "data_agent_complete_package_mount_count", 0
         ),
+        "compose_service_name_dns_label_limit": manifest.get(
+            "compose_service_name_dns_label_limit"
+        ),
+        "compose_service_name_policy": manifest.get(
+            "compose_service_name_policy"
+        ),
+        "compose_service_names_dns_safe": manifest.get(
+            "compose_service_names_dns_safe", False
+        ),
         "n4_operator_gate_required": True,
         "n4_gate_satisfied": False,
         "n6_semantic_bearer_env_name": CONTAINER_NODE_BEARER_TOKEN_ENV,
@@ -1815,6 +1910,7 @@ __all__ = [
     "GATE_NAME",
     "LEGACY_COMPOSE_GATE_SCHEMA_VERSION",
     "LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION",
+    "LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3",
     "MANIFEST_NAME",
     "FullFlowComposeOverlayError",
     "render_full_flow_local_compose_overlay",

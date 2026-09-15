@@ -16,6 +16,7 @@ from pathfinder.simulator.full_flow_compose_overlay import (
     COMPOSE_OVERLAY_SCHEMA_VERSION,
     GATE_NAME,
     LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
+    LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
     MANIFEST_NAME,
     FullFlowComposeOverlayError,
     render_full_flow_local_compose_overlay,
@@ -49,6 +50,18 @@ _PERSISTENT = {
     "frozen-index-snapshot",
     "idempotent-content-addressed-output",
     "persistent-with-explicit-cache-scope",
+}
+
+_N1_VERIFIER_SERVICE = (
+    "pathfinder-full-flow-n1-hidden-score-n1-remote-verification"
+)
+_W4_COORDINATOR_SERVICES = {
+    "n7": (
+        "pathfinder-full-flow-n7-execution-compute-w4-flowmesh-service"
+    ),
+    "n8": (
+        "pathfinder-full-flow-n8-execution-compute-w4-flowmesh-service"
+    ),
 }
 
 
@@ -285,6 +298,15 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
         self.assertEqual(
             COMPOSE_OVERLAY_SCHEMA_VERSION, report["schema_version"]
         )
+        self.assertTrue(report["compose_service_names_dns_safe"])
+        self.assertEqual(
+            63, report["compose_service_name_dns_label_limit"]
+        )
+        self.assertEqual(
+            "preserve-or-remove-redundant-full-flow-prefix-or-"
+            "sha256-suffixed-truncation-v1",
+            report["compose_service_name_policy"],
+        )
         self.assertEqual(19, report["compose_service_count"])
         self.assertEqual(12, report["primary_service_count"])
         self.assertEqual(7, report["companion_service_count"])
@@ -329,6 +351,18 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
             set(manifest["logical_node_service_groups"]),
         )
         self.assertEqual(19, len(manifest["service_inventory"]))
+        service_names = [
+            row["service_name"] for row in manifest["service_inventory"]
+        ]
+        self.assertTrue(all(len(name) <= 63 for name in service_names))
+        self.assertTrue(all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", name)
+            for name in service_names
+        ))
+        self.assertIn(_N1_VERIFIER_SERVICE, service_names)
+        self.assertTrue(
+            set(_W4_COORDINATOR_SERVICES.values()) <= set(service_names)
+        )
         self.assertTrue(all(
             row["logical_node_id"] in {f"N{index}" for index in range(1, 9)}
             for row in manifest["service_inventory"]
@@ -396,10 +430,7 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
         self.assertEqual(19, compose.count("\n    entrypoint: []\n"))
         for service in (
             "pathfinder-full-flow-n1-hidden-score",
-            (
-                "pathfinder-full-flow-n1-hidden-score-"
-                "full-flow-n1-remote-verification"
-            ),
+            _N1_VERIFIER_SERVICE,
             "pathfinder-full-flow-n2-global-index",
             "pathfinder-full-flow-n3-raw-data-agent",
             "pathfinder-full-flow-n4-derived-data-agent",
@@ -413,10 +444,7 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
                 "pathfinder-full-flow-n7-execution-compute-"
                 "full-flow-cache"
             ),
-            (
-                "pathfinder-full-flow-n7-execution-compute-"
-                "full-flow-w4-flowmesh-service"
-            ),
+            _W4_COORDINATOR_SERVICES["n7"],
             "pathfinder-full-flow-n7-persistent-cache",
             "pathfinder-full-flow-n8-local-index",
             "pathfinder-full-flow-n8-execution-compute",
@@ -424,10 +452,7 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
                 "pathfinder-full-flow-n8-execution-compute-"
                 "full-flow-cache"
             ),
-            (
-                "pathfinder-full-flow-n8-execution-compute-"
-                "full-flow-w4-flowmesh-service"
-            ),
+            _W4_COORDINATOR_SERVICES["n8"],
             "pathfinder-full-flow-n8-persistent-cache",
         ):
             self.assertIn(f"  {service}:\n", compose)
@@ -547,10 +572,7 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
             self.assertNotIn("TASK_PLANE", route)
             w4 = _service_block(
                 compose,
-                (
-                    f"pathfinder-full-flow-{node_id}-execution-compute-"
-                    "full-flow-w4-flowmesh-service"
-                ),
+                _W4_COORDINATOR_SERVICES[node_id],
             )
             self.assertIn(
                 "serve-simulator-full-flow-w4-flowmesh-coordinator", w4
@@ -724,6 +746,30 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
             {path.name: path.read_bytes() for path in second.iterdir()},
         )
 
+    def test_dns_safe_service_names_preserve_short_names_and_avoid_collisions(
+        self,
+    ) -> None:
+        self.assertEqual(
+            "pathfinder-full-flow-n3-raw-data-agent",
+            overlay_module._service_name(
+                "N3.raw-data-agent",
+                "pathfinder.simulator.data_agent",
+                True,
+                dns_safe=True,
+            ),
+        )
+        first = overlay_module._bounded_service_name(
+            "pathfinder-full-flow-" + "a" * 80 + "-first"
+        )
+        second = overlay_module._bounded_service_name(
+            "pathfinder-full-flow-" + "a" * 80 + "-second"
+        )
+        self.assertNotEqual(first, second)
+        self.assertLessEqual(len(first), 63)
+        self.assertLessEqual(len(second), 63)
+        self.assertRegex(first, r"\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+        self.assertRegex(second, r"\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
     def test_w4_fragments_include_exact_dependency_closures(self) -> None:
         binding = self._binding("w4-closures")
         output = self.case_root / "overlay"
@@ -742,10 +788,7 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
             "pathfinder-full-flow-n8-local-index",
         }
         for node in ("n7", "n8"):
-            root = (
-                f"pathfinder-full-flow-{node}-execution-compute-"
-                "full-flow-w4-flowmesh-service"
-            )
+            root = _W4_COORDINATOR_SERVICES[node]
             cache = (
                 f"pathfinder-full-flow-{node}-execution-compute-"
                 "full-flow-cache"
@@ -857,6 +900,52 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
         )
         self.assertNotIn(
             "complete_package_read_only_mount_required", gate
+        )
+
+    def test_legacy_v1alpha3_overlay_remains_byte_verifiable(self) -> None:
+        binding = self._binding("legacy-v1alpha3-overlay")
+        output = self.case_root / "overlay"
+        inputs = overlay_module._verified_inputs(
+            self.bootstrap,
+            binding,
+            logical_plan_dir=self.logical,
+            scenario_path=SCENARIO,
+            container_plan_dir=self.container,
+        )
+        documents = overlay_module._documents(
+            overlay_id="local-eight-node-full-flow-v1",
+            bootstrap_root=inputs[0],
+            bootstrap_report=inputs[2],
+            deployment_report=inputs[3],
+            launchers=inputs[4],
+            deployment=inputs[5],
+            schema_version=(
+                LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3
+            ),
+        )
+        documents[CHECKSUMS_NAME] = overlay_module._checksums(documents)
+        output.mkdir()
+        for name, payload in documents.items():
+            (output / name).write_bytes(payload)
+
+        report = self._verify(output, binding)
+        manifest = _json(output / MANIFEST_NAME)
+        compose = (output / COMPOSE_NAME).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
+            report["schema_version"],
+        )
+        self.assertEqual(19, report["selective_service_unit_count"])
+        self.assertFalse(report["compose_service_names_dns_safe"])
+        self.assertNotIn(
+            "compose_service_name_policy",
+            manifest,
+        )
+        self.assertIn(
+            "pathfinder-full-flow-n1-hidden-score-"
+            "full-flow-n1-remote-verification:",
+            compose,
         )
 
     def test_rechecksummed_compose_tampering_fails_rederivation(self) -> None:

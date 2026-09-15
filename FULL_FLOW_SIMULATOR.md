@@ -109,8 +109,13 @@ fragment per root service. A fragment contains only that service and its
 transitive health dependencies, so selecting N3 or N4 does not require values
 for unrelated N1/N2/N5/N6/N7/N8 variables. Its manifest records the exact
 environment-variable names required by each fragment; values remain
-operator-local. The two W4 caches use dedicated identities and state
-namespaces; they cannot silently reuse the historical semantic-route cache
+operator-local. Compose v1alpha4 also guarantees that every service key used
+as an internal Docker DNS name is one lowercase DNS label of at most 63
+characters. Existing short names are preserved; an overlong companion name
+first drops a redundant `full-flow-` implementation prefix and otherwise uses
+a deterministic SHA-256-suffixed truncation. The two W4 caches use dedicated
+identities and state namespaces; they cannot silently reuse the historical
+semantic-route cache
 state. Each W4 coordinator depends on healthy N2/N7/N8 indexes, N3/N4 Data
 Agents, N6 inference, and its own cache. Its health endpoint becomes
 unavailable if the cache identity or occupancy diverges. These controls
@@ -334,10 +339,10 @@ verbs below describe implemented capabilities, not recorded live results:
    serve-gate receipt belongs at the execution coordinator's profile-selection
    boundary: it must be verified before selecting `serve-frozen`, and the
    `provision-derived` publication companion must remain excluded throughout
-   semantic trials. Historical Compose v1alpha2 overlays and N4 serve-gate
-   v1alpha1 receipts remain verifiable, but they do not authorize a newly
-   rendered v1alpha3 overlay. Freeze a new N4 serve-gate v1alpha2 receipt in a
-   new directory after rendering the new overlay; never rewrite the old
+   semantic trials. Historical Compose v1alpha2/v1alpha3 overlays and their
+   bound N4 serve-gate receipts remain verifiable, but they do not authorize a
+   newly rendered v1alpha4 overlay. Freeze a new N4 serve-gate v1alpha2 receipt
+   in a new directory after rendering the new overlay; never rewrite the old
    artifacts.
 9. Provide a preflight for every distinct semantic artifact through
    authenticated N3/N4 Data Agent HTTP reads. It performs a complete fetch,

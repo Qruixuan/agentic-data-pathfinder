@@ -273,6 +273,62 @@ class FullFlowN4ServeGateTest(unittest.TestCase):
                 **arguments,
             )
 
+    def test_v1alpha2_gate_remains_verifiable_with_v1alpha3_overlay(
+        self,
+    ) -> None:
+        historical_overlay = self.case_root / "v1alpha3-overlay"
+        inputs = overlay_module._verified_inputs(
+            self.compose_case.bootstrap,
+            self.binding,
+            logical_plan_dir=self.compose_case.logical,
+            scenario_path=compose_fixture.SCENARIO,
+            container_plan_dir=self.compose_case.container,
+        )
+        overlay_documents = overlay_module._documents(
+            overlay_id="local-eight-node-full-flow-v1",
+            bootstrap_root=inputs[0],
+            bootstrap_report=inputs[2],
+            deployment_report=inputs[3],
+            launchers=inputs[4],
+            deployment=inputs[5],
+            schema_version=(
+                overlay_module.LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3
+            ),
+        )
+        overlay_documents[overlay_module.CHECKSUMS_NAME] = (
+            overlay_module._checksums(overlay_documents)
+        )
+        historical_overlay.mkdir()
+        for name, payload in overlay_documents.items():
+            (historical_overlay / name).write_bytes(payload)
+
+        arguments = self._arguments()
+        arguments["compose_overlay_dir"] = historical_overlay
+        document = gate_module._expected_document(
+            gate_id="n4-preprovisioned-local-semantic-v1",
+            schema_version=N4_SERVE_GATE_SCHEMA_VERSION,
+            **arguments,
+        )
+        historical_gate = self.case_root / "v1alpha3-bound-gate"
+        historical_gate.mkdir()
+        payload = gate_module._json_bytes(document)
+        (historical_gate / GATE_NAME).write_bytes(payload)
+        (historical_gate / CHECKSUMS_NAME).write_text(
+            f"{hashlib.sha256(payload).hexdigest()}  {GATE_NAME}\n",
+            encoding="utf-8",
+        )
+
+        report = verify_full_flow_n4_preprovisioned_serve_gate(
+            historical_gate,
+            **arguments,
+        )
+        gate = _json(historical_gate / GATE_NAME)
+        self.assertEqual("VERIFIED", report["status"])
+        self.assertEqual(
+            overlay_module.LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
+            gate["compose_overlay_schema_version"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

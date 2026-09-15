@@ -25,6 +25,7 @@ from .full_flow_compose_overlay import (
     COMPOSE_GATE_SCHEMA_VERSION,
     COMPOSE_OVERLAY_SCHEMA_VERSION,
     GATE_NAME as OVERLAY_GATE_NAME,
+    LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
     MANIFEST_NAME as OVERLAY_MANIFEST_NAME,
     verify_full_flow_local_compose_overlay,
 )
@@ -204,7 +205,11 @@ def _verified_sources(
     )
     if require_complete_package_mounts:
         _require(
-            overlay.get("schema_version") == COMPOSE_OVERLAY_SCHEMA_VERSION
+            overlay.get("schema_version")
+            in {
+                LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION_V1ALPHA3,
+                COMPOSE_OVERLAY_SCHEMA_VERSION,
+            }
             and overlay.get("selective_service_unit_count") == 19
             and overlay.get("data_agent_complete_package_mount_count") == 2,
             "Compose source lacks complete Data Agent package mounts",
@@ -287,7 +292,7 @@ def _document(
     }
     if schema_version == N4_SERVE_GATE_SCHEMA_VERSION:
         document.update({
-            "compose_overlay_schema_version": COMPOSE_OVERLAY_SCHEMA_VERSION,
+            "compose_overlay_schema_version": overlay["schema_version"],
             "n4_complete_package_mount_verified": True,
             "n4_package_rebind_env_name": "PATHFINDER_N4_PACKAGE_DIR",
             "n4_manifest_relative_path": "config/data-agent-manifest.json",
