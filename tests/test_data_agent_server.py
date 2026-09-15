@@ -679,6 +679,7 @@ class DataAgentServerTest(unittest.TestCase):
         self.assertEqual("test-data-node", payload["node_id"])
         self.assertEqual("server-test-catalog-v1", payload["object_catalog_version"])
         self.assertEqual(1, payload["object_count"])
+        self.assertFalse(payload["credentials_recorded"])
 
     def test_manifest_resolves_relative_paths(self) -> None:
         manifest = load_data_agent_manifest(self.manifest_path)

@@ -5,8 +5,9 @@ import json
 import math
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
 
 from .config import ConfigError, load_config
 from .experiment import run_pilot, run_session
@@ -39,6 +40,40 @@ def _positive_finite_float(value: str) -> float:
         raise argparse.ArgumentTypeError("must be a number") from exc
     if not math.isfinite(parsed) or parsed <= 0.0:
         raise argparse.ArgumentTypeError("must be a finite positive number")
+    return parsed
+
+
+def _finite_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be a finite number")
+    return parsed
+
+
+def _unit_interval_float(value: str) -> float:
+    parsed = _finite_float(value)
+    if not 0.0 < parsed < 1.0:
+        raise argparse.ArgumentTypeError("must be strictly between 0 and 1")
+    return parsed
+
+
+def _closed_unit_interval_float(value: str) -> float:
+    parsed = _finite_float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
+    return parsed
+
+
+def _neutral_oed_selection_size(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if not 1 <= parsed <= 4:
+        raise argparse.ArgumentTypeError("must be between 1 and 4")
     return parsed
 
 
@@ -94,6 +129,248 @@ def _cache_outcome_mapping(values: Sequence[str]) -> dict[str, str]:
             raise ConfigError(f"duplicate --cache-outcome binding for {key}")
         outcomes[key] = outcome.strip()
     return outcomes
+
+
+def _load_strict_json_file(
+    path: Path,
+    *,
+    label: str,
+    expected_type: type,
+) -> object:
+    """Read operator JSON without silently collapsing ambiguous input."""
+
+    source = path.resolve()
+    if not source.is_file() or source.is_symlink():
+        raise ConfigError(f"{label} is missing or unsafe")
+
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, child in pairs:
+            if key in value:
+                raise ConfigError(f"{label} repeats JSON key {key}")
+            value[key] = child
+        return value
+
+    try:
+        value = json.loads(
+            source.read_text(encoding="utf-8"),
+            object_pairs_hook=unique,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ConfigError(f"{label} contains invalid number {token}")
+            ),
+        )
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigError(f"{label} must be readable JSON") from exc
+    if not isinstance(value, expected_type):
+        expected = "object" if expected_type is dict else "array"
+        raise ConfigError(f"{label} must be a JSON {expected}")
+    return value
+
+
+_N4_LIVE_GATE_SOURCE_FIELDS = {
+    "live_receipt_bindings",
+    "n4_publication_store_root",
+    "rebound_artifact_binding_dir",
+    "rebound_semantic_matrix_dir",
+    "rebound_admission_dir",
+}
+_N4_LIVE_FRAME_BINDING_FIELDS = {"kind", "receipt_dir", "n5_plan"}
+_N4_LIVE_DIGEST_BINDING_FIELDS = {
+    "kind",
+    "receipt_dir",
+    "n5_digest_plan_dir",
+    "source_video_path",
+}
+
+
+def _load_n4_live_gate_sources(path: Path | None) -> dict | None:
+    """Load one strict operator-local live-gate source descriptor."""
+
+    if path is None:
+        return None
+    source = path.resolve()
+    if not source.is_file() or source.is_symlink():
+        raise ConfigError("N4 live gate sources file is missing or unsafe")
+
+    def unique(pairs: list[tuple[str, object]]) -> dict:
+        value: dict = {}
+        for key, child in pairs:
+            if key in value:
+                raise ConfigError(
+                    f"N4 live gate sources repeat JSON key {key}"
+                )
+            value[key] = child
+        return value
+
+    try:
+        value = json.loads(
+            source.read_text(encoding="utf-8"),
+            object_pairs_hook=unique,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ConfigError(
+                    f"N4 live gate sources contain invalid number {token}"
+                )
+            ),
+        )
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigError(
+            "N4 live gate sources must be a readable JSON object"
+        ) from exc
+    if not isinstance(value, dict) or set(value) != _N4_LIVE_GATE_SOURCE_FIELDS:
+        raise ConfigError(
+            "N4 live gate sources must contain exactly "
+            + ", ".join(sorted(_N4_LIVE_GATE_SOURCE_FIELDS))
+        )
+
+    def local_path(raw: object, name: str) -> Path:
+        if not isinstance(raw, str) or not raw.strip():
+            raise ConfigError(f"{name} must be a non-empty path string")
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = source.parent / candidate
+        return candidate.resolve()
+
+    raw_bindings = value["live_receipt_bindings"]
+    if not isinstance(raw_bindings, list) or not raw_bindings:
+        raise ConfigError(
+            "live_receipt_bindings must be a non-empty JSON array"
+        )
+    bindings: list[dict] = []
+    for index, raw in enumerate(raw_bindings):
+        if not isinstance(raw, dict):
+            raise ConfigError(
+                f"live_receipt_bindings[{index}] must be an object"
+            )
+        kind = raw.get("kind")
+        if kind == "frame_bundle":
+            if set(raw) != _N4_LIVE_FRAME_BINDING_FIELDS:
+                raise ConfigError(
+                    f"live_receipt_bindings[{index}] frame fields changed"
+                )
+            if not isinstance(raw.get("n5_plan"), dict):
+                raise ConfigError(
+                    f"live_receipt_bindings[{index}].n5_plan must be an object"
+                )
+            bindings.append({
+                "kind": kind,
+                "receipt_dir": local_path(
+                    raw["receipt_dir"],
+                    f"live_receipt_bindings[{index}].receipt_dir",
+                ),
+                "n5_plan": raw["n5_plan"],
+            })
+        elif kind == "multimodal_digest":
+            if set(raw) != _N4_LIVE_DIGEST_BINDING_FIELDS:
+                raise ConfigError(
+                    f"live_receipt_bindings[{index}] digest fields changed"
+                )
+            bindings.append({
+                "kind": kind,
+                "receipt_dir": local_path(
+                    raw["receipt_dir"],
+                    f"live_receipt_bindings[{index}].receipt_dir",
+                ),
+                "n5_digest_plan_dir": local_path(
+                    raw["n5_digest_plan_dir"],
+                    f"live_receipt_bindings[{index}].n5_digest_plan_dir",
+                ),
+                "source_video_path": local_path(
+                    raw["source_video_path"],
+                    f"live_receipt_bindings[{index}].source_video_path",
+                ),
+            })
+        else:
+            raise ConfigError(
+                f"live_receipt_bindings[{index}].kind is unsupported"
+            )
+    return {
+        "live_receipt_bindings": bindings,
+        "n4_publication_store_root": local_path(
+            value["n4_publication_store_root"],
+            "n4_publication_store_root",
+        ),
+        "rebound_artifact_binding_dir": local_path(
+            value["rebound_artifact_binding_dir"],
+            "rebound_artifact_binding_dir",
+        ),
+        "rebound_semantic_matrix_dir": local_path(
+            value["rebound_semantic_matrix_dir"],
+            "rebound_semantic_matrix_dir",
+        ),
+        "rebound_admission_dir": local_path(
+            value["rebound_admission_dir"],
+            "rebound_admission_dir",
+        ),
+    }
+
+
+@contextmanager
+def _local_semantic_flowmesh_executor(
+    local_semantic_admission_dir: Path,
+    *,
+    run_id: str,
+    flowmesh_base_url: str | None,
+    task_timeout_seconds: int,
+    poll_interval_seconds: float,
+) -> Iterator[object]:
+    """Build the local semantic effect boundary without persisting secrets."""
+
+    from .integrations.flowmesh import (
+        FlowMeshSemanticTrialExecutor,
+        FlowMeshSettings,
+        SdkFlowMeshClient,
+        full_flow_hmac_header_provider,
+    )
+    from .simulator.full_flow_local_semantic_admission import (
+        load_full_flow_local_semantic_execution_inputs,
+    )
+
+    inputs = load_full_flow_local_semantic_execution_inputs(
+        local_semantic_admission_dir
+    )
+    worker_pin = inputs.admission.get("worker_pin")
+    if (
+        not isinstance(worker_pin, dict)
+        or worker_pin.get("kind") != "worker_alias"
+        or not isinstance(worker_pin.get("value"), str)
+        or not worker_pin["value"].strip()
+    ):
+        raise ConfigError(
+            "local semantic admission requires one frozen worker-alias pin"
+        )
+    ingress_secret = os.getenv(
+        "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET"
+    )
+    if ingress_secret is None or not ingress_secret.strip():
+        raise ConfigError(
+            "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET is required at runtime"
+        )
+    settings = FlowMeshSettings.from_environment(
+        base_url=flowmesh_base_url,
+        task_timeout_seconds=task_timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        worker_alias=worker_pin["value"],
+        validate_before_submit=True,
+    )
+    client = SdkFlowMeshClient(settings)
+    try:
+        yield FlowMeshSemanticTrialExecutor(
+            client=client,
+            settings=settings,
+            run_id=run_id,
+            bound_trials=inputs.bound_trials,
+            bound_stages=inputs.bound_stages,
+            runtime_header_provider=full_flow_hmac_header_provider(
+                ingress_secret
+            ),
+            api_task_timeout_seconds=task_timeout_seconds,
+        )
+    finally:
+        client.close()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1146,6 +1423,19 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         default=1024 * 1024,
     )
+    data_agent.add_argument(
+        "--require-token",
+        action="store_true",
+        help="refuse startup unless PATHFINDER_DATA_AGENT_TOKEN is set",
+    )
+    data_agent.add_argument(
+        "--require-artifact-secret",
+        action="store_true",
+        help=(
+            "refuse startup unless PATHFINDER_DATA_AGENT_ARTIFACT_SECRET "
+            "is set"
+        ),
+    )
     simulator = subcommands.add_parser(
         "simulate-flowmesh-infra",
         help=(
@@ -1355,6 +1645,2495 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify_local_compose.add_argument("--output-dir", type=Path, required=True)
     verify_local_compose.add_argument("--compact", action="store_true")
+
+    full_flow_data_plane = subcommands.add_parser(
+        "build-full-flow-data-plane",
+        help=(
+            "freeze real frame bundles and semantic trial specs into a "
+            "portable N4 Data Agent package"
+        ),
+    )
+    full_flow_data_plane.add_argument(
+        "--semantic-spec-artifact",
+        action="append",
+        nargs=2,
+        metavar=("SEMANTIC_SPEC", "FRAME_BUNDLE"),
+        required=True,
+        help="repeat for each semantic spec and canonical frame bundle pair",
+    )
+    full_flow_data_plane.add_argument("--package-id", required=True)
+    full_flow_data_plane.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    full_flow_data_plane.add_argument("--compact", action="store_true")
+
+    verify_full_flow_data_plane = subcommands.add_parser(
+        "verify-full-flow-data-plane",
+        help="verify a portable full-flow N4 Data Agent package offline",
+    )
+    verify_full_flow_data_plane.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_full_flow_data_plane.add_argument("--compact", action="store_true")
+
+    full_flow_compose = subcommands.add_parser(
+        "build-full-flow-compose-binding",
+        help=(
+            "bind a portable full-flow data plane to the eight-node "
+            "Compose simulator without launching it"
+        ),
+    )
+    full_flow_compose.add_argument(
+        "--base-compose-package", type=Path, required=True
+    )
+    full_flow_compose.add_argument(
+        "--data-plane-package", type=Path, required=True
+    )
+    full_flow_compose.add_argument(
+        "--route-id", default="full-flow-n4-n7-n6-v1"
+    )
+    full_flow_compose.add_argument("--data-agent-plan-id")
+    full_flow_compose.add_argument(
+        "--data-agent-plan-epoch", type=int, default=0
+    )
+    full_flow_compose.add_argument("--output-dir", type=Path, required=True)
+    full_flow_compose.add_argument("--compact", action="store_true")
+
+    verify_full_flow_compose = subcommands.add_parser(
+        "verify-full-flow-compose-binding",
+        help="verify an eight-node full-flow Compose binding offline",
+    )
+    verify_full_flow_compose.add_argument(
+        "--base-compose-package", type=Path, required=True
+    )
+    verify_full_flow_compose.add_argument(
+        "--data-plane-package", type=Path, required=True
+    )
+    verify_full_flow_compose.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    verify_full_flow_compose.add_argument("--compact", action="store_true")
+
+    full_flow_deployment = subcommands.add_parser(
+        "build-full-flow-deployment-binding",
+        help=(
+            "freeze the environment-specific N7 endpoint and FlowMesh "
+            "worker binding separately from a logical full-flow trial"
+        ),
+    )
+    full_flow_deployment.add_argument("--deployment-binding-id", required=True)
+    full_flow_deployment.add_argument(
+        "--coordinator-api-url", required=True
+    )
+    full_flow_deployment.add_argument("--worker-alias", required=True)
+    full_flow_deployment.add_argument(
+        "--api-task-timeout-seconds", type=int, required=True
+    )
+    full_flow_deployment.add_argument(
+        "--output", type=Path, required=True
+    )
+    full_flow_deployment.add_argument("--compact", action="store_true")
+
+    full_flow_plan = subcommands.add_parser(
+        "plan-flowmesh-full-flow-trial",
+        help=(
+            "freeze one real-object N4 to N7 to N6 Pathfinder trial and a "
+            "non-submittable FlowMesh template"
+        ),
+    )
+    full_flow_plan.add_argument("--semantic-spec", type=Path, required=True)
+    full_flow_plan.add_argument(
+        "--data-plane-package", type=Path, required=True
+    )
+    full_flow_plan.add_argument(
+        "--deployment-binding", type=Path, required=True
+    )
+    full_flow_plan.add_argument("--owner", default="pathfinder")
+    full_flow_plan.add_argument("--output-dir", type=Path, required=True)
+    full_flow_plan.add_argument("--compact", action="store_true")
+
+    verify_full_flow_plan = subcommands.add_parser(
+        "verify-flowmesh-full-flow-trial-plan",
+        help="verify a frozen full-flow logical plan and deployment binding",
+    )
+    verify_full_flow_plan.add_argument("--plan-dir", type=Path, required=True)
+    verify_full_flow_plan.add_argument("--compact", action="store_true")
+
+    full_flow_run = subcommands.add_parser(
+        "run-flowmesh-full-flow-trial",
+        help=(
+            "validate, submit, and collect one worker-pinned full-flow N7 "
+            "trial against already-running services"
+        ),
+    )
+    full_flow_run.add_argument("--plan-dir", type=Path, required=True)
+    full_flow_run.add_argument("--output-dir", type=Path, required=True)
+    full_flow_run.add_argument("--flowmesh-base-url")
+    full_flow_run.add_argument("--task-timeout", type=int, default=1200)
+    full_flow_run.add_argument(
+        "--poll-interval", type=_positive_finite_float, default=2.0
+    )
+    full_flow_run.add_argument("--compact", action="store_true")
+
+    verify_full_flow_run = subcommands.add_parser(
+        "verify-flowmesh-full-flow-trial-run",
+        help="verify a completed full-flow trial and its frozen plan offline",
+    )
+    verify_full_flow_run.add_argument("--run-dir", type=Path, required=True)
+    verify_full_flow_run.add_argument("--plan-dir", type=Path, required=True)
+    verify_full_flow_run.add_argument("--compact", action="store_true")
+
+    full_flow_v2_request = subcommands.add_parser(
+        "build-flowmesh-full-flow-public-request-v2",
+        help=(
+            "build a label-free N4 to N7 to N6 to N1 public trial "
+            "request"
+        ),
+    )
+    full_flow_v2_request.add_argument(
+        "--public-task-binding", type=Path, required=True
+    )
+    full_flow_v2_request.add_argument("--oracle-id", required=True)
+    full_flow_v2_request.add_argument("--full-flow-request-id", required=True)
+    full_flow_v2_request.add_argument("--run-id", required=True)
+    full_flow_v2_request.add_argument("--trial-id", required=True)
+    full_flow_v2_request.add_argument("--trial-key", required=True)
+    full_flow_v2_request.add_argument("--route-id", required=True)
+    full_flow_v2_request.add_argument("--requested-location", required=True)
+    full_flow_v2_request.add_argument("--data-agent-plan-id", required=True)
+    full_flow_v2_request.add_argument(
+        "--data-agent-plan-epoch", type=int, default=0
+    )
+    full_flow_v2_request.add_argument(
+        "--quiescence-timeout-seconds",
+        type=_positive_finite_float,
+        default=5.0,
+    )
+    full_flow_v2_request.add_argument("--artifact-sha256", required=True)
+    full_flow_v2_request.add_argument(
+        "--artifact-size-bytes", type=int, required=True
+    )
+    full_flow_v2_request.add_argument(
+        "--object-catalog-version", required=True
+    )
+    full_flow_v2_request.add_argument("--expected-model", required=True)
+    full_flow_v2_request.add_argument("--output", type=Path, required=True)
+    full_flow_v2_request.add_argument("--compact", action="store_true")
+
+    full_flow_v2_plan = subcommands.add_parser(
+        "plan-flowmesh-full-flow-trial-v2",
+        help="freeze a label-free N4 to N7 to N6 to N1 trial",
+    )
+    full_flow_v2_plan.add_argument(
+        "--public-request", type=Path, required=True
+    )
+    full_flow_v2_plan.add_argument(
+        "--data-plane-package", type=Path, required=True
+    )
+    full_flow_v2_plan.add_argument(
+        "--deployment-binding", type=Path, required=True
+    )
+    full_flow_v2_plan.add_argument("--route-id", required=True)
+    full_flow_v2_plan.add_argument("--requested-location", required=True)
+    full_flow_v2_plan.add_argument("--data-agent-plan-id", required=True)
+    full_flow_v2_plan.add_argument(
+        "--data-agent-plan-epoch", type=int, default=0
+    )
+    full_flow_v2_plan.add_argument(
+        "--quiescence-timeout-seconds",
+        type=_positive_finite_float,
+        default=5.0,
+    )
+    full_flow_v2_plan.add_argument("--owner", default="pathfinder")
+    full_flow_v2_plan.add_argument("--output-dir", type=Path, required=True)
+    full_flow_v2_plan.add_argument("--compact", action="store_true")
+
+    full_flow_v2_plan_verify = subcommands.add_parser(
+        "verify-flowmesh-full-flow-trial-v2-plan",
+        help="verify a frozen label-free full-flow v2 plan offline",
+    )
+    full_flow_v2_plan_verify.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    full_flow_v2_plan_verify.add_argument("--compact", action="store_true")
+
+    full_flow_v2_run = subcommands.add_parser(
+        "run-flowmesh-full-flow-trial-v2",
+        help=(
+            "submit one worker-pinned label-free full-flow trial against "
+            "already-running services"
+        ),
+    )
+    full_flow_v2_run.add_argument("--plan-dir", type=Path, required=True)
+    full_flow_v2_run.add_argument("--output-dir", type=Path, required=True)
+    full_flow_v2_run.add_argument("--flowmesh-base-url")
+    full_flow_v2_run.add_argument("--task-timeout", type=int, default=1200)
+    full_flow_v2_run.add_argument(
+        "--poll-interval", type=_positive_finite_float, default=2.0
+    )
+    full_flow_v2_run.add_argument("--compact", action="store_true")
+
+    full_flow_v2_run_verify = subcommands.add_parser(
+        "verify-flowmesh-full-flow-trial-v2-run",
+        help="verify a completed label-free full-flow v2 run offline",
+    )
+    full_flow_v2_run_verify.add_argument(
+        "--run-dir", type=Path, required=True
+    )
+    full_flow_v2_run_verify.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    full_flow_v2_run_verify.add_argument(
+        "--n1-oracle-package",
+        type=Path,
+        help=(
+            "authenticate the N1 score using this package and runtime-only "
+            "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET"
+        ),
+    )
+    full_flow_v2_run_verify.add_argument("--compact", action="store_true")
+
+    n2_index_build = subcommands.add_parser(
+        "build-simulator-n2-index",
+        help="freeze a portable deterministic N2 lexical index package",
+    )
+    n2_index_build.add_argument(
+        "--source-manifest", type=Path, required=True
+    )
+    n2_index_build.add_argument("--output-dir", type=Path, required=True)
+    n2_index_build.add_argument("--compact", action="store_true")
+
+    n1_oracle_build = subcommands.add_parser(
+        "build-simulator-n1-hidden-oracle",
+        help="freeze an endpoint-free N1 hidden-label scoring package",
+    )
+    n1_oracle_build.add_argument(
+        "--label-source", type=Path, required=True
+    )
+    n1_oracle_build.add_argument("--output-dir", type=Path, required=True)
+    n1_oracle_build.add_argument("--compact", action="store_true")
+
+    n1_oracle_verify = subcommands.add_parser(
+        "verify-simulator-n1-hidden-oracle",
+        help="verify a frozen N1 hidden-label scoring package offline",
+    )
+    n1_oracle_verify.add_argument("--output-dir", type=Path, required=True)
+    n1_oracle_verify.add_argument("--compact", action="store_true")
+
+    n1_commitment_freeze = subcommands.add_parser(
+        "freeze-simulator-n1-oracle-preselection-commitment",
+        help=(
+            "publish a label-free hash commitment to a frozen N1 oracle "
+            "before policy selection"
+        ),
+    )
+    n1_commitment_freeze.add_argument(
+        "--oracle-package-dir", type=Path, required=True
+    )
+    n1_commitment_freeze.add_argument("--commitment-id", required=True)
+    n1_commitment_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    n1_commitment_freeze.add_argument("--compact", action="store_true")
+
+    n1_commitment_verify = subcommands.add_parser(
+        "verify-simulator-n1-oracle-preselection-commitment",
+        help=(
+            "verify a public N1 commitment and optionally open it with the "
+            "private package"
+        ),
+    )
+    n1_commitment_verify.add_argument(
+        "--commitment-dir", type=Path, required=True
+    )
+    n1_commitment_verify.add_argument(
+        "--oracle-package-dir", type=Path
+    )
+    n1_commitment_verify.add_argument("--compact", action="store_true")
+
+    n1_oracle_serve = subcommands.add_parser(
+        "serve-simulator-n1-hidden-oracle",
+        help="serve N1 hidden scoring with runtime-only credentials",
+    )
+    n1_oracle_serve.add_argument("--package-dir", type=Path, required=True)
+    n1_oracle_serve.add_argument("--state-db", type=Path, required=True)
+    n1_oracle_serve.add_argument("--host", default="0.0.0.0")
+    n1_oracle_serve.add_argument("--port", type=int, default=9081)
+
+    n1_verifier_serve = subcommands.add_parser(
+        "serve-simulator-n1-remote-verifier",
+        help=(
+            "serve authenticated N1 score-evidence verification without "
+            "exporting the hidden package or evidence secret"
+        ),
+    )
+    n1_verifier_serve.add_argument(
+        "--package-dir", type=Path, required=True
+    )
+    n1_verifier_serve.add_argument("--state-db", type=Path, required=True)
+    n1_verifier_serve.add_argument("--host", default="0.0.0.0")
+    n1_verifier_serve.add_argument("--port", type=int, default=9181)
+
+    task_plane_build = subcommands.add_parser(
+        "build-simulator-full-flow-task-plane",
+        help="split frozen semantic tasks into public and N1-private inputs",
+    )
+    task_plane_build.add_argument(
+        "--semantic-spec", type=Path, action="append", required=True
+    )
+    task_plane_build.add_argument("--task-plane-id", required=True)
+    task_plane_build.add_argument("--oracle-id", required=True)
+    task_plane_build.add_argument("--output-dir", type=Path, required=True)
+    task_plane_build.add_argument("--compact", action="store_true")
+
+    task_plane_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-task-plane",
+        help="verify public/private task separation and N1 package bindings",
+    )
+    task_plane_verify.add_argument("--output-dir", type=Path, required=True)
+    task_plane_verify.add_argument("--compact", action="store_true")
+
+    logical_routes_compile = subcommands.add_parser(
+        "compile-simulator-full-flow-logical-routes",
+        help="compile the 4x8 operation ledger into endpoint-free services",
+    )
+    logical_routes_compile.add_argument("--scenario", type=Path, required=True)
+    logical_routes_compile.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    logical_routes_compile.add_argument(
+        "--compiler-id",
+        default="full-flow-logical-route-compiler-v1",
+    )
+    logical_routes_compile.add_argument("--output-dir", type=Path, required=True)
+    logical_routes_compile.add_argument("--compact", action="store_true")
+
+    logical_routes_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-logical-routes",
+        help="verify logical routes against their scenario and container plan",
+    )
+    logical_routes_verify.add_argument("--plan-dir", type=Path, required=True)
+    logical_routes_verify.add_argument("--scenario", type=Path, required=True)
+    logical_routes_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    logical_routes_verify.add_argument("--compact", action="store_true")
+
+    artifact_bindings_build = subcommands.add_parser(
+        "build-simulator-full-flow-artifact-bindings",
+        help=(
+            "bind public tasks to verified N3 raw and N4 derived artifact "
+            "identities"
+        ),
+    )
+    artifact_bindings_build.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    artifact_bindings_build.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    artifact_bindings_build.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    artifact_bindings_build.add_argument(
+        "--task-plane-dir", type=Path, required=True
+    )
+    artifact_bindings_build.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    artifact_bindings_build.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    artifact_bindings_build.add_argument("--binding-set-id", required=True)
+    artifact_bindings_build.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    artifact_bindings_build.add_argument("--compact", action="store_true")
+
+    artifact_bindings_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-artifact-bindings",
+        help="verify artifact identities against all source packages",
+    )
+    artifact_bindings_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    artifact_bindings_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    artifact_bindings_verify.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    artifact_bindings_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    artifact_bindings_verify.add_argument(
+        "--task-plane-dir", type=Path, required=True
+    )
+    artifact_bindings_verify.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    artifact_bindings_verify.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    artifact_bindings_verify.add_argument("--compact", action="store_true")
+
+    provisioning_build = subcommands.add_parser(
+        "build-simulator-full-flow-provisioning-catalog",
+        help=(
+            "bind already materialized N4 artifacts to verified N5-derived "
+            "provenance without re-running materialization"
+        ),
+    )
+    provisioning_build.add_argument(
+        "--artifact-binding-dir", type=Path, required=True
+    )
+    provisioning_build.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    provisioning_build.add_argument("--catalog-id", required=True)
+    provisioning_build.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    provisioning_build.add_argument("--compact", action="store_true")
+
+    provisioning_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-provisioning-catalog",
+        help="verify preprovisioned N5/N4 references against frozen sources",
+    )
+    provisioning_verify.add_argument(
+        "--catalog-dir", type=Path, required=True
+    )
+    provisioning_verify.add_argument(
+        "--artifact-binding-dir", type=Path, required=True
+    )
+    provisioning_verify.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    provisioning_verify.add_argument("--compact", action="store_true")
+
+    exact_ranges_build = subcommands.add_parser(
+        "build-simulator-full-flow-exact-range-catalog",
+        help=(
+            "freeze content-bound full-object fallback ranges for the "
+            "indexed-raw semantic route"
+        ),
+    )
+    exact_ranges_build.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    exact_ranges_build.add_argument("--catalog-id", required=True)
+    exact_ranges_build.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    exact_ranges_build.add_argument("--compact", action="store_true")
+
+    exact_ranges_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-exact-range-catalog",
+        help="verify exact fallback ranges against the frozen N3 package",
+    )
+    exact_ranges_verify.add_argument(
+        "--catalog-dir", type=Path, required=True
+    )
+    exact_ranges_verify.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    exact_ranges_verify.add_argument("--compact", action="store_true")
+
+    semantic_matrix_compile = subcommands.add_parser(
+        "compile-simulator-full-flow-semantic-matrix",
+        help=(
+            "bind real public tasks and exact artifact identities to every "
+            "endpoint-free 4x8 route"
+        ),
+    )
+    semantic_matrix_compile.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    semantic_matrix_compile.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    semantic_matrix_compile.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    semantic_matrix_compile.add_argument(
+        "--public-task-set", type=Path, required=True
+    )
+    semantic_matrix_compile.add_argument(
+        "--artifact-bindings", type=Path, required=True
+    )
+    semantic_matrix_compile.add_argument(
+        "--compiler-id",
+        default="full-flow-semantic-matrix-compiler-v1",
+    )
+    semantic_matrix_compile.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    semantic_matrix_compile.add_argument("--compact", action="store_true")
+
+    semantic_matrix_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-semantic-matrix",
+        help="recompile and verify an endpoint-free 4x8 semantic matrix",
+    )
+    semantic_matrix_verify.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    semantic_matrix_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    semantic_matrix_verify.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    semantic_matrix_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    semantic_matrix_verify.add_argument(
+        "--public-task-set", type=Path, required=True
+    )
+    semantic_matrix_verify.add_argument(
+        "--artifact-bindings", type=Path, required=True
+    )
+    semantic_matrix_verify.add_argument("--compact", action="store_true")
+
+    w4_contract_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-w4-retrieval-contract",
+        help=(
+            "freeze the public W4 ranking task and a separate N1-private "
+            "relevance oracle"
+        ),
+    )
+    w4_contract_freeze.add_argument(
+        "--semantic-matrix-dir", type=Path, required=True
+    )
+    w4_contract_freeze.add_argument(
+        "--retrieval-config", type=Path, required=True
+    )
+    w4_contract_freeze.add_argument(
+        "--representation-manifest", type=Path, required=True
+    )
+    w4_contract_freeze.add_argument("--selected-query-id", required=True)
+    w4_contract_freeze.add_argument("--contract-id", required=True)
+    w4_contract_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_contract_freeze.add_argument("--compact", action="store_true")
+
+    w4_contract_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-retrieval-contract",
+        help="verify the split public/private W4 retrieval contract",
+    )
+    w4_contract_verify.add_argument(
+        "--contract-dir", type=Path, required=True
+    )
+    w4_contract_verify.add_argument("--compact", action="store_true")
+
+    w4_evaluate = subcommands.add_parser(
+        "evaluate-simulator-full-flow-w4-retrieval",
+        help="score complete W4 rankings without returning hidden relevance IDs",
+    )
+    w4_evaluate.add_argument("--contract-dir", type=Path, required=True)
+    w4_evaluate.add_argument("--observations", type=Path, required=True)
+    w4_evaluate.add_argument("--output-dir", type=Path, required=True)
+    w4_evaluate.add_argument("--compact", action="store_true")
+
+    w4_evaluation_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-retrieval-evaluation",
+        help="verify W4 ranking metrics, optionally by source-bound replay",
+    )
+    w4_evaluation_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_evaluation_verify.add_argument("--contract-dir", type=Path)
+    w4_evaluation_verify.add_argument("--observations", type=Path)
+    w4_evaluation_verify.add_argument("--compact", action="store_true")
+
+    w4_runtime_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-w4-retrieval-runtime",
+        help=(
+            "bind the public W4 retrieval contract to all sixteen local "
+            "design/repetition coordinates"
+        ),
+    )
+    w4_runtime_freeze.add_argument(
+        "--contract-dir", type=Path, required=True
+    )
+    w4_runtime_freeze.add_argument(
+        "--local-semantic-admission-dir", type=Path, required=True
+    )
+    w4_runtime_freeze.add_argument("--runtime-overlay-id", required=True)
+    w4_runtime_freeze.add_argument("--output-dir", type=Path, required=True)
+    w4_runtime_freeze.add_argument("--compact", action="store_true")
+
+    w4_runtime_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-retrieval-runtime",
+        help="verify the public-only W4 ranker runtime package",
+    )
+    w4_runtime_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_runtime_verify.add_argument("--compact", action="store_true")
+
+    w4_ranker_run = subcommands.add_parser(
+        "run-simulator-full-flow-w4-lexical-ranker",
+        help=(
+            "run the public W4 lexical ranker against bound N2/N7/N8 "
+            "index services without reading N1 relevance labels"
+        ),
+    )
+    w4_ranker_run.add_argument(
+        "--runtime-overlay-dir", type=Path, required=True
+    )
+    w4_ranker_run.add_argument("--n2-index-base-url", required=True)
+    w4_ranker_run.add_argument("--n7-index-base-url", required=True)
+    w4_ranker_run.add_argument("--n8-index-base-url", required=True)
+    w4_ranker_run.add_argument(
+        "--index-package-dir",
+        type=Path,
+        required=True,
+        help=(
+            "verified endpoint-free N2 index package used to pin the "
+            "index ID, index digest, and source-manifest digest"
+        ),
+    )
+    w4_ranker_run.add_argument("--run-id", required=True)
+    w4_ranker_run.add_argument(
+        "--allow-http-simulator-host", action="append", default=[]
+    )
+    w4_ranker_run.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=10.0
+    )
+    w4_ranker_run.add_argument("--output-dir", type=Path, required=True)
+    w4_ranker_run.add_argument("--compact", action="store_true")
+
+    w4_ranker_run_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-ranker-run",
+        help=(
+            "verify public W4 ranking observations, optionally against "
+            "their frozen runtime package"
+        ),
+    )
+    w4_ranker_run_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_ranker_run_verify.add_argument(
+        "--runtime-overlay-dir", type=Path
+    )
+    w4_ranker_run_verify.add_argument("--compact", action="store_true")
+
+    w4_candidate_routes_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-w4-candidate-routes",
+        help="freeze candidate-wide D0-D7 W4 physical-route blueprints",
+    )
+    w4_candidate_routes_freeze.add_argument(
+        "--runtime-overlay-dir", type=Path, required=True
+    )
+    w4_candidate_routes_freeze.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    w4_candidate_routes_freeze.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    w4_candidate_routes_freeze.add_argument(
+        "--index-package-dir", type=Path, required=True
+    )
+    w4_candidate_routes_freeze.add_argument(
+        "--exact-range-catalog-dir", type=Path, required=True
+    )
+    w4_candidate_routes_freeze.add_argument(
+        "--physical-plan-id", required=True
+    )
+    w4_candidate_routes_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_candidate_routes_freeze.add_argument("--compact", action="store_true")
+
+    w4_candidate_routes_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-candidate-routes",
+        help="verify frozen candidate-wide W4 physical-route blueprints",
+    )
+    w4_candidate_routes_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_candidate_routes_verify.add_argument("--compact", action="store_true")
+
+    w4_crosswalk_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-w4-index-artifact-crosswalk",
+        help=(
+            "freeze the public N2 index-to-representation identity "
+            "crosswalk"
+        ),
+    )
+    w4_crosswalk_freeze.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_crosswalk_freeze.add_argument(
+        "--index-package-dir", type=Path, required=True
+    )
+    w4_crosswalk_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_crosswalk_freeze.add_argument("--compact", action="store_true")
+
+    w4_crosswalk_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-index-artifact-crosswalk",
+        help="verify the crosswalk by replaying its route and N2 sources",
+    )
+    w4_crosswalk_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_crosswalk_verify.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_crosswalk_verify.add_argument(
+        "--index-package-dir", type=Path, required=True
+    )
+    w4_crosswalk_verify.add_argument("--compact", action="store_true")
+
+    w4_candidate_run = subcommands.add_parser(
+        "run-simulator-full-flow-w4-candidate-conformance",
+        help=(
+            "execute all sixteen W4 candidate-wide route plans with the "
+            "deterministic public conformance adapter; no LLM or FlowMesh"
+        ),
+    )
+    w4_candidate_run.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_candidate_run.add_argument("--run-id", required=True)
+    w4_candidate_run.add_argument("--output-dir", type=Path, required=True)
+    w4_candidate_run.add_argument("--compact", action="store_true")
+
+    w4_candidate_run_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-candidate-conformance",
+        help="verify the source-bound W4 candidate coordinator output",
+    )
+    w4_candidate_run_verify.add_argument(
+        "--run-dir", type=Path, required=True
+    )
+    w4_candidate_run_verify.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_candidate_run_verify.add_argument("--compact", action="store_true")
+
+    w4_component_receipt_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-w4-component-execution-receipt",
+        help=(
+            "freeze strict persisted component events against a completed "
+            "W4 coordinator run"
+        ),
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--coordinator-run-dir", type=Path, required=True
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--crosswalk-dir", type=Path, required=True
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--index-package-dir", type=Path, required=True
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--component-events", type=Path, required=True
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--evidence-class",
+        choices=(
+            "strict-fake-component-conformance",
+            "live-local-component-execution",
+        ),
+        required=True,
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_component_receipt_freeze.add_argument(
+        "--compact", action="store_true"
+    )
+
+    w4_component_receipt_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-component-execution-receipt",
+        help="verify a component receipt against all of its frozen sources",
+    )
+    w4_component_receipt_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_component_receipt_verify.add_argument(
+        "--coordinator-run-dir", type=Path, required=True
+    )
+    w4_component_receipt_verify.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_component_receipt_verify.add_argument(
+        "--crosswalk-dir", type=Path, required=True
+    )
+    w4_component_receipt_verify.add_argument(
+        "--index-package-dir", type=Path, required=True
+    )
+    w4_component_receipt_verify.add_argument(
+        "--compact", action="store_true"
+    )
+
+    w4_local_components_run = subcommands.add_parser(
+        "run-simulator-full-flow-w4-local-component-execution",
+        help=(
+            "run all sixteen W4 trials through local index, Data Agent, "
+            "cache, and N6 semantic components, then freeze their receipt"
+        ),
+    )
+    w4_local_components_run.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_local_components_run.add_argument(
+        "--crosswalk-dir", type=Path, required=True
+    )
+    for node in ("n2", "n7", "n8"):
+        w4_local_components_run.add_argument(
+            f"--{node}-index-package-dir", type=Path, required=True
+        )
+        w4_local_components_run.add_argument(
+            f"--{node}-index-base-url", required=True
+        )
+    w4_local_components_run.add_argument(
+        "--n3-data-agent-base-url", required=True
+    )
+    w4_local_components_run.add_argument(
+        "--n4-data-agent-base-url", required=True
+    )
+    w4_local_components_run.add_argument(
+        "--n3-data-agent-location", default="origin-cold"
+    )
+    w4_local_components_run.add_argument(
+        "--n4-data-agent-location", default="origin-warm"
+    )
+    for node in ("n7", "n8"):
+        w4_local_components_run.add_argument(
+            f"--{node}-cache-base-url", required=True
+        )
+        w4_local_components_run.add_argument(
+            f"--{node}-cache-id", required=True
+        )
+    w4_local_components_run.add_argument(
+        "--n6-base-url", required=True
+    )
+    w4_local_components_run.add_argument(
+        "--semantic-model", required=True
+    )
+    w4_local_components_run.add_argument(
+        "--raw-sampler-scratch-dir", type=Path, required=True
+    )
+    w4_local_components_run.add_argument("--run-id", required=True)
+    w4_local_components_run.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    w4_local_components_run.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=300.0
+    )
+    w4_local_components_run.add_argument(
+        "--simulator-private-http-hosts",
+        default="",
+        help="comma-separated simulator-private service names",
+    )
+    w4_local_components_run.add_argument("--compact", action="store_true")
+
+    w4_flowmesh_plan = subcommands.add_parser(
+        "freeze-simulator-full-flow-w4-flowmesh-plan",
+        help="freeze sixteen serial worker-pinned W4 coordinator API tasks",
+    )
+    w4_flowmesh_plan.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_flowmesh_plan.add_argument("--run-id", required=True)
+    w4_flowmesh_plan.add_argument("--worker-alias", required=True)
+    w4_flowmesh_plan.add_argument("--owner", default="pathfinder")
+    w4_flowmesh_plan.add_argument(
+        "--api-task-timeout-seconds", type=int, default=900
+    )
+    w4_flowmesh_plan.add_argument("--output-dir", type=Path, required=True)
+    w4_flowmesh_plan.add_argument("--compact", action="store_true")
+
+    w4_flowmesh_plan_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-flowmesh-plan",
+        help="recompile and verify a frozen W4 FlowMesh plan",
+    )
+    w4_flowmesh_plan_verify.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    w4_flowmesh_plan_verify.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_flowmesh_plan_verify.add_argument("--compact", action="store_true")
+
+    w4_flowmesh_serve = subcommands.add_parser(
+        "serve-simulator-full-flow-w4-flowmesh-coordinator",
+        help="serve one source-bound N7 or N8 W4 trial coordinator",
+    )
+    w4_flowmesh_serve.add_argument(
+        "--coordinator-node-id", choices=("N7", "N8"), required=True
+    )
+    w4_flowmesh_serve.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_flowmesh_serve.add_argument(
+        "--crosswalk-dir", type=Path, required=True
+    )
+    for node in ("n2", "n7", "n8"):
+        w4_flowmesh_serve.add_argument(
+            f"--{node}-index-package-dir", type=Path, required=True
+        )
+        w4_flowmesh_serve.add_argument(
+            f"--{node}-index-base-url", required=True
+        )
+    w4_flowmesh_serve.add_argument(
+        "--n3-data-agent-base-url", required=True
+    )
+    w4_flowmesh_serve.add_argument(
+        "--n4-data-agent-base-url", required=True
+    )
+    w4_flowmesh_serve.add_argument(
+        "--n3-data-agent-location", default="origin-cold"
+    )
+    w4_flowmesh_serve.add_argument(
+        "--n4-data-agent-location", default="origin-warm"
+    )
+    for node in ("n7", "n8"):
+        w4_flowmesh_serve.add_argument(
+            f"--{node}-cache-base-url", required=True
+        )
+        w4_flowmesh_serve.add_argument(f"--{node}-cache-id", required=True)
+    w4_flowmesh_serve.add_argument("--n6-base-url", required=True)
+    w4_flowmesh_serve.add_argument("--semantic-model", required=True)
+    w4_flowmesh_serve.add_argument(
+        "--raw-sampler-scratch-dir", type=Path, required=True
+    )
+    w4_flowmesh_serve.add_argument("--state-db", type=Path, required=True)
+    w4_flowmesh_serve.add_argument("--host", default="127.0.0.1")
+    w4_flowmesh_serve.add_argument("--port", type=int, required=True)
+    w4_flowmesh_serve.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=300.0
+    )
+    w4_flowmesh_serve.add_argument(
+        "--max-artifact-bytes", type=int, default=2 * 1024 * 1024 * 1024
+    )
+    w4_flowmesh_serve.add_argument(
+        "--simulator-private-http-hosts", default=""
+    )
+    w4_flowmesh_serve.add_argument("--compact", action="store_true")
+
+    w4_flowmesh_run = subcommands.add_parser(
+        "run-simulator-full-flow-w4-flowmesh-matrix",
+        help="submit and freeze the sixteen-task W4 FlowMesh wrapper",
+    )
+    w4_flowmesh_run.add_argument("--plan-dir", type=Path, required=True)
+    w4_flowmesh_run.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_flowmesh_run.add_argument("--crosswalk-dir", type=Path, required=True)
+    w4_flowmesh_run.add_argument(
+        "--index-package-dir", type=Path, required=True
+    )
+    w4_flowmesh_run.add_argument(
+        "--n7-coordinator-base-url", required=True
+    )
+    w4_flowmesh_run.add_argument(
+        "--n8-coordinator-base-url", required=True
+    )
+    w4_flowmesh_run.add_argument("--worker-alias", required=True)
+    w4_flowmesh_run.add_argument("--flowmesh-base-url")
+    w4_flowmesh_run.add_argument(
+        "--poll-interval", type=_positive_finite_float, default=2.0
+    )
+    w4_flowmesh_run.add_argument(
+        "--simulator-private-http-hosts", default=""
+    )
+    w4_flowmesh_run.add_argument("--output-dir", type=Path, required=True)
+    w4_flowmesh_run.add_argument("--compact", action="store_true")
+
+    w4_flowmesh_run_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-w4-flowmesh-matrix",
+        help="verify W4 FlowMesh evidence against every frozen source",
+    )
+    w4_flowmesh_run_verify.add_argument(
+        "--run-dir", type=Path, required=True
+    )
+    w4_flowmesh_run_verify.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    w4_flowmesh_run_verify.add_argument(
+        "--route-package-dir", type=Path, required=True
+    )
+    w4_flowmesh_run_verify.add_argument(
+        "--crosswalk-dir", type=Path, required=True
+    )
+    w4_flowmesh_run_verify.add_argument(
+        "--index-package-dir", type=Path, required=True
+    )
+    w4_flowmesh_run_verify.add_argument("--compact", action="store_true")
+
+    semantic_admission_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-semantic-execution-admission",
+        help=(
+            "bind semantic routes to a deployment and report exact runtime "
+            "admission gaps"
+        ),
+    )
+    semantic_admission_freeze.add_argument(
+        "--semantic-matrix-dir", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument(
+        "--deployment-binding-dir", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument(
+        "--public-task-set", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument(
+        "--artifact-bindings", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument(
+        "--n1-oracle-package-dir", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument("--worker-alias", required=True)
+    semantic_admission_freeze.add_argument(
+        "--admission-id",
+        default="full-flow-semantic-execution-admission-v1",
+    )
+    semantic_admission_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    semantic_admission_freeze.add_argument("--compact", action="store_true")
+
+    semantic_admission_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-semantic-execution-admission",
+        help="verify the source-bound semantic execution admission package",
+    )
+    semantic_admission_verify.add_argument(
+        "--admission-dir", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--semantic-matrix-dir", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--deployment-binding-dir", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--public-task-set", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--artifact-bindings", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument(
+        "--n1-oracle-package-dir", type=Path, required=True
+    )
+    semantic_admission_verify.add_argument("--compact", action="store_true")
+
+    artifact_preflight = subcommands.add_parser(
+        "preflight-simulator-full-flow-semantic-artifacts",
+        help=(
+            "authenticate to N3/N4 and fully fetch every frozen semantic "
+            "artifact exactly once"
+        ),
+    )
+    artifact_preflight.add_argument(
+        "--semantic-execution-admission-dir", type=Path, required=True
+    )
+    artifact_preflight.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    artifact_preflight.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    artifact_preflight.add_argument("--n3-data-agent-url", required=True)
+    artifact_preflight.add_argument("--n4-data-agent-url", required=True)
+    artifact_preflight.add_argument("--preflight-id", required=True)
+    artifact_preflight.add_argument(
+        "--timeout-seconds", type=float, default=30.0
+    )
+    artifact_preflight.add_argument("--max-retries", type=int, default=1)
+    artifact_preflight.add_argument(
+        "--max-artifact-bytes",
+        type=int,
+        default=64 * 1024 * 1024 * 1024,
+    )
+    artifact_preflight.add_argument(
+        "--telemetry-quiescence-timeout-seconds",
+        type=float,
+        default=5.0,
+    )
+    artifact_preflight.add_argument(
+        "--simulator-private-http-host",
+        action="append",
+        default=[],
+    )
+    artifact_preflight.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    artifact_preflight.add_argument("--compact", action="store_true")
+
+    artifact_preflight_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-semantic-artifact-preflight",
+        help=(
+            "verify semantic artifact evidence against admission and N3/N4 "
+            "packages"
+        ),
+    )
+    artifact_preflight_verify.add_argument(
+        "--preflight-dir", type=Path, required=True
+    )
+    artifact_preflight_verify.add_argument(
+        "--semantic-execution-admission-dir", type=Path, required=True
+    )
+    artifact_preflight_verify.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    artifact_preflight_verify.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    artifact_preflight_verify.add_argument("--compact", action="store_true")
+
+    local_semantic_promote = subcommands.add_parser(
+        "promote-simulator-full-flow-local-semantic-execution-admission",
+        help=(
+            "promote the immutable blocked admission into public-only local "
+            "semantic execution inputs"
+        ),
+    )
+    local_semantic_promote.add_argument(
+        "--legacy-admission-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--semantic-matrix-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--deployment-binding-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--public-task-set", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--artifact-bindings", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--n1-oracle-package-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--artifact-preflight-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--exact-range-catalog-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--provisioning-catalog-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument("--semantics-mode", required=True)
+    local_semantic_promote.add_argument("--promotion-id", required=True)
+    local_semantic_promote.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    local_semantic_promote.add_argument("--compact", action="store_true")
+
+    local_semantic_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-local-semantic-execution-admission",
+        help="verify promoted local semantic inputs against every source",
+    )
+    local_semantic_verify.add_argument(
+        "--admission-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--legacy-admission-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--semantic-matrix-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--deployment-binding-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument("--scenario", type=Path, required=True)
+    local_semantic_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--public-task-set", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--artifact-bindings", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--n1-oracle-package-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--artifact-preflight-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--exact-range-catalog-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--n3-package-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--provisioning-catalog-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument(
+        "--n4-package-dir", type=Path, required=True
+    )
+    local_semantic_verify.add_argument("--compact", action="store_true")
+
+    local_semantic_runtime_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-local-semantic-runtime-package",
+        help="verify the self-contained public local runtime package",
+    )
+    local_semantic_runtime_verify.add_argument(
+        "--admission-dir", type=Path, required=True
+    )
+    local_semantic_runtime_verify.add_argument(
+        "--compact", action="store_true"
+    )
+
+    index_query_plan_build = subcommands.add_parser(
+        "build-simulator-full-flow-index-query-plan-catalog",
+        help="freeze visible N2 query plans for indexed semantic trials",
+    )
+    index_query_plan_build.add_argument(
+        "--local-semantic-admission-dir", type=Path, required=True
+    )
+    index_query_plan_build.add_argument(
+        "--n2-index-package-dir", type=Path, required=True
+    )
+    index_query_plan_build.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    index_query_plan_build.add_argument("--compact", action="store_true")
+
+    index_query_plan_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-index-query-plan-catalog",
+        help="verify visible N2 query plans against their frozen sources",
+    )
+    index_query_plan_verify.add_argument(
+        "--catalog-dir", type=Path, required=True
+    )
+    index_query_plan_verify.add_argument(
+        "--local-semantic-admission-dir", type=Path, required=True
+    )
+    index_query_plan_verify.add_argument(
+        "--n2-index-package-dir", type=Path, required=True
+    )
+    index_query_plan_verify.add_argument("--compact", action="store_true")
+
+    n4_serve_gate_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-n4-preprovisioned-serve-gate",
+        help=(
+            "freeze the source-bound authorization for serving an immutable "
+            "preprovisioned N4 snapshot"
+        ),
+    )
+    for flag in (
+        "compose-overlay-dir",
+        "service-bootstrap-dir",
+        "deployment-binding-dir",
+        "logical-plan-dir",
+        "scenario",
+        "container-plan-dir",
+        "provisioning-catalog-dir",
+        "artifact-binding-dir",
+        "n4-package-dir",
+    ):
+        n4_serve_gate_freeze.add_argument(
+            "--" + flag, type=Path, required=True
+        )
+    n4_serve_gate_freeze.add_argument("--gate-id", required=True)
+    n4_serve_gate_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    n4_serve_gate_freeze.add_argument("--compact", action="store_true")
+
+    n4_serve_gate_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-n4-preprovisioned-serve-gate",
+        help="verify the N4 serve authorization against every frozen source",
+    )
+    n4_serve_gate_verify.add_argument(
+        "--gate-dir", type=Path, required=True
+    )
+    for flag in (
+        "compose-overlay-dir",
+        "service-bootstrap-dir",
+        "deployment-binding-dir",
+        "logical-plan-dir",
+        "scenario",
+        "container-plan-dir",
+        "provisioning-catalog-dir",
+        "artifact-binding-dir",
+        "n4-package-dir",
+    ):
+        n4_serve_gate_verify.add_argument(
+            "--" + flag, type=Path, required=True
+        )
+    n4_serve_gate_verify.add_argument("--compact", action="store_true")
+
+    def add_n4_live_gate_sources(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--live-receipt-bindings",
+            type=Path,
+            required=True,
+            help=(
+                "operator-local JSON array of frame/digest receipt source "
+                "bindings; paths are used for verification and not frozen"
+            ),
+        )
+        command.add_argument(
+            "--n4-publication-store-root", type=Path, required=True
+        )
+        command.add_argument(
+            "--rebound-artifact-binding-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--rebound-semantic-matrix-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--rebound-admission-dir", type=Path, required=True
+        )
+
+    n4_live_gate_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-n4-live-serve-gate",
+        help=(
+            "freeze serve-frozen authorization after live N5-to-N4 "
+            "publication and downstream input rebinding"
+        ),
+    )
+    add_n4_live_gate_sources(n4_live_gate_freeze)
+    n4_live_gate_freeze.add_argument("--gate-id", required=True)
+    n4_live_gate_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    n4_live_gate_freeze.add_argument("--compact", action="store_true")
+
+    n4_live_gate_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-n4-live-serve-gate",
+        help="verify live publication, immutable N4 state, and rebound inputs",
+    )
+    n4_live_gate_verify.add_argument("--gate-dir", type=Path, required=True)
+    add_n4_live_gate_sources(n4_live_gate_verify)
+    n4_live_gate_verify.add_argument("--compact", action="store_true")
+
+    def add_n4_serve_gate_sources(
+        command: argparse.ArgumentParser,
+        *,
+        include_shared_sources: bool,
+    ) -> None:
+        command.add_argument(
+            "--n4-serve-gate-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--compose-overlay-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--service-bootstrap-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--provisioning-catalog-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--artifact-binding-dir", type=Path, required=True
+        )
+        command.add_argument("--n4-package-dir", type=Path, required=True)
+        command.add_argument(
+            "--n4-live-gate-sources",
+            type=Path,
+            help=(
+                "operator-local JSON object selecting the live N5-to-N4 "
+                "serve gate; relative paths resolve from this file"
+            ),
+        )
+        if include_shared_sources:
+            command.add_argument(
+                "--deployment-binding-dir", type=Path, required=True
+            )
+            command.add_argument(
+                "--logical-plan-dir", type=Path, required=True
+            )
+            command.add_argument("--scenario", type=Path, required=True)
+            command.add_argument(
+                "--container-plan-dir", type=Path, required=True
+            )
+
+    local_semantic_smoke_run = subcommands.add_parser(
+        "run-simulator-full-flow-local-semantic-smokes",
+        help=(
+            "run the ten semantic interoperability smokes after verifying "
+            "the source-bound N4 serve-frozen authorization"
+        ),
+    )
+    local_semantic_smoke_run.add_argument(
+        "--local-semantic-admission-dir", type=Path, required=True
+    )
+    add_n4_serve_gate_sources(
+        local_semantic_smoke_run,
+        include_shared_sources=True,
+    )
+    local_semantic_smoke_run.add_argument("--run-id", required=True)
+    local_semantic_smoke_run.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    local_semantic_smoke_run.add_argument("--flowmesh-base-url")
+    local_semantic_smoke_run.add_argument(
+        "--task-timeout", type=int, default=900
+    )
+    local_semantic_smoke_run.add_argument(
+        "--poll-interval", type=_positive_finite_float, default=2.0
+    )
+    local_semantic_smoke_run.add_argument("--compact", action="store_true")
+
+    local_semantic_smoke_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-local-semantic-smokes",
+        help="verify the ten-smoke receipt, N4 gate, and frozen sources",
+    )
+    local_semantic_smoke_verify.add_argument(
+        "--smoke-dir", type=Path, required=True
+    )
+    local_semantic_smoke_verify.add_argument(
+        "--local-semantic-admission-dir", type=Path, required=True
+    )
+    add_n4_serve_gate_sources(
+        local_semantic_smoke_verify,
+        include_shared_sources=True,
+    )
+    local_semantic_smoke_verify.add_argument("--compact", action="store_true")
+
+    def add_local_semantic_matrix_gate_sources(
+        command: argparse.ArgumentParser,
+    ) -> None:
+        command.add_argument(
+            "--local-semantic-admission-dir", type=Path, required=True
+        )
+        command.add_argument("--smoke-dir", type=Path, required=True)
+        add_n4_serve_gate_sources(
+            command,
+            include_shared_sources=False,
+        )
+        command.add_argument(
+            "--semantic-matrix-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--deployment-binding-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--logical-plan-dir", type=Path, required=True
+        )
+        command.add_argument("--scenario", type=Path, required=True)
+        command.add_argument(
+            "--container-plan-dir", type=Path, required=True
+        )
+        command.add_argument("--public-task-set", type=Path, required=True)
+        command.add_argument(
+            "--artifact-bindings", type=Path, required=True
+        )
+
+    local_semantic_matrix_run = subcommands.add_parser(
+        "run-simulator-full-flow-local-semantic-matrix",
+        help=(
+            "run or resume the semantic 64-trial matrix only after a "
+            "verified source-bound ten-smoke receipt"
+        ),
+    )
+    add_local_semantic_matrix_gate_sources(local_semantic_matrix_run)
+    local_semantic_matrix_run.add_argument("--run-id", required=True)
+    local_semantic_matrix_run.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    local_semantic_matrix_run.add_argument("--flowmesh-base-url")
+    local_semantic_matrix_run.add_argument(
+        "--task-timeout", type=int, default=900
+    )
+    local_semantic_matrix_run.add_argument(
+        "--poll-interval", type=_positive_finite_float, default=2.0
+    )
+    local_semantic_matrix_run.add_argument(
+        "--acknowledge-failed-entry-sha256"
+    )
+    local_semantic_matrix_run.add_argument("--compact", action="store_true")
+
+    local_semantic_matrix_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-local-semantic-matrix",
+        help="verify the source-bound smoke gate and completed semantic run",
+    )
+    add_local_semantic_matrix_gate_sources(local_semantic_matrix_verify)
+    local_semantic_matrix_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    local_semantic_matrix_verify.add_argument("--compact", action="store_true")
+
+    semantic_route_serve = subcommands.add_parser(
+        "serve-simulator-full-flow-semantic-route",
+        help=(
+            "serve one N7/N8 catalog-bound semantic route coordinator using "
+            "public frozen inputs and runtime-only credentials"
+        ),
+    )
+    semantic_route_serve.add_argument(
+        "--node-id", choices=("N7", "N8"), required=True
+    )
+    for flag in (
+        "local-semantic-admission-dir",
+        "n1-public-commitment-dir",
+        "artifact-binding-dir",
+        "n2-index-package-dir",
+        "n3-package-dir",
+        "n4-package-dir",
+        "exact-range-catalog-dir",
+        "provisioning-catalog-dir",
+        "index-query-plan-catalog-dir",
+        "state-dir",
+    ):
+        semantic_route_serve.add_argument(
+            "--" + flag, type=Path, required=True
+        )
+    for flag in (
+        "n2-index-base-url",
+        "n7-index-base-url",
+        "n8-index-base-url",
+        "n3-data-agent-base-url",
+        "n4-data-agent-base-url",
+        "n7-cache-base-url",
+        "n8-cache-base-url",
+        "n7-cache-id",
+        "n8-cache-id",
+        "n7-node-health-base-url",
+        "n8-node-health-base-url",
+        "n6-base-url",
+        "n1-base-url",
+        "n1-verification-base-url",
+        "semantic-model",
+    ):
+        semantic_route_serve.add_argument("--" + flag, required=True)
+    semantic_route_serve.add_argument(
+        "--simulator-private-http-hosts",
+        default="",
+        help=(
+            "comma-separated pathfinder-sim-* or pathfinder-full-flow-* "
+            "container hostnames permitted for private HTTP"
+        ),
+    )
+    semantic_route_serve.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=300.0
+    )
+    semantic_route_serve.add_argument(
+        "--max-artifact-bytes", type=int, default=2 * 1024 * 1024 * 1024
+    )
+    semantic_route_serve.add_argument("--host", default="0.0.0.0")
+    semantic_route_serve.add_argument("--port", type=int, required=True)
+
+    service_bootstrap_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-service-bootstrap",
+        help="freeze endpoint-free N1-N8 process startup contracts",
+    )
+    service_bootstrap_freeze.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    service_bootstrap_freeze.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    service_bootstrap_freeze.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    service_bootstrap_freeze.add_argument("--bootstrap-id", required=True)
+    service_bootstrap_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    service_bootstrap_freeze.add_argument("--compact", action="store_true")
+
+    service_bootstrap_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-service-bootstrap",
+        help="re-derive and verify N1-N8 process startup contracts",
+    )
+    service_bootstrap_verify.add_argument(
+        "--bootstrap-dir", type=Path, required=True
+    )
+    service_bootstrap_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    service_bootstrap_verify.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    service_bootstrap_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    service_bootstrap_verify.add_argument("--compact", action="store_true")
+
+    deployment_build = subcommands.add_parser(
+        "build-simulator-full-flow-deployment",
+        help="bind every logical full-flow service to a concrete deployment",
+    )
+    deployment_build.add_argument("--logical-plan-dir", type=Path, required=True)
+    deployment_build.add_argument("--scenario", type=Path, required=True)
+    deployment_build.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    deployment_build.add_argument(
+        "--deployment-source", type=Path, required=True
+    )
+    deployment_build.add_argument("--output-dir", type=Path, required=True)
+    deployment_build.add_argument("--compact", action="store_true")
+
+    deployment_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-deployment",
+        help="verify all service, representation, and state bindings offline",
+    )
+    deployment_verify.add_argument("--binding-dir", type=Path, required=True)
+    deployment_verify.add_argument("--logical-plan-dir", type=Path, required=True)
+    deployment_verify.add_argument("--scenario", type=Path, required=True)
+    deployment_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    deployment_verify.add_argument("--compact", action="store_true")
+
+    deployment_preflight = subcommands.add_parser(
+        "preflight-simulator-full-flow-deployment",
+        help="read-only health probe every distinct full-flow service origin",
+    )
+    deployment_preflight.add_argument("--binding-dir", type=Path, required=True)
+    deployment_preflight.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    deployment_preflight.add_argument("--scenario", type=Path, required=True)
+    deployment_preflight.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    deployment_preflight.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=5.0
+    )
+    deployment_preflight.add_argument("--compact", action="store_true")
+
+    compose_overlay_render = subcommands.add_parser(
+        "render-simulator-full-flow-compose-overlay",
+        help="freeze a unified N1-N8 Compose overlay without launching it",
+    )
+    compose_overlay_render.add_argument(
+        "--service-bootstrap-dir", type=Path, required=True
+    )
+    compose_overlay_render.add_argument(
+        "--deployment-binding-dir", type=Path, required=True
+    )
+    compose_overlay_render.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    compose_overlay_render.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    compose_overlay_render.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    compose_overlay_render.add_argument("--overlay-id", required=True)
+    compose_overlay_render.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    compose_overlay_render.add_argument("--compact", action="store_true")
+
+    compose_overlay_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-compose-overlay",
+        help="verify a unified N1-N8 Compose overlay from source contracts",
+    )
+    compose_overlay_verify.add_argument(
+        "--overlay-dir", type=Path, required=True
+    )
+    compose_overlay_verify.add_argument(
+        "--service-bootstrap-dir", type=Path, required=True
+    )
+    compose_overlay_verify.add_argument(
+        "--deployment-binding-dir", type=Path, required=True
+    )
+    compose_overlay_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    compose_overlay_verify.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    compose_overlay_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    compose_overlay_verify.add_argument("--compact", action="store_true")
+
+    deployment_template_generate = subcommands.add_parser(
+        "generate-simulator-full-flow-deployment-template",
+        help=(
+            "generate an endpoint-free deployment source template for all "
+            "logical services"
+        ),
+    )
+    deployment_template_generate.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    deployment_template_generate.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    deployment_template_generate.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    deployment_template_generate.add_argument("--template-id", required=True)
+    deployment_template_generate.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    deployment_template_generate.add_argument("--compact", action="store_true")
+
+    deployment_template_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-deployment-template",
+        help="verify a full-flow deployment source template offline",
+    )
+    deployment_template_verify.add_argument(
+        "--template-dir", type=Path, required=True
+    )
+    deployment_template_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    deployment_template_verify.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    deployment_template_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    deployment_template_verify.add_argument("--compact", action="store_true")
+
+    deployment_source_validate = subcommands.add_parser(
+        "validate-simulator-full-flow-deployment-source",
+        help=(
+            "validate an operator-completed deployment source without "
+            "publishing a binding"
+        ),
+    )
+    deployment_source_validate.add_argument(
+        "--deployment-source", type=Path, required=True
+    )
+    deployment_source_validate.add_argument(
+        "--template-dir", type=Path, required=True
+    )
+    deployment_source_validate.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    deployment_source_validate.add_argument(
+        "--scenario", type=Path, required=True
+    )
+    deployment_source_validate.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    deployment_source_validate.add_argument("--compact", action="store_true")
+
+    n3_raw_build = subcommands.add_parser(
+        "build-simulator-n3-raw-data-plane",
+        help="freeze authoritative raw MP4 bytes into a portable N3 package",
+    )
+    n3_raw_build.add_argument(
+        "--binding-manifest", type=Path, required=True
+    )
+    n3_raw_build.add_argument("--output-dir", type=Path, required=True)
+    n3_raw_build.add_argument("--compact", action="store_true")
+
+    n3_raw_verify = subcommands.add_parser(
+        "verify-simulator-n3-raw-data-plane",
+        help="verify a portable N3 raw/cold Data Agent package offline",
+    )
+    n3_raw_verify.add_argument("--output-dir", type=Path, required=True)
+    n3_raw_verify.add_argument("--compact", action="store_true")
+
+    n4_derived_build = subcommands.add_parser(
+        "build-simulator-n4-derived-data-plane",
+        help=(
+            "freeze frame bundles and multimodal digests into a portable "
+            "N4 Data Agent package"
+        ),
+    )
+    n4_derived_build.add_argument(
+        "--binding-manifest", type=Path, required=True
+    )
+    n4_derived_build.add_argument("--output-dir", type=Path, required=True)
+    n4_derived_build.add_argument("--compact", action="store_true")
+
+    n4_derived_verify = subcommands.add_parser(
+        "verify-simulator-n4-derived-data-plane",
+        help="verify a portable N4 derived-representation package offline",
+    )
+    n4_derived_verify.add_argument("--output-dir", type=Path, required=True)
+    n4_derived_verify.add_argument("--compact", action="store_true")
+
+    n2_index_verify = subcommands.add_parser(
+        "verify-simulator-n2-index",
+        help="verify a portable N2 index package offline",
+    )
+    n2_index_verify.add_argument("--output-dir", type=Path, required=True)
+    n2_index_verify.add_argument("--compact", action="store_true")
+
+    n2_index_serve = subcommands.add_parser(
+        "serve-simulator-n2-index",
+        help="serve a frozen N2 index package without embedding its endpoint",
+    )
+    n2_index_serve.add_argument("--package-dir", type=Path, required=True)
+    n2_index_serve.add_argument(
+        "--node-id",
+        choices=("N2", "N7", "N8"),
+        default="N2",
+        help="logical index-service identity; frozen index bytes are unchanged",
+    )
+    n2_index_serve.add_argument("--host", default="0.0.0.0")
+    n2_index_serve.add_argument("--port", type=int, default=9082)
+    n2_index_serve.add_argument(
+        "--require-token",
+        action="store_true",
+        help="require PATHFINDER_N2_INDEX_TOKEN at startup",
+    )
+
+    cache_serve = subcommands.add_parser(
+        "serve-simulator-full-flow-cache",
+        help="serve a durable real-byte cache on logical N7 or N8",
+    )
+    cache_serve.add_argument("--node-id", choices=("N7", "N8"), required=True)
+    cache_serve.add_argument("--cache-id", required=True)
+    cache_serve.add_argument("--state-dir", type=Path, required=True)
+    cache_serve.add_argument("--capacity-bytes", type=int, required=True)
+    cache_serve.add_argument("--host", default="0.0.0.0")
+    cache_serve.add_argument("--port", type=int, default=9081)
+    cache_serve.add_argument(
+        "--token-env-name",
+        choices=(
+            "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+            "PATHFINDER_N7_W4_CACHE_TOKEN",
+            "PATHFINDER_N8_W4_CACHE_TOKEN",
+        ),
+        default="PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+        help="runtime-only bearer-token environment name",
+    )
+    cache_serve.add_argument(
+        "--fallback-token-env-name",
+        choices=(
+            "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+            "PATHFINDER_N7_W4_CACHE_TOKEN",
+            "PATHFINDER_N8_W4_CACHE_TOKEN",
+        ),
+        help="optional runtime-only fallback bearer-token environment name",
+    )
+    cache_serve.add_argument(
+        "--max-artifact-bytes", type=int, default=64 * 1024 * 1024
+    )
+
+    n5_serve = subcommands.add_parser(
+        "serve-simulator-n5-materializer",
+        help="serve durable handle-based N5 frame-bundle materialization",
+    )
+    n5_serve.add_argument("--state-dir", type=Path, required=True)
+    n5_serve.add_argument("--host", default="0.0.0.0")
+    n5_serve.add_argument("--port", type=int, default=9085)
+
+    live_provisioning_run = subcommands.add_parser(
+        "run-simulator-n5-n4-live-frame-bundle-smoke",
+        help=(
+            "exercise authenticated local N5 materialization and atomic "
+            "N4 publication for one frozen frame-bundle plan"
+        ),
+    )
+    live_provisioning_run.add_argument(
+        "--n5-plan", type=Path, required=True
+    )
+    live_provisioning_run.add_argument(
+        "--source-video", type=Path, required=True
+    )
+    live_provisioning_run.add_argument("--n5-base-url", required=True)
+    live_provisioning_run.add_argument("--n4-base-url", required=True)
+    live_provisioning_run.add_argument(
+        "--allow-http-simulator-host", action="append", default=[]
+    )
+    live_provisioning_run.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=300.0
+    )
+    live_provisioning_run.add_argument("--smoke-id", required=True)
+    live_provisioning_run.add_argument("--publication-id", required=True)
+    live_provisioning_run.add_argument("--package-id", required=True)
+    live_provisioning_run.add_argument("--catalog-version", required=True)
+    live_provisioning_run.add_argument("--expected-current-catalog-version")
+    live_provisioning_run.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    live_provisioning_run.add_argument("--compact", action="store_true")
+
+    live_provisioning_verify = subcommands.add_parser(
+        "verify-simulator-n5-n4-live-frame-bundle-smoke",
+        help="verify the local N5-to-N4 receipt against its frozen N5 plan",
+    )
+    live_provisioning_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    live_provisioning_verify.add_argument(
+        "--n5-plan", type=Path, required=True
+    )
+    live_provisioning_verify.add_argument("--compact", action="store_true")
+
+    live_digest_run = subcommands.add_parser(
+        "run-simulator-n5-n4-live-digest-smoke",
+        help=(
+            "exercise authenticated local N5 vision-digest generation and "
+            "atomic N4 publication for one frozen digest plan"
+        ),
+    )
+    live_digest_run.add_argument(
+        "--n5-digest-plan-dir", type=Path, required=True
+    )
+    live_digest_run.add_argument(
+        "--source-video", type=Path, required=True
+    )
+    live_digest_run.add_argument("--n5-digest-base-url", required=True)
+    live_digest_run.add_argument("--n4-base-url", required=True)
+    live_digest_run.add_argument(
+        "--allow-http-simulator-host", action="append", default=[]
+    )
+    live_digest_run.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=300.0
+    )
+    live_digest_run.add_argument("--smoke-id", required=True)
+    live_digest_run.add_argument("--request-id", required=True)
+    live_digest_run.add_argument("--publication-id", required=True)
+    live_digest_run.add_argument("--package-id", required=True)
+    live_digest_run.add_argument("--catalog-version", required=True)
+    live_digest_run.add_argument("--expected-current-catalog-version")
+    live_digest_run.add_argument("--output-dir", type=Path, required=True)
+    live_digest_run.add_argument("--compact", action="store_true")
+
+    live_digest_verify = subcommands.add_parser(
+        "verify-simulator-n5-n4-live-digest-smoke",
+        help="verify a local live digest receipt against its plan and video",
+    )
+    live_digest_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    live_digest_verify.add_argument(
+        "--n5-digest-plan-dir", type=Path, required=True
+    )
+    live_digest_verify.add_argument(
+        "--source-video", type=Path, required=True
+    )
+    live_digest_verify.add_argument("--compact", action="store_true")
+
+    def add_bulk_live_sources(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--provisioning-catalog-dir", type=Path, required=True
+        )
+        command.add_argument(
+            "--artifact-binding-dir", type=Path, required=True
+        )
+        command.add_argument("--n4-package-dir", type=Path, required=True)
+
+    bulk_source_manifest_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-bulk-provisioning-source-manifest",
+        help=(
+            "freeze an operator-local, content-bound source manifest for "
+            "every catalog object"
+        ),
+    )
+    add_bulk_live_sources(bulk_source_manifest_freeze)
+    bulk_source_manifest_freeze.add_argument(
+        "--object-mapping", type=Path, required=True
+    )
+    bulk_source_manifest_freeze.add_argument(
+        "--output-path", type=Path, required=True
+    )
+    bulk_source_manifest_freeze.add_argument(
+        "--compact", action="store_true"
+    )
+
+    bulk_live_run = subcommands.add_parser(
+        "run-simulator-full-flow-bulk-live-provisioning",
+        help=(
+            "durably materialize and publish every frozen frame bundle and "
+            "digest through the existing N5-to-N4 live adapters"
+        ),
+    )
+    add_bulk_live_sources(bulk_live_run)
+    bulk_live_run.add_argument(
+        "--operator-source-manifest", type=Path, required=True
+    )
+    bulk_live_run.add_argument(
+        "--n5-frame-base-url",
+        "--n5-base-url",
+        dest="n5_frame_base_url",
+        required=True,
+    )
+    bulk_live_run.add_argument("--n5-digest-base-url", required=True)
+    bulk_live_run.add_argument("--n4-base-url", required=True)
+    bulk_live_run.add_argument(
+        "--allow-http-simulator-host", action="append", default=[]
+    )
+    bulk_live_run.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=300.0
+    )
+    bulk_live_run.add_argument("--run-id", required=True)
+    bulk_live_run.add_argument("--output-dir", type=Path, required=True)
+    bulk_live_run.add_argument("--resume", action="store_true")
+    bulk_live_run.add_argument("--compact", action="store_true")
+
+    bulk_live_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-bulk-live-provisioning",
+        help=(
+            "verify a complete bulk N5-to-N4 run against every frozen and "
+            "operator-local source"
+        ),
+    )
+    add_bulk_live_sources(bulk_live_verify)
+    bulk_live_verify.add_argument(
+        "--operator-source-manifest", type=Path, required=True
+    )
+    bulk_live_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    bulk_live_verify.add_argument("--compact", action="store_true")
+
+    def add_pre_upcloud_readiness_sources(
+        command: argparse.ArgumentParser,
+    ) -> None:
+        for flag in (
+            "provisioning-catalog-dir",
+            "artifact-binding-dir",
+            "n4-package-dir",
+            "logical-route-dir",
+            "scenario",
+            "container-plan-dir",
+            "task-plane-dir",
+            "n3-package-dir",
+            "w4-route-package-dir",
+            "w4-index-package-dir",
+            "w4-index-crosswalk-dir",
+        ):
+            command.add_argument("--" + flag, type=Path, required=True)
+        for flag, help_text in (
+            (
+                "source-archive",
+                "optional source archive/file bound by content digest",
+            ),
+            ("neutral-observation-dir", None),
+            ("neutral-semantic-matrix-run-dir", None),
+            ("semantic-execution-admission-dir", None),
+            ("smoke-gated-semantic-matrix-run-dir", None),
+            ("ten-smoke-dir", None),
+            ("n4-serve-gate-dir", None),
+            ("compose-overlay-dir", None),
+            ("service-bootstrap-dir", None),
+            ("deployment-binding-dir", None),
+            ("semantic-matrix-dir", None),
+            ("public-task-set", None),
+            ("semantic-artifact-binding", None),
+            (
+                "n4-live-gate-sources",
+                "strict local N4 live-gate source descriptor JSON",
+            ),
+            ("n1-oracle-package-dir", None),
+            ("bulk-provisioning-output-dir", None),
+            ("bulk-source-manifest", None),
+            ("bulk-live-receipt-bindings", None),
+            ("w4-component-receipt-dir", None),
+            ("w4-coordinator-run-dir", None),
+            (
+                "w4-retrieval-contract-dir",
+                "private/public W4 retrieval contract used for N1 scoring",
+            ),
+            (
+                "w4-retrieval-evaluation-dir",
+                "source-bound N1 W4 retrieval evaluation output",
+            ),
+            ("flowmesh-matrix-plan-dir", None),
+            ("flowmesh-formal-profile-dir", None),
+            ("flowmesh-coordinator-plan-dir", None),
+            (
+                "flowmesh-matrix-run-dir",
+                "completed 64-trial FlowMesh matrix execution to verify",
+            ),
+            (
+                "flowmesh-w4-plan-dir",
+                "frozen 16-task W4 FlowMesh candidate plan to verify",
+            ),
+            (
+                "flowmesh-w4-run-dir",
+                "completed 16-task W4 FlowMesh candidate execution to verify",
+            ),
+        ):
+            command.add_argument("--" + flag, type=Path, help=help_text)
+        command.add_argument("--source-git-revision", required=True)
+        command.add_argument(
+            "--attest-clean-committed-source",
+            action="store_true",
+            required=True,
+            help=(
+                "operator declaration that the supplied revision is committed "
+                "and the source working tree used for evidence was clean"
+            ),
+        )
+
+    pre_upcloud_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-pre-upcloud-readiness",
+        help=(
+            "freeze a non-mutating offline audit of required, local-live, "
+            "FlowMesh-execution, and UpCloud-only readiness"
+        ),
+    )
+    add_pre_upcloud_readiness_sources(pre_upcloud_freeze)
+    pre_upcloud_freeze.add_argument("--audit-id", required=True)
+    pre_upcloud_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    pre_upcloud_freeze.add_argument("--compact", action="store_true")
+
+    pre_upcloud_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-pre-upcloud-readiness",
+        help="reproduce the offline pre-UpCloud audit from exact sources",
+    )
+    add_pre_upcloud_readiness_sources(pre_upcloud_verify)
+    pre_upcloud_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    pre_upcloud_verify.add_argument("--compact", action="store_true")
+
+    n5_digest_freeze = subcommands.add_parser(
+        "freeze-simulator-n5-digest-plan",
+        help=(
+            "sample one real video and freeze an endpoint-free N5 vision "
+            "digest materialization plan"
+        ),
+    )
+    n5_digest_freeze.add_argument(
+        "--source-video", type=Path, required=True
+    )
+    n5_digest_freeze.add_argument("--object-id", required=True)
+    n5_digest_freeze.add_argument("--model-id", required=True)
+    n5_digest_freeze.add_argument("--plan-id", required=True)
+    n5_digest_freeze.add_argument("--frame-count", type=int, default=16)
+    n5_digest_freeze.add_argument(
+        "--jpeg-max-dimension", type=int, default=768
+    )
+    n5_digest_freeze.add_argument("--seed", type=int, default=0)
+    n5_digest_freeze.add_argument(
+        "--maximum-digest-bytes", type=int, default=256 * 1024
+    )
+    n5_digest_freeze.add_argument("--output-dir", type=Path, required=True)
+    n5_digest_freeze.add_argument("--compact", action="store_true")
+
+    n5_digest_plan_verify = subcommands.add_parser(
+        "verify-simulator-n5-digest-plan",
+        help="verify an N5 digest plan and its exact source video offline",
+    )
+    n5_digest_plan_verify.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    n5_digest_plan_verify.add_argument(
+        "--source-video", type=Path, required=True
+    )
+    n5_digest_plan_verify.add_argument("--compact", action="store_true")
+
+    n5_digest_run = subcommands.add_parser(
+        "run-simulator-n5-digest-materialization",
+        help=(
+            "materialize one N5 digest through the runtime-configured "
+            "OpenAI-compatible vision service"
+        ),
+    )
+    n5_digest_run.add_argument("--plan-dir", type=Path, required=True)
+    n5_digest_run.add_argument("--source-video", type=Path, required=True)
+    n5_digest_run.add_argument("--output-dir", type=Path, required=True)
+    n5_digest_run.add_argument(
+        "--allow-http-simulator-host", action="append", default=[]
+    )
+    n5_digest_run.add_argument(
+        "--timeout-seconds", type=_positive_finite_float, default=180.0
+    )
+    n5_digest_run.add_argument("--max-attempts", type=int, default=3)
+    n5_digest_run.add_argument("--compact", action="store_true")
+
+    n5_digest_output_verify = subcommands.add_parser(
+        "verify-simulator-n5-digest-materialization",
+        help="verify N5 digest bytes and semantic provenance offline",
+    )
+    n5_digest_output_verify.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    n5_digest_output_verify.add_argument(
+        "--plan-dir", type=Path, required=True
+    )
+    n5_digest_output_verify.add_argument(
+        "--source-video", type=Path, required=True
+    )
+    n5_digest_output_verify.add_argument("--compact", action="store_true")
+
+    policy_routes_freeze = subcommands.add_parser(
+        "freeze-simulator-policy-routes",
+        help="bind a prospective W1-W4 AWM assignment to verified routes",
+    )
+    policy_routes_freeze.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    policy_routes_freeze.add_argument("--scenario", type=Path, required=True)
+    policy_routes_freeze.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    policy_routes_freeze.add_argument("--policy-id", required=True)
+    policy_routes_freeze.add_argument("--awm-policy-sha256", required=True)
+    policy_routes_freeze.add_argument(
+        "--assignment",
+        action="append",
+        required=True,
+        help="repeat W1=D0,D1 through W4=...",
+    )
+    policy_routes_freeze.add_argument("--output-dir", type=Path, required=True)
+    policy_routes_freeze.add_argument("--compact", action="store_true")
+
+    policy_routes_verify = subcommands.add_parser(
+        "verify-simulator-policy-routes",
+        help="verify a frozen W1-W4 policy route selection",
+    )
+    policy_routes_verify.add_argument(
+        "--assignment-dir", type=Path, required=True
+    )
+    policy_routes_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    policy_routes_verify.add_argument("--scenario", type=Path, required=True)
+    policy_routes_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    policy_routes_verify.add_argument("--compact", action="store_true")
+
+    oed_routes_freeze = subcommands.add_parser(
+        "freeze-simulator-oed-routes",
+        help="freeze an exact prospective OED trial subset and order",
+    )
+    oed_routes_freeze.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    oed_routes_freeze.add_argument("--scenario", type=Path, required=True)
+    oed_routes_freeze.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    oed_routes_freeze.add_argument("--oed-request-id", required=True)
+    oed_routes_freeze.add_argument("--oed-request-sha256", required=True)
+    oed_routes_freeze.add_argument(
+        "--trial-key", action="append", required=True
+    )
+    oed_routes_freeze.add_argument("--output-dir", type=Path, required=True)
+    oed_routes_freeze.add_argument("--compact", action="store_true")
+
+    oed_routes_verify = subcommands.add_parser(
+        "verify-simulator-oed-routes",
+        help="verify a frozen prospective OED route selection",
+    )
+    oed_routes_verify.add_argument(
+        "--selection-dir", type=Path, required=True
+    )
+    oed_routes_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    oed_routes_verify.add_argument("--scenario", type=Path, required=True)
+    oed_routes_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    oed_routes_verify.add_argument("--compact", action="store_true")
+
+    observations_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-observations",
+        help=(
+            "convert verified full-flow evidence into neutral AWM/OED "
+            "observations without inventing monetary cost"
+        ),
+    )
+    observations_freeze.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    observations_freeze.add_argument("--scenario", type=Path, required=True)
+    observations_freeze.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    observations_freeze.add_argument("--observation-set-id", required=True)
+    observations_freeze_source = (
+        observations_freeze.add_mutually_exclusive_group(required=True)
+    )
+    observations_freeze_source.add_argument(
+        "--evidence-json",
+        type=Path,
+        action="append",
+        help="explicit full-flow evidence JSON; repeat for each trial",
+    )
+    observations_freeze_source.add_argument(
+        "--semantic-matrix-run-dir",
+        type=Path,
+        help=(
+            "verified completed semantic matrix run whose bound public "
+            "route-evidence sidecar supplies all observations"
+        ),
+    )
+    observations_freeze.add_argument(
+        "--external-real-cost-manifest", type=Path
+    )
+    observations_freeze.add_argument(
+        "--n1-oracle-package",
+        type=Path,
+        help=(
+            "privileged offline authentication of hidden-oracle v2 and "
+            "generic semantic-route scores using this package and the "
+            "runtime-only PATHFINDER_N1_ORACLE_EVIDENCE_SECRET"
+        ),
+    )
+    observations_freeze.add_argument(
+        "--semantic-execution-admission-dir",
+        type=Path,
+        help=(
+            "required when evidence uses the promoted generic semantic "
+            "route schema"
+        ),
+    )
+    observations_freeze.add_argument("--output-dir", type=Path, required=True)
+    observations_freeze.add_argument("--compact", action="store_true")
+
+    observations_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-observations",
+        help="verify neutral observations against their source evidence",
+    )
+    observations_verify.add_argument(
+        "--observation-dir", type=Path, required=True
+    )
+    observations_verify.add_argument(
+        "--logical-plan-dir", type=Path, required=True
+    )
+    observations_verify.add_argument("--scenario", type=Path, required=True)
+    observations_verify.add_argument(
+        "--container-plan-dir", type=Path, required=True
+    )
+    observations_verify_source = (
+        observations_verify.add_mutually_exclusive_group(required=True)
+    )
+    observations_verify_source.add_argument(
+        "--evidence-json",
+        type=Path,
+        action="append",
+        help="explicit full-flow evidence JSON; repeat for each trial",
+    )
+    observations_verify_source.add_argument(
+        "--semantic-matrix-run-dir",
+        type=Path,
+        help=(
+            "verified completed semantic matrix run whose bound public "
+            "route-evidence sidecar supplies all observations"
+        ),
+    )
+    observations_verify.add_argument(
+        "--n1-oracle-package",
+        type=Path,
+        help=(
+            "privileged offline authentication of hidden-oracle v2 and "
+            "generic semantic-route scores using this package and the "
+            "runtime-only PATHFINDER_N1_ORACLE_EVIDENCE_SECRET"
+        ),
+    )
+    observations_verify.add_argument(
+        "--semantic-execution-admission-dir",
+        type=Path,
+        help=(
+            "required when evidence uses the promoted generic semantic "
+            "route schema"
+        ),
+    )
+    observations_verify.add_argument("--compact", action="store_true")
+
+    neutral_analysis_freeze = subcommands.add_parser(
+        "freeze-simulator-neutral-awm-oed-analysis",
+        help=(
+            "freeze an offline quality/infrastructure AWM/OED analysis of "
+            "a verified complete neutral 4x8x2 observation package"
+        ),
+    )
+    neutral_analysis_freeze.add_argument(
+        "--observation-dir", type=Path, required=True
+    )
+    neutral_analysis_freeze.add_argument("--analysis-id", required=True)
+    neutral_analysis_freeze.add_argument(
+        "--baseline-design-id",
+        choices=tuple(f"D{index}" for index in range(8)),
+        default="D0",
+    )
+    neutral_analysis_freeze.add_argument(
+        "--oed-selection-size",
+        type=_neutral_oed_selection_size,
+        default=4,
+        help="number of W1-W4 fresh-workload pairs to prioritize (1-4)",
+    )
+    neutral_analysis_freeze.add_argument(
+        "--require-real-cost",
+        action="store_true",
+        help="fail closed unless the observation package binds external costs",
+    )
+    neutral_analysis_freeze.add_argument(
+        "--alpha", type=_unit_interval_float, default=0.05
+    )
+    neutral_analysis_freeze.add_argument(
+        "--delta-success-margin",
+        type=_closed_unit_interval_float,
+        default=0.0,
+    )
+    neutral_analysis_freeze.add_argument(
+        "--minimum-cost-saving", type=_finite_float, default=0.0
+    )
+    neutral_analysis_freeze.add_argument(
+        "--cost-saving-support",
+        type=_finite_float,
+        nargs=2,
+        metavar=("LOWER", "UPPER"),
+        help=(
+            "predeclared finite lower and upper support for real cost "
+            "savings; required when external costs are present"
+        ),
+    )
+    neutral_analysis_freeze.add_argument(
+        "--output-dir", type=Path, required=True
+    )
+    neutral_analysis_freeze.add_argument("--compact", action="store_true")
+
+    neutral_analysis_verify = subcommands.add_parser(
+        "verify-simulator-neutral-awm-oed-analysis",
+        help=(
+            "recompute a frozen neutral AWM/OED analysis from its bound "
+            "observation package"
+        ),
+    )
+    neutral_analysis_verify.add_argument(
+        "--observation-dir", type=Path, required=True
+    )
+    neutral_analysis_verify.add_argument(
+        "--analysis-dir", type=Path, required=True
+    )
+    neutral_analysis_verify.add_argument("--compact", action="store_true")
 
     local_preflight = subcommands.add_parser(
         "preflight-local-container-host",
@@ -2425,6 +5204,2561 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             payload = verify_local_container_compose(args.output_dir)
             return _print_payload(payload, compact=args.compact)
+        if args.command == "build-full-flow-data-plane":
+            from .simulator.full_flow_data_plane import (
+                build_full_flow_data_plane_package_from_semantic_specs,
+            )
+
+            payload = build_full_flow_data_plane_package_from_semantic_specs(
+                [
+                    (Path(spec), Path(artifact))
+                    for spec, artifact in args.semantic_spec_artifact
+                ],
+                output_dir=args.output_dir,
+                package_id=args.package_id,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-full-flow-data-plane":
+            from .simulator.full_flow_data_plane import (
+                verify_full_flow_data_plane_package,
+            )
+
+            payload = verify_full_flow_data_plane_package(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-full-flow-compose-binding":
+            from .simulator.full_flow_compose import (
+                build_full_flow_compose_binding,
+            )
+
+            payload = build_full_flow_compose_binding(
+                args.base_compose_package,
+                args.data_plane_package,
+                output_dir=args.output_dir,
+                route_id=args.route_id,
+                data_agent_plan_id=args.data_agent_plan_id,
+                data_agent_plan_epoch=args.data_agent_plan_epoch,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-full-flow-compose-binding":
+            from .simulator.full_flow_compose import (
+                verify_full_flow_compose_binding,
+            )
+
+            payload = verify_full_flow_compose_binding(
+                args.output_dir,
+                base_compose_package=args.base_compose_package,
+                data_plane_package=args.data_plane_package,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-full-flow-deployment-binding":
+            from .integrations.flowmesh.full_flow_trial import (
+                build_full_flow_deployment_binding,
+            )
+
+            payload = build_full_flow_deployment_binding(
+                deployment_binding_id=args.deployment_binding_id,
+                coordinator_api_url=args.coordinator_api_url,
+                worker_alias=args.worker_alias,
+                api_task_timeout_seconds=args.api_task_timeout_seconds,
+                output_path=args.output,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "plan-flowmesh-full-flow-trial":
+            from .integrations.flowmesh.full_flow_trial import (
+                plan_flowmesh_full_flow_trial,
+            )
+
+            payload = plan_flowmesh_full_flow_trial(
+                semantic_spec=args.semantic_spec,
+                data_plane_package=args.data_plane_package,
+                deployment_binding=args.deployment_binding,
+                output_dir=args.output_dir,
+                owner=args.owner,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-full-flow-trial-plan":
+            from .integrations.flowmesh.full_flow_trial import (
+                verify_flowmesh_full_flow_trial_plan,
+            )
+
+            payload = verify_flowmesh_full_flow_trial_plan(args.plan_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-flowmesh-full-flow-trial":
+            from .integrations.flowmesh import (
+                FlowMeshSettings,
+                SdkFlowMeshClient,
+            )
+            from .integrations.flowmesh.full_flow_trial import (
+                run_flowmesh_full_flow_trial,
+                verify_flowmesh_full_flow_trial_plan,
+            )
+
+            verified = verify_flowmesh_full_flow_trial_plan(args.plan_dir)
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=verified["worker_alias"],
+                validate_before_submit=True,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_full_flow_trial(
+                    plan_dir=args.plan_dir,
+                    output_dir=args.output_dir,
+                    client=client,
+                    settings=settings,
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-full-flow-trial-run":
+            from .integrations.flowmesh.full_flow_trial import (
+                verify_flowmesh_full_flow_trial_run,
+            )
+
+            payload = verify_flowmesh_full_flow_trial_run(
+                args.run_dir,
+                plan_dir=args.plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-flowmesh-full-flow-public-request-v2":
+            from .simulator.full_flow_runtime import (
+                FullFlowRouteConfig,
+                build_full_flow_trial_request_v2,
+            )
+
+            public_task = json.loads(
+                args.public_task_binding.read_text(encoding="utf-8")
+            )
+            if not isinstance(public_task, dict):
+                raise ConfigError("public task binding must be a JSON object")
+            route = FullFlowRouteConfig(
+                route_id=args.route_id,
+                requested_location=args.requested_location,
+                data_agent_plan_id=args.data_agent_plan_id,
+                data_agent_plan_epoch=args.data_agent_plan_epoch,
+                quiescence_timeout_seconds=(
+                    args.quiescence_timeout_seconds
+                ),
+            )
+            try:
+                payload = build_full_flow_trial_request_v2(
+                    route_config=route,
+                    full_flow_request_id=args.full_flow_request_id,
+                    run_id=args.run_id,
+                    trial_id=args.trial_id,
+                    trial_key=args.trial_key,
+                    workload_id=public_task["workload_id"],
+                    task_class_id=public_task["task_class_id"],
+                    object_id=public_task["object_id"],
+                    artifact_sha256=args.artifact_sha256,
+                    artifact_size_bytes=args.artifact_size_bytes,
+                    object_catalog_version=args.object_catalog_version,
+                    expected_model=args.expected_model,
+                    question=public_task["question"],
+                    answer_options=public_task["answer_options"],
+                    success_scoring_rule=public_task[
+                        "success_scoring_rule"
+                    ],
+                    oracle_id=args.oracle_id,
+                    task_binding_sha256=public_task[
+                        "task_binding_sha256"
+                    ],
+                )
+            except KeyError as exc:
+                raise ConfigError(
+                    "public task binding is incomplete"
+                ) from exc
+            target = args.output.resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with target.open("x", encoding="utf-8", newline="\n") as handle:
+                    json.dump(
+                        payload,
+                        handle,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    handle.write("\n")
+            except FileExistsError as exc:
+                raise ConfigError(
+                    "public request output already exists"
+                ) from exc
+            return _print_payload(
+                {
+                    "status": "FROZEN_PUBLIC_FULL_FLOW_REQUEST_V2",
+                    "output": str(target),
+                    "full_flow_request_id": payload[
+                        "full_flow_request_id"
+                    ],
+                    "task_binding_sha256": payload[
+                        "task_binding_sha256"
+                    ],
+                    "frozen_binding_sha256": payload[
+                        "frozen_binding_sha256"
+                    ],
+                    "credentials_recorded": False,
+                },
+                compact=args.compact,
+            )
+        if args.command == "plan-flowmesh-full-flow-trial-v2":
+            from .integrations.flowmesh.full_flow_trial import (
+                plan_flowmesh_full_flow_trial_v2,
+            )
+            from .simulator.full_flow_runtime import FullFlowRouteConfig
+
+            public_request = json.loads(
+                args.public_request.read_text(encoding="utf-8")
+            )
+            if not isinstance(public_request, dict):
+                raise ConfigError("public request must be a JSON object")
+            route = FullFlowRouteConfig(
+                route_id=args.route_id,
+                requested_location=args.requested_location,
+                data_agent_plan_id=args.data_agent_plan_id,
+                data_agent_plan_epoch=args.data_agent_plan_epoch,
+                quiescence_timeout_seconds=(
+                    args.quiescence_timeout_seconds
+                ),
+            )
+            payload = plan_flowmesh_full_flow_trial_v2(
+                public_request=public_request,
+                route_config=route,
+                data_plane_package=args.data_plane_package,
+                deployment_binding=args.deployment_binding,
+                output_dir=args.output_dir,
+                owner=args.owner,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-full-flow-trial-v2-plan":
+            from .integrations.flowmesh.full_flow_trial import (
+                verify_flowmesh_full_flow_trial_v2_plan,
+            )
+
+            payload = verify_flowmesh_full_flow_trial_v2_plan(args.plan_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-flowmesh-full-flow-trial-v2":
+            from .integrations.flowmesh import (
+                FlowMeshSettings,
+                SdkFlowMeshClient,
+            )
+            from .integrations.flowmesh.full_flow_trial import (
+                run_flowmesh_full_flow_trial_v2,
+                verify_flowmesh_full_flow_trial_v2_plan,
+            )
+
+            verified = verify_flowmesh_full_flow_trial_v2_plan(args.plan_dir)
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=verified["worker_alias"],
+                validate_before_submit=True,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_full_flow_trial_v2(
+                    plan_dir=args.plan_dir,
+                    output_dir=args.output_dir,
+                    client=client,
+                    settings=settings,
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-flowmesh-full-flow-trial-v2-run":
+            from .integrations.flowmesh.full_flow_trial import (
+                verify_flowmesh_full_flow_trial_v2_run,
+            )
+
+            n1_secret = None
+            if args.n1_oracle_package is not None:
+                n1_secret_text = os.environ.get(
+                    "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET"
+                )
+                if not n1_secret_text:
+                    raise ConfigError(
+                        "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET is required "
+                        "when --n1-oracle-package is used"
+                    )
+                n1_secret = n1_secret_text.encode("utf-8")
+            payload = verify_flowmesh_full_flow_trial_v2_run(
+                args.run_dir,
+                plan_dir=args.plan_dir,
+                n1_oracle_package_dir=args.n1_oracle_package,
+                n1_evidence_secret=n1_secret,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-n2-index":
+            from .simulator.index_service import build_n2_index_package
+
+            payload = build_n2_index_package(
+                args.source_manifest,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-n1-hidden-oracle":
+            from .simulator.hidden_oracle import build_n1_oracle_package
+
+            payload = build_n1_oracle_package(
+                args.label_source,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n1-hidden-oracle":
+            from .simulator.hidden_oracle import verify_n1_oracle_package
+
+            payload = verify_n1_oracle_package(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-n1-oracle-preselection-commitment"
+        ):
+            from .simulator.hidden_oracle_commitment import (
+                freeze_n1_oracle_preselection_commitment,
+            )
+
+            payload = freeze_n1_oracle_preselection_commitment(
+                args.oracle_package_dir,
+                commitment_id=args.commitment_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-n1-oracle-preselection-commitment"
+        ):
+            from .simulator.hidden_oracle_commitment import (
+                verify_n1_oracle_preselection_commitment,
+            )
+
+            payload = verify_n1_oracle_preselection_commitment(
+                args.commitment_dir,
+                oracle_package_dir=args.oracle_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "serve-simulator-n1-hidden-oracle":
+            from .simulator.hidden_oracle import create_n1_oracle_http_server
+
+            token = os.environ.get("PATHFINDER_N1_ORACLE_TOKEN")
+            secret = os.environ.get("PATHFINDER_N1_ORACLE_EVIDENCE_SECRET")
+            if not token or not secret:
+                raise ConfigError(
+                    "PATHFINDER_N1_ORACLE_TOKEN and "
+                    "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET are required"
+                )
+            server = create_n1_oracle_http_server(
+                args.package_dir,
+                state_db=args.state_db,
+                bearer_token=token,
+                evidence_secret=secret.encode("utf-8"),
+                host=args.host,
+                port=args.port,
+            )
+            try:
+                server.serve_forever(poll_interval=0.2)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+            return 0
+        if args.command == "serve-simulator-n1-remote-verifier":
+            from .simulator.full_flow_n1_remote_verification import (
+                create_n1_remote_verification_http_server,
+            )
+
+            token = os.environ.get("PATHFINDER_N1_VERIFICATION_TOKEN")
+            secret = os.environ.get("PATHFINDER_N1_ORACLE_EVIDENCE_SECRET")
+            if not token or not secret:
+                raise ConfigError(
+                    "PATHFINDER_N1_VERIFICATION_TOKEN and "
+                    "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET are required"
+                )
+            server = create_n1_remote_verification_http_server(
+                args.package_dir,
+                state_db=args.state_db,
+                bearer_token=token,
+                evidence_secret=secret.encode("utf-8"),
+                host=args.host,
+                port=args.port,
+            )
+            try:
+                server.serve_forever(poll_interval=0.2)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+            return 0
+        if args.command == "build-simulator-full-flow-task-plane":
+            from .simulator.full_flow_tasks import build_full_flow_task_plane
+
+            payload = build_full_flow_task_plane(
+                args.semantic_spec,
+                task_plane_id=args.task_plane_id,
+                oracle_id=args.oracle_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-task-plane":
+            from .simulator.full_flow_tasks import verify_full_flow_task_plane
+
+            payload = verify_full_flow_task_plane(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "compile-simulator-full-flow-logical-routes":
+            from .simulator.full_flow_logical_routes import (
+                compile_full_flow_logical_routes,
+            )
+
+            payload = compile_full_flow_logical_routes(
+                args.scenario,
+                args.container_plan_dir,
+                output_dir=args.output_dir,
+                compiler_id=args.compiler_id,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-logical-routes":
+            from .simulator.full_flow_logical_routes import (
+                verify_full_flow_logical_routes,
+            )
+
+            payload = verify_full_flow_logical_routes(
+                args.plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-full-flow-artifact-bindings":
+            from .simulator.full_flow_artifact_bindings import (
+                build_full_flow_artifact_bindings,
+            )
+
+            payload = build_full_flow_artifact_bindings(
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.task_plane_dir,
+                args.n3_package_dir,
+                args.n4_package_dir,
+                binding_set_id=args.binding_set_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-artifact-bindings":
+            from .simulator.full_flow_artifact_bindings import (
+                verify_full_flow_artifact_bindings,
+            )
+
+            payload = verify_full_flow_artifact_bindings(
+                args.output_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.task_plane_dir,
+                args.n3_package_dir,
+                args.n4_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-full-flow-provisioning-catalog":
+            from .simulator.full_flow_provisioning_catalog import (
+                build_full_flow_provisioning_catalog,
+            )
+
+            payload = build_full_flow_provisioning_catalog(
+                args.artifact_binding_dir,
+                args.n4_package_dir,
+                catalog_id=args.catalog_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-provisioning-catalog":
+            from .simulator.full_flow_provisioning_catalog import (
+                verify_full_flow_provisioning_catalog,
+            )
+
+            payload = verify_full_flow_provisioning_catalog(
+                args.catalog_dir,
+                artifact_binding_dir=args.artifact_binding_dir,
+                n4_package_dir=args.n4_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-full-flow-exact-range-catalog":
+            from .simulator.full_flow_exact_range_catalog import (
+                build_full_flow_exact_range_catalog,
+            )
+
+            payload = build_full_flow_exact_range_catalog(
+                args.n3_package_dir,
+                catalog_id=args.catalog_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-exact-range-catalog":
+            from .simulator.full_flow_exact_range_catalog import (
+                verify_full_flow_exact_range_catalog,
+            )
+
+            payload = verify_full_flow_exact_range_catalog(
+                args.catalog_dir,
+                args.n3_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "compile-simulator-full-flow-semantic-matrix":
+            from .simulator.full_flow_semantic_matrix import (
+                compile_full_flow_semantic_matrix,
+            )
+
+            payload = compile_full_flow_semantic_matrix(
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.public_task_set,
+                args.artifact_bindings,
+                output_dir=args.output_dir,
+                compiler_id=args.compiler_id,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-semantic-matrix":
+            from .simulator.full_flow_semantic_matrix import (
+                verify_full_flow_semantic_matrix,
+            )
+
+            payload = verify_full_flow_semantic_matrix(
+                args.plan_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.public_task_set,
+                args.artifact_bindings,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-w4-retrieval-contract"
+        ):
+            from .simulator.full_flow_w4_retrieval_contract import (
+                freeze_full_flow_w4_retrieval_contract,
+            )
+
+            payload = freeze_full_flow_w4_retrieval_contract(
+                args.semantic_matrix_dir,
+                args.retrieval_config,
+                args.representation_manifest,
+                selected_query_id=args.selected_query_id,
+                contract_id=args.contract_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-retrieval-contract"
+        ):
+            from .simulator.full_flow_w4_retrieval_contract import (
+                verify_full_flow_w4_retrieval_contract,
+            )
+
+            payload = verify_full_flow_w4_retrieval_contract(
+                args.contract_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "evaluate-simulator-full-flow-w4-retrieval":
+            from .simulator.full_flow_w4_retrieval_contract import (
+                evaluate_full_flow_w4_retrieval,
+            )
+
+            payload = evaluate_full_flow_w4_retrieval(
+                args.contract_dir,
+                args.observations,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-retrieval-evaluation"
+        ):
+            from .simulator.full_flow_w4_retrieval_contract import (
+                verify_full_flow_w4_retrieval_evaluation,
+            )
+
+            payload = verify_full_flow_w4_retrieval_evaluation(
+                args.output_dir,
+                contract_dir=args.contract_dir,
+                observations_path=args.observations,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-w4-retrieval-runtime"
+        ):
+            from .simulator.full_flow_w4_retrieval_runtime import (
+                freeze_full_flow_w4_retrieval_runtime_overlay,
+            )
+
+            payload = freeze_full_flow_w4_retrieval_runtime_overlay(
+                args.contract_dir,
+                args.local_semantic_admission_dir,
+                runtime_overlay_id=args.runtime_overlay_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-retrieval-runtime"
+        ):
+            from .simulator.full_flow_w4_retrieval_runtime import (
+                verify_full_flow_w4_retrieval_runtime_overlay,
+            )
+
+            payload = verify_full_flow_w4_retrieval_runtime_overlay(
+                args.output_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-simulator-full-flow-w4-lexical-ranker":
+            from .simulator.full_flow_w4_retrieval_runtime import (
+                W4LexicalIndexRankingExecutor,
+                run_full_flow_w4_retrieval_ranker,
+            )
+            from .simulator.index_service import (
+                N2IndexHTTPClient,
+                verify_n2_index_package,
+            )
+
+            token = os.environ.get("PATHFINDER_N2_INDEX_TOKEN")
+            index = verify_n2_index_package(args.index_package_dir)
+            private_hosts = tuple(args.allow_http_simulator_host)
+            urls = {
+                "N2": args.n2_index_base_url,
+                "N7": args.n7_index_base_url,
+                "N8": args.n8_index_base_url,
+            }
+            clients = {
+                node_id: N2IndexHTTPClient(
+                    base_url=base_url,
+                    expected_index_id=index["index_id"],
+                    expected_index_sha256=index["index_sha256"],
+                    bearer_token=token,
+                    timeout_seconds=args.timeout_seconds,
+                    simulator_private_http_hosts=private_hosts,
+                    expected_node_id=node_id,
+                )
+                for node_id, base_url in urls.items()
+            }
+            executor = W4LexicalIndexRankingExecutor(
+                clients=clients,
+                index_package_dir=args.index_package_dir,
+                index_id=index["index_id"],
+                index_sha256=index["index_sha256"],
+                source_manifest_sha256=index["source_manifest_sha256"],
+            )
+            payload = run_full_flow_w4_retrieval_ranker(
+                args.runtime_overlay_dir,
+                run_id=args.run_id,
+                executor=executor,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-w4-ranker-run":
+            from .simulator.full_flow_w4_retrieval_runtime import (
+                verify_full_flow_w4_retrieval_ranker_run,
+            )
+
+            payload = verify_full_flow_w4_retrieval_ranker_run(
+                args.output_dir,
+                runtime_overlay_dir=args.runtime_overlay_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-w4-candidate-routes"
+        ):
+            from .simulator.full_flow_w4_candidate_routes import (
+                freeze_full_flow_w4_candidate_routes,
+            )
+
+            payload = freeze_full_flow_w4_candidate_routes(
+                args.runtime_overlay_dir,
+                args.n3_package_dir,
+                args.n4_package_dir,
+                args.index_package_dir,
+                args.exact_range_catalog_dir,
+                physical_plan_id=args.physical_plan_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-candidate-routes"
+        ):
+            from .simulator.full_flow_w4_candidate_routes import (
+                verify_full_flow_w4_candidate_routes,
+            )
+
+            payload = verify_full_flow_w4_candidate_routes(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-w4-index-artifact-crosswalk"
+        ):
+            from .simulator.full_flow_w4_live_executor import (
+                freeze_full_flow_w4_index_artifact_crosswalk,
+            )
+
+            payload = freeze_full_flow_w4_index_artifact_crosswalk(
+                args.route_package_dir,
+                args.index_package_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-index-artifact-crosswalk"
+        ):
+            from .simulator.full_flow_w4_live_executor import (
+                verify_full_flow_w4_index_artifact_crosswalk,
+            )
+
+            payload = verify_full_flow_w4_index_artifact_crosswalk(
+                args.output_dir,
+                route_package_dir=args.route_package_dir,
+                index_package_dir=args.index_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "run-simulator-full-flow-w4-candidate-conformance"
+        ):
+            from .simulator.full_flow_w4_candidate_coordinator import (
+                DeterministicW4CandidateOperationExecutor,
+                run_full_flow_w4_candidate_coordinator,
+            )
+
+            payload = run_full_flow_w4_candidate_coordinator(
+                args.route_package_dir,
+                run_id=args.run_id,
+                executor=DeterministicW4CandidateOperationExecutor(),
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-candidate-conformance"
+        ):
+            from .simulator.full_flow_w4_candidate_coordinator import (
+                verify_full_flow_w4_candidate_coordinator_run,
+            )
+
+            payload = verify_full_flow_w4_candidate_coordinator_run(
+                args.run_dir,
+                route_package_dir=args.route_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-w4-component-execution-receipt"
+        ):
+            from .simulator.full_flow_w4_live_executor import (
+                freeze_full_flow_w4_component_execution_receipt,
+            )
+
+            payload = freeze_full_flow_w4_component_execution_receipt(
+                args.coordinator_run_dir,
+                route_package_dir=args.route_package_dir,
+                crosswalk_dir=args.crosswalk_dir,
+                index_package_dir=args.index_package_dir,
+                component_events_path=args.component_events,
+                evidence_class=args.evidence_class,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-component-execution-receipt"
+        ):
+            from .simulator.full_flow_w4_live_executor import (
+                verify_full_flow_w4_component_execution_receipt,
+            )
+
+            payload = verify_full_flow_w4_component_execution_receipt(
+                args.output_dir,
+                coordinator_run_dir=args.coordinator_run_dir,
+                route_package_dir=args.route_package_dir,
+                crosswalk_dir=args.crosswalk_dir,
+                index_package_dir=args.index_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "run-simulator-full-flow-w4-local-component-execution"
+        ):
+            from .simulator.full_flow_w4_local_factory import (
+                W4LocalRuntimeInputs,
+            )
+            from .simulator.full_flow_w4_local_run import (
+                run_full_flow_w4_local_component_execution,
+            )
+
+            credential_environment = {
+                "N2 index": ("PATHFINDER_N2_INDEX_TOKEN",),
+                "N7 index": (
+                    "PATHFINDER_N2_INDEX_TOKEN",
+                    "PATHFINDER_N7_INDEX_TOKEN",
+                ),
+                "N8 index": (
+                    "PATHFINDER_N2_INDEX_TOKEN",
+                    "PATHFINDER_N8_INDEX_TOKEN",
+                ),
+                "N3 Data Agent": (
+                    "PATHFINDER_DATA_AGENT_TOKEN",
+                    "PATHFINDER_N3_DATA_AGENT_TOKEN",
+                ),
+                "N4 Data Agent": (
+                    "PATHFINDER_DATA_AGENT_TOKEN",
+                    "PATHFINDER_N4_DATA_AGENT_TOKEN",
+                ),
+                "N7 cache": (
+                    "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+                    "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN",
+                ),
+                "N8 cache": (
+                    "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+                    "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN",
+                ),
+                "N6 semantic": ("PATHFINDER_CONTAINER_NODE_TOKEN",),
+            }
+            credentials = {
+                name: next(
+                    (
+                        os.environ[environment_name]
+                        for environment_name in environment_names
+                        if os.environ.get(environment_name)
+                    ),
+                    None,
+                )
+                for name, environment_names in credential_environment.items()
+            }
+            missing = [
+                "/".join(credential_environment[name])
+                for name, value in credentials.items()
+                if not value
+            ]
+            if missing:
+                raise ConfigError(
+                    "local W4 component execution requires runtime "
+                    "credential environment variables: "
+                    + ", ".join(sorted(missing))
+                )
+            private_hosts = tuple(
+                value.strip()
+                for value in args.simulator_private_http_hosts.split(",")
+                if value.strip()
+            )
+            runtime = W4LocalRuntimeInputs(
+                index_base_urls={
+                    "N2": args.n2_index_base_url,
+                    "N7": args.n7_index_base_url,
+                    "N8": args.n8_index_base_url,
+                },
+                index_bearer_tokens={
+                    "N2": credentials["N2 index"],
+                    "N7": credentials["N7 index"],
+                    "N8": credentials["N8 index"],
+                },
+                index_package_dirs={
+                    "N2": args.n2_index_package_dir,
+                    "N7": args.n7_index_package_dir,
+                    "N8": args.n8_index_package_dir,
+                },
+                data_agent_base_urls={
+                    "N3": args.n3_data_agent_base_url,
+                    "N4": args.n4_data_agent_base_url,
+                },
+                data_agent_bearer_tokens={
+                    "N3": credentials["N3 Data Agent"],
+                    "N4": credentials["N4 Data Agent"],
+                },
+                data_agent_locations={
+                    "N3": args.n3_data_agent_location,
+                    "N4": args.n4_data_agent_location,
+                },
+                cache_base_urls={
+                    "N7": args.n7_cache_base_url,
+                    "N8": args.n8_cache_base_url,
+                },
+                cache_bearer_tokens={
+                    "N7": credentials["N7 cache"],
+                    "N8": credentials["N8 cache"],
+                },
+                cache_ids={
+                    "N7": args.n7_cache_id,
+                    "N8": args.n8_cache_id,
+                },
+                n6_base_url=args.n6_base_url,
+                n6_bearer_token=credentials["N6 semantic"],
+                semantic_model=args.semantic_model,
+                raw_sampler_scratch_dir=args.raw_sampler_scratch_dir,
+                timeout_seconds=args.timeout_seconds,
+                simulator_private_http_hosts=private_hosts,
+            )
+            payload = run_full_flow_w4_local_component_execution(
+                route_package_dir=args.route_package_dir,
+                crosswalk_dir=args.crosswalk_dir,
+                runtime=runtime,
+                run_id=args.run_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-w4-flowmesh-plan"
+        ):
+            from .integrations.flowmesh.w4_candidate_matrix import (
+                plan_flowmesh_w4_candidate_matrix,
+            )
+
+            payload = plan_flowmesh_w4_candidate_matrix(
+                route_package_dir=args.route_package_dir,
+                run_id=args.run_id,
+                worker_alias=args.worker_alias,
+                owner=args.owner,
+                api_task_timeout_seconds=args.api_task_timeout_seconds,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-flowmesh-plan"
+        ):
+            from .integrations.flowmesh.w4_candidate_matrix import (
+                verify_flowmesh_w4_candidate_matrix_plan,
+            )
+
+            payload = verify_flowmesh_w4_candidate_matrix_plan(
+                args.plan_dir,
+                route_package_dir=args.route_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "serve-simulator-full-flow-w4-flowmesh-coordinator"
+        ):
+            from .simulator.full_flow_w4_flowmesh_service import (
+                build_local_full_flow_w4_flowmesh_coordinator,
+                create_full_flow_w4_flowmesh_http_server,
+            )
+            from .simulator.full_flow_w4_local_factory import (
+                W4LocalRuntimeInputs,
+            )
+
+            credential_environment = {
+                "N2 index": ("PATHFINDER_N2_INDEX_TOKEN",),
+                "N7 index": (
+                    "PATHFINDER_N2_INDEX_TOKEN",
+                    "PATHFINDER_N7_INDEX_TOKEN",
+                ),
+                "N8 index": (
+                    "PATHFINDER_N2_INDEX_TOKEN",
+                    "PATHFINDER_N8_INDEX_TOKEN",
+                ),
+                "N3 Data Agent": (
+                    "PATHFINDER_DATA_AGENT_TOKEN",
+                    "PATHFINDER_N3_DATA_AGENT_TOKEN",
+                ),
+                "N4 Data Agent": (
+                    "PATHFINDER_DATA_AGENT_TOKEN",
+                    "PATHFINDER_N4_DATA_AGENT_TOKEN",
+                ),
+                "N7 cache": (
+                    "PATHFINDER_N7_W4_CACHE_TOKEN",
+                    "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+                    "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN",
+                ),
+                "N8 cache": (
+                    "PATHFINDER_N8_W4_CACHE_TOKEN",
+                    "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+                    "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN",
+                ),
+                "N6 semantic": ("PATHFINDER_CONTAINER_NODE_TOKEN",),
+                "W4 ingress": (
+                    "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET",
+                ),
+            }
+            credentials = {
+                name: next(
+                    (
+                        os.environ[environment_name]
+                        for environment_name in environment_names
+                        if os.environ.get(environment_name)
+                    ),
+                    None,
+                )
+                for name, environment_names in credential_environment.items()
+            }
+            missing = [
+                "/".join(credential_environment[name])
+                for name, value in credentials.items()
+                if not value
+            ]
+            if missing:
+                raise ConfigError(
+                    "W4 FlowMesh coordinator requires runtime credential "
+                    "environment variables: " + ", ".join(sorted(missing))
+                )
+            private_hosts = tuple(
+                value.strip()
+                for value in args.simulator_private_http_hosts.split(",")
+                if value.strip()
+            )
+            runtime = W4LocalRuntimeInputs(
+                index_base_urls={
+                    "N2": args.n2_index_base_url,
+                    "N7": args.n7_index_base_url,
+                    "N8": args.n8_index_base_url,
+                },
+                index_bearer_tokens={
+                    "N2": credentials["N2 index"],
+                    "N7": credentials["N7 index"],
+                    "N8": credentials["N8 index"],
+                },
+                index_package_dirs={
+                    "N2": args.n2_index_package_dir,
+                    "N7": args.n7_index_package_dir,
+                    "N8": args.n8_index_package_dir,
+                },
+                data_agent_base_urls={
+                    "N3": args.n3_data_agent_base_url,
+                    "N4": args.n4_data_agent_base_url,
+                },
+                data_agent_bearer_tokens={
+                    "N3": credentials["N3 Data Agent"],
+                    "N4": credentials["N4 Data Agent"],
+                },
+                data_agent_locations={
+                    "N3": args.n3_data_agent_location,
+                    "N4": args.n4_data_agent_location,
+                },
+                cache_base_urls={
+                    "N7": args.n7_cache_base_url,
+                    "N8": args.n8_cache_base_url,
+                },
+                cache_bearer_tokens={
+                    "N7": credentials["N7 cache"],
+                    "N8": credentials["N8 cache"],
+                },
+                cache_ids={
+                    "N7": args.n7_cache_id,
+                    "N8": args.n8_cache_id,
+                },
+                n6_base_url=args.n6_base_url,
+                n6_bearer_token=credentials["N6 semantic"],
+                semantic_model=args.semantic_model,
+                raw_sampler_scratch_dir=args.raw_sampler_scratch_dir,
+                timeout_seconds=args.timeout_seconds,
+                max_artifact_bytes=args.max_artifact_bytes,
+                simulator_private_http_hosts=private_hosts,
+            )
+            coordinator = build_local_full_flow_w4_flowmesh_coordinator(
+                coordinator_node_id=args.coordinator_node_id,
+                route_package_dir=args.route_package_dir,
+                crosswalk_dir=args.crosswalk_dir,
+                runtime=runtime,
+                state_db=args.state_db,
+            )
+            server = create_full_flow_w4_flowmesh_http_server(
+                coordinator,
+                host=args.host,
+                port=args.port,
+                hmac_secret=credentials["W4 ingress"],
+            )
+            _print_payload(coordinator.health(), compact=args.compact)
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+            return 0
+        if args.command == "run-simulator-full-flow-w4-flowmesh-matrix":
+            from .integrations.flowmesh import (
+                FlowMeshSettings,
+                SdkFlowMeshClient,
+            )
+            from .integrations.flowmesh.w4_candidate_matrix import (
+                full_flow_w4_hmac_header_provider,
+                run_flowmesh_w4_candidate_matrix,
+            )
+
+            ingress_secret = os.environ.get(
+                "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET"
+            )
+            if not ingress_secret:
+                raise ConfigError(
+                    "W4 FlowMesh run requires "
+                    "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET"
+                )
+            private_hosts = tuple(
+                value.strip()
+                for value in args.simulator_private_http_hosts.split(",")
+                if value.strip()
+            )
+            settings = FlowMeshSettings.from_environment(
+                base_url=args.flowmesh_base_url,
+                poll_interval_seconds=args.poll_interval,
+                worker_alias=args.worker_alias,
+                validate_before_submit=True,
+            )
+            client = SdkFlowMeshClient(settings)
+            try:
+                payload = run_flowmesh_w4_candidate_matrix(
+                    plan_dir=args.plan_dir,
+                    route_package_dir=args.route_package_dir,
+                    crosswalk_dir=args.crosswalk_dir,
+                    index_package_dir=args.index_package_dir,
+                    output_dir=args.output_dir,
+                    coordinator_base_urls={
+                        "N7": args.n7_coordinator_base_url,
+                        "N8": args.n8_coordinator_base_url,
+                    },
+                    runtime_header_provider=(
+                        full_flow_w4_hmac_header_provider(ingress_secret)
+                    ),
+                    client=client,
+                    settings=settings,
+                    simulator_private_http_hosts=private_hosts,
+                )
+            finally:
+                client.close()
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-w4-flowmesh-matrix"
+        ):
+            from .integrations.flowmesh.w4_candidate_matrix import (
+                verify_flowmesh_w4_candidate_matrix_run,
+            )
+
+            payload = verify_flowmesh_w4_candidate_matrix_run(
+                args.run_dir,
+                plan_dir=args.plan_dir,
+                route_package_dir=args.route_package_dir,
+                crosswalk_dir=args.crosswalk_dir,
+                index_package_dir=args.index_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-semantic-execution-admission"
+        ):
+            from .simulator.full_flow_semantic_execution_admission import (
+                freeze_full_flow_semantic_execution_admission,
+            )
+
+            payload = freeze_full_flow_semantic_execution_admission(
+                args.semantic_matrix_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.public_task_set,
+                args.artifact_bindings,
+                args.n1_oracle_package_dir,
+                worker_alias=args.worker_alias,
+                admission_id=args.admission_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-semantic-execution-admission"
+        ):
+            from .simulator.full_flow_semantic_execution_admission import (
+                verify_full_flow_semantic_execution_admission,
+            )
+
+            payload = verify_full_flow_semantic_execution_admission(
+                args.admission_dir,
+                args.semantic_matrix_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.public_task_set,
+                args.artifact_bindings,
+                args.n1_oracle_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "preflight-simulator-full-flow-semantic-artifacts"
+        ):
+            from .simulator.full_flow_artifact_preflight import (
+                preflight_full_flow_semantic_artifacts_over_http,
+            )
+
+            shared_token = os.environ.get("PATHFINDER_DATA_AGENT_TOKEN")
+            n3_token = (
+                os.environ.get("PATHFINDER_N3_DATA_AGENT_TOKEN")
+                or shared_token
+            )
+            n4_token = (
+                os.environ.get("PATHFINDER_N4_DATA_AGENT_TOKEN")
+                or shared_token
+            )
+            if not n3_token or not n4_token:
+                raise ConfigError(
+                    "node-specific PATHFINDER_N3_DATA_AGENT_TOKEN and "
+                    "PATHFINDER_N4_DATA_AGENT_TOKEN, or the shared "
+                    "PATHFINDER_DATA_AGENT_TOKEN, are required"
+                )
+            payload = preflight_full_flow_semantic_artifacts_over_http(
+                args.semantic_execution_admission_dir,
+                args.n3_package_dir,
+                args.n4_package_dir,
+                n3_base_url=args.n3_data_agent_url,
+                n4_base_url=args.n4_data_agent_url,
+                n3_token=n3_token,
+                n4_token=n4_token,
+                preflight_id=args.preflight_id,
+                output_dir=args.output_dir,
+                timeout_seconds=args.timeout_seconds,
+                max_retries=args.max_retries,
+                max_artifact_bytes=args.max_artifact_bytes,
+                telemetry_quiescence_timeout_seconds=(
+                    args.telemetry_quiescence_timeout_seconds
+                ),
+                simulator_private_http_hosts=tuple(
+                    args.simulator_private_http_host
+                ),
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-semantic-artifact-preflight"
+        ):
+            from .simulator.full_flow_artifact_preflight import (
+                verify_full_flow_semantic_artifact_preflight,
+            )
+
+            payload = verify_full_flow_semantic_artifact_preflight(
+                args.preflight_dir,
+                semantic_execution_admission_dir=(
+                    args.semantic_execution_admission_dir
+                ),
+                n3_package_dir=args.n3_package_dir,
+                n4_package_dir=args.n4_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "promote-simulator-full-flow-local-semantic-execution-admission"
+        ):
+            from .simulator.full_flow_local_semantic_admission import (
+                promote_full_flow_local_semantic_execution_admission,
+            )
+
+            payload = promote_full_flow_local_semantic_execution_admission(
+                args.legacy_admission_dir,
+                args.semantic_matrix_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.public_task_set,
+                args.artifact_bindings,
+                args.n1_oracle_package_dir,
+                args.artifact_preflight_dir,
+                args.exact_range_catalog_dir,
+                args.n3_package_dir,
+                args.provisioning_catalog_dir,
+                args.n4_package_dir,
+                semantics_mode=args.semantics_mode,
+                promotion_id=args.promotion_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-local-semantic-execution-admission"
+        ):
+            from .simulator.full_flow_local_semantic_admission import (
+                verify_full_flow_local_semantic_execution_admission,
+            )
+
+            payload = verify_full_flow_local_semantic_execution_admission(
+                args.admission_dir,
+                args.legacy_admission_dir,
+                args.semantic_matrix_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.public_task_set,
+                args.artifact_bindings,
+                args.n1_oracle_package_dir,
+                args.artifact_preflight_dir,
+                args.exact_range_catalog_dir,
+                args.n3_package_dir,
+                args.provisioning_catalog_dir,
+                args.n4_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-local-semantic-runtime-package"
+        ):
+            from .simulator.full_flow_local_semantic_admission import (
+                verify_full_flow_local_semantic_runtime_package,
+            )
+
+            payload = verify_full_flow_local_semantic_runtime_package(
+                args.admission_dir
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "build-simulator-full-flow-index-query-plan-catalog"
+        ):
+            from .simulator.full_flow_index_query_plan_catalog import (
+                build_full_flow_index_query_plan_catalog,
+            )
+
+            payload = build_full_flow_index_query_plan_catalog(
+                args.local_semantic_admission_dir,
+                args.n2_index_package_dir,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-index-query-plan-catalog"
+        ):
+            from .simulator.full_flow_index_query_plan_catalog import (
+                verify_full_flow_index_query_plan_catalog,
+            )
+
+            payload = verify_full_flow_index_query_plan_catalog(
+                args.catalog_dir,
+                local_semantic_admission_dir=(
+                    args.local_semantic_admission_dir
+                ),
+                n2_index_package_dir=args.n2_index_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-n4-preprovisioned-serve-gate"
+        ):
+            from .simulator.full_flow_n4_serve_gate import (
+                freeze_full_flow_n4_preprovisioned_serve_gate,
+            )
+
+            payload = freeze_full_flow_n4_preprovisioned_serve_gate(
+                args.compose_overlay_dir,
+                args.service_bootstrap_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.provisioning_catalog_dir,
+                args.artifact_binding_dir,
+                args.n4_package_dir,
+                gate_id=args.gate_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-n4-preprovisioned-serve-gate"
+        ):
+            from .simulator.full_flow_n4_serve_gate import (
+                verify_full_flow_n4_preprovisioned_serve_gate,
+            )
+
+            payload = verify_full_flow_n4_preprovisioned_serve_gate(
+                args.gate_dir,
+                args.compose_overlay_dir,
+                args.service_bootstrap_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.provisioning_catalog_dir,
+                args.artifact_binding_dir,
+                args.n4_package_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command in {
+            "freeze-simulator-full-flow-n4-live-serve-gate",
+            "verify-simulator-full-flow-n4-live-serve-gate",
+        }:
+            live_receipt_bindings = _load_strict_json_file(
+                args.live_receipt_bindings,
+                label="live receipt bindings",
+                expected_type=list,
+            )
+            if args.command.startswith("freeze-"):
+                from .simulator.full_flow_n4_live_serve_gate import (
+                    freeze_full_flow_n4_live_serve_gate,
+                )
+
+                payload = freeze_full_flow_n4_live_serve_gate(
+                    live_receipt_bindings,
+                    args.n4_publication_store_root,
+                    args.rebound_artifact_binding_dir,
+                    args.rebound_semantic_matrix_dir,
+                    args.rebound_admission_dir,
+                    gate_id=args.gate_id,
+                    output_dir=args.output_dir,
+                )
+            else:
+                from .simulator.full_flow_n4_live_serve_gate import (
+                    verify_full_flow_n4_live_serve_gate,
+                )
+
+                payload = verify_full_flow_n4_live_serve_gate(
+                    args.gate_dir,
+                    live_receipt_bindings,
+                    args.n4_publication_store_root,
+                    args.rebound_artifact_binding_dir,
+                    args.rebound_semantic_matrix_dir,
+                    args.rebound_admission_dir,
+                )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-simulator-full-flow-local-semantic-smokes":
+            from .simulator.full_flow_local_semantic_smoke import (
+                run_full_flow_local_semantic_smokes,
+            )
+
+            n4_live_gate_sources = _load_n4_live_gate_sources(
+                args.n4_live_gate_sources
+            )
+            with _local_semantic_flowmesh_executor(
+                args.local_semantic_admission_dir,
+                run_id=args.run_id,
+                flowmesh_base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+            ) as executor:
+                payload = run_full_flow_local_semantic_smokes(
+                    args.local_semantic_admission_dir,
+                    args.n4_serve_gate_dir,
+                    args.compose_overlay_dir,
+                    args.service_bootstrap_dir,
+                    args.deployment_binding_dir,
+                    args.logical_plan_dir,
+                    args.scenario,
+                    args.container_plan_dir,
+                    args.provisioning_catalog_dir,
+                    args.artifact_binding_dir,
+                    args.n4_package_dir,
+                    run_id=args.run_id,
+                    executor=executor,
+                    output_dir=args.output_dir,
+                    n4_live_gate_sources=n4_live_gate_sources,
+                )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-local-semantic-smokes":
+            from .simulator.full_flow_local_semantic_smoke import (
+                verify_full_flow_local_semantic_smokes,
+            )
+
+            n4_live_gate_sources = _load_n4_live_gate_sources(
+                args.n4_live_gate_sources
+            )
+            payload = verify_full_flow_local_semantic_smokes(
+                args.smoke_dir,
+                local_semantic_admission_dir=(
+                    args.local_semantic_admission_dir
+                ),
+                n4_serve_gate_dir=args.n4_serve_gate_dir,
+                compose_overlay_dir=args.compose_overlay_dir,
+                service_bootstrap_dir=args.service_bootstrap_dir,
+                deployment_binding_dir=args.deployment_binding_dir,
+                logical_route_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                provisioning_catalog_dir=args.provisioning_catalog_dir,
+                artifact_binding_dir=args.artifact_binding_dir,
+                n4_package_dir=args.n4_package_dir,
+                n4_live_gate_sources=n4_live_gate_sources,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-simulator-full-flow-local-semantic-matrix":
+            from .simulator.full_flow_local_semantic_matrix_gate import (
+                run_smoke_gated_full_flow_local_semantic_matrix,
+            )
+
+            n4_live_gate_sources = _load_n4_live_gate_sources(
+                args.n4_live_gate_sources
+            )
+            with _local_semantic_flowmesh_executor(
+                args.local_semantic_admission_dir,
+                run_id=args.run_id,
+                flowmesh_base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+            ) as executor:
+                payload = run_smoke_gated_full_flow_local_semantic_matrix(
+                    args.local_semantic_admission_dir,
+                    args.smoke_dir,
+                    args.n4_serve_gate_dir,
+                    args.compose_overlay_dir,
+                    args.service_bootstrap_dir,
+                    args.provisioning_catalog_dir,
+                    args.artifact_binding_dir,
+                    args.n4_package_dir,
+                    args.semantic_matrix_dir,
+                    args.deployment_binding_dir,
+                    args.logical_plan_dir,
+                    args.scenario,
+                    args.container_plan_dir,
+                    args.public_task_set,
+                    args.artifact_bindings,
+                    run_id=args.run_id,
+                    output_dir=args.output_dir,
+                    executor=executor,
+                    acknowledge_failed_entry_sha256=(
+                        args.acknowledge_failed_entry_sha256
+                    ),
+                    n4_live_gate_sources=n4_live_gate_sources,
+                )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-local-semantic-matrix":
+            from .simulator.full_flow_local_semantic_matrix_gate import (
+                verify_smoke_gated_full_flow_local_semantic_matrix_run,
+            )
+
+            n4_live_gate_sources = _load_n4_live_gate_sources(
+                args.n4_live_gate_sources
+            )
+            payload = verify_smoke_gated_full_flow_local_semantic_matrix_run(
+                args.local_semantic_admission_dir,
+                args.smoke_dir,
+                args.n4_serve_gate_dir,
+                args.compose_overlay_dir,
+                args.service_bootstrap_dir,
+                args.provisioning_catalog_dir,
+                args.artifact_binding_dir,
+                args.n4_package_dir,
+                args.semantic_matrix_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.public_task_set,
+                args.artifact_bindings,
+                output_dir=args.output_dir,
+                n4_live_gate_sources=n4_live_gate_sources,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "serve-simulator-full-flow-semantic-route":
+            from .simulator.container_node import serve_container_node
+            from .simulator.full_flow_semantic_route_service_factory import (
+                FrozenSemanticRouteServiceSources,
+                RuntimeSemanticServiceInputs,
+                assemble_full_flow_semantic_route_service,
+            )
+
+            credential_environment = {
+                "N2 index": ("PATHFINDER_N2_INDEX_TOKEN",),
+                "N7 index": (
+                    "PATHFINDER_N2_INDEX_TOKEN",
+                    "PATHFINDER_N7_INDEX_TOKEN",
+                ),
+                "N8 index": (
+                    "PATHFINDER_N2_INDEX_TOKEN",
+                    "PATHFINDER_N8_INDEX_TOKEN",
+                ),
+                "N3 Data Agent": (
+                    "PATHFINDER_DATA_AGENT_TOKEN",
+                    "PATHFINDER_N3_DATA_AGENT_TOKEN",
+                ),
+                "N4 Data Agent": (
+                    "PATHFINDER_DATA_AGENT_TOKEN",
+                    "PATHFINDER_N4_DATA_AGENT_TOKEN",
+                ),
+                "N7 cache": (
+                    "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+                    "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN",
+                ),
+                "N8 cache": (
+                    "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+                    "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN",
+                ),
+                "N6 semantic": ("PATHFINDER_CONTAINER_NODE_TOKEN",),
+                "N1 score": ("PATHFINDER_N1_ORACLE_TOKEN",),
+                "N1 verifier": ("PATHFINDER_N1_VERIFICATION_TOKEN",),
+                "route ingress": (
+                    "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET",
+                ),
+            }
+            credentials = {
+                name: next(
+                    (
+                        value
+                        for environment_name in environment_names
+                        if (value := os.environ.get(environment_name))
+                    ),
+                    None,
+                )
+                for name, environment_names in credential_environment.items()
+            }
+            missing = sorted({
+                " or ".join(credential_environment[name])
+                for name, value in credentials.items()
+                if not value
+            })
+            if missing:
+                raise ConfigError(
+                    "semantic route service requires runtime-only "
+                    "credential environment variables: "
+                    + ", ".join(missing)
+                )
+            private_hosts = tuple(
+                value.strip()
+                for value in args.simulator_private_http_hosts.split(",")
+                if value.strip()
+            )
+            sources = FrozenSemanticRouteServiceSources(
+                local_admission_dir=args.local_semantic_admission_dir,
+                n1_public_commitment_dir=args.n1_public_commitment_dir,
+                artifact_binding_dir=args.artifact_binding_dir,
+                n2_index_package_dir=args.n2_index_package_dir,
+                n3_package_dir=args.n3_package_dir,
+                n4_package_dir=args.n4_package_dir,
+                exact_range_catalog_dir=args.exact_range_catalog_dir,
+                provisioning_catalog_dir=args.provisioning_catalog_dir,
+                index_query_plan_catalog_dir=(
+                    args.index_query_plan_catalog_dir
+                ),
+            )
+            runtime = RuntimeSemanticServiceInputs(
+                logical_node_id=args.node_id,
+                index_base_urls={
+                    "N2": args.n2_index_base_url,
+                    "N7": args.n7_index_base_url,
+                    "N8": args.n8_index_base_url,
+                },
+                index_bearer_tokens={
+                    "N2": credentials["N2 index"],
+                    "N7": credentials["N7 index"],
+                    "N8": credentials["N8 index"],
+                },
+                data_agent_base_urls={
+                    "N3": args.n3_data_agent_base_url,
+                    "N4": args.n4_data_agent_base_url,
+                },
+                data_agent_bearer_tokens={
+                    "N3": credentials["N3 Data Agent"],
+                    "N4": credentials["N4 Data Agent"],
+                },
+                cache_base_urls={
+                    "N7": args.n7_cache_base_url,
+                    "N8": args.n8_cache_base_url,
+                },
+                cache_bearer_tokens={
+                    "N7": credentials["N7 cache"],
+                    "N8": credentials["N8 cache"],
+                },
+                cache_ids={
+                    "N7": args.n7_cache_id,
+                    "N8": args.n8_cache_id,
+                },
+                node_health_base_urls={
+                    "N7": args.n7_node_health_base_url,
+                    "N8": args.n8_node_health_base_url,
+                },
+                n6_base_url=args.n6_base_url,
+                n6_bearer_token=credentials["N6 semantic"],
+                n1_base_url=args.n1_base_url,
+                n1_bearer_token=credentials["N1 score"],
+                n1_verification_base_url=args.n1_verification_base_url,
+                n1_verification_bearer_token=credentials["N1 verifier"],
+                semantic_model=args.semantic_model,
+                timeout_seconds=args.timeout_seconds,
+                max_artifact_bytes=args.max_artifact_bytes,
+                simulator_private_http_hosts=private_hosts,
+            )
+            assembly = assemble_full_flow_semantic_route_service(
+                sources,
+                runtime,
+                state_dir=args.state_dir,
+            )
+            assembly.require_ready()
+            serve_container_node(
+                args.node_id,
+                args.state_dir,
+                host=args.host,
+                port=args.port,
+                semantic_route_handler=assembly.handler,
+            )
+            return 0
+        if args.command == "freeze-simulator-full-flow-service-bootstrap":
+            from .simulator.full_flow_service_bootstrap import (
+                freeze_full_flow_local_service_bootstrap,
+            )
+
+            payload = freeze_full_flow_local_service_bootstrap(
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                bootstrap_id=args.bootstrap_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-service-bootstrap":
+            from .simulator.full_flow_service_bootstrap import (
+                verify_full_flow_local_service_bootstrap,
+            )
+
+            payload = verify_full_flow_local_service_bootstrap(
+                args.bootstrap_dir,
+                logical_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-full-flow-deployment":
+            from .simulator.full_flow_deployment import (
+                build_full_flow_deployment_binding,
+            )
+
+            payload = build_full_flow_deployment_binding(
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.deployment_source,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-deployment":
+            from .simulator.full_flow_deployment import (
+                verify_full_flow_deployment_binding,
+            )
+
+            payload = verify_full_flow_deployment_binding(
+                args.binding_dir,
+                logical_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "preflight-simulator-full-flow-deployment":
+            from .simulator.full_flow_deployment import (
+                preflight_full_flow_deployment,
+            )
+
+            payload = preflight_full_flow_deployment(
+                args.binding_dir,
+                logical_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                timeout_seconds=args.timeout_seconds,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "render-simulator-full-flow-compose-overlay":
+            from .simulator.full_flow_compose_overlay import (
+                render_full_flow_local_compose_overlay,
+            )
+
+            payload = render_full_flow_local_compose_overlay(
+                args.service_bootstrap_dir,
+                args.deployment_binding_dir,
+                logical_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                overlay_id=args.overlay_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-compose-overlay":
+            from .simulator.full_flow_compose_overlay import (
+                verify_full_flow_local_compose_overlay,
+            )
+
+            payload = verify_full_flow_local_compose_overlay(
+                args.overlay_dir,
+                service_bootstrap_dir=args.service_bootstrap_dir,
+                deployment_binding_dir=args.deployment_binding_dir,
+                logical_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "generate-simulator-full-flow-deployment-template"
+        ):
+            from .simulator.full_flow_deployment_template import (
+                generate_full_flow_deployment_source_template,
+            )
+
+            payload = generate_full_flow_deployment_source_template(
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                template_id=args.template_id,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-deployment-template"
+        ):
+            from .simulator.full_flow_deployment_template import (
+                verify_full_flow_deployment_source_template,
+            )
+
+            payload = verify_full_flow_deployment_source_template(
+                args.template_dir,
+                logical_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "validate-simulator-full-flow-deployment-source"
+        ):
+            from .simulator.full_flow_deployment_template import (
+                validate_completed_full_flow_deployment_source,
+            )
+
+            payload = validate_completed_full_flow_deployment_source(
+                args.deployment_source,
+                template_dir=args.template_dir,
+                logical_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-n3-raw-data-plane":
+            from .simulator.raw_cold_data_plane import (
+                build_raw_cold_data_plane_package_from_manifest,
+            )
+
+            payload = build_raw_cold_data_plane_package_from_manifest(
+                args.binding_manifest,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n3-raw-data-plane":
+            from .simulator.raw_cold_data_plane import (
+                verify_raw_cold_data_plane_package,
+            )
+
+            payload = verify_raw_cold_data_plane_package(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-n4-derived-data-plane":
+            from .simulator.n4_derived_data_plane import (
+                build_n4_derived_data_package_from_manifest,
+            )
+
+            payload = build_n4_derived_data_package_from_manifest(
+                args.binding_manifest,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n4-derived-data-plane":
+            from .simulator.n4_derived_data_plane import (
+                verify_n4_derived_data_package,
+            )
+
+            payload = verify_n4_derived_data_package(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n2-index":
+            from .simulator.index_service import verify_n2_index_package
+
+            payload = verify_n2_index_package(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "serve-simulator-n2-index":
+            from .simulator.index_service import create_n2_index_http_server
+
+            token = os.environ.get("PATHFINDER_N2_INDEX_TOKEN")
+            if args.require_token and not token:
+                raise ConfigError(
+                    "PATHFINDER_N2_INDEX_TOKEN is required for this service"
+                )
+            server = create_n2_index_http_server(
+                args.package_dir,
+                host=args.host,
+                port=args.port,
+                bearer_token=token,
+                node_id=args.node_id,
+            )
+            try:
+                server.serve_forever(poll_interval=0.2)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+            return 0
+        if args.command == "serve-simulator-full-flow-cache":
+            from .simulator.full_flow_cache import serve_full_flow_cache
+
+            token_names = [args.token_env_name]
+            if args.fallback_token_env_name:
+                token_names.append(args.fallback_token_env_name)
+            token = next(
+                (
+                    os.environ[name]
+                    for name in token_names
+                    if os.environ.get(name)
+                ),
+                None,
+            )
+            if not token:
+                raise ConfigError(
+                    "/".join(token_names)
+                    + " is required for this service"
+                )
+            serve_full_flow_cache(
+                args.state_dir,
+                node_id=args.node_id,
+                cache_id=args.cache_id,
+                capacity_bytes=args.capacity_bytes,
+                token=token,
+                host=args.host,
+                port=args.port,
+                max_artifact_bytes=args.max_artifact_bytes,
+            )
+            return 0
+        if args.command == "serve-simulator-n5-materializer":
+            from .simulator.n5_materialization import (
+                N5MaterializationHttpServer,
+                N5MaterializationHttpService,
+                N5MaterializationRuntime,
+            )
+
+            token = os.environ.get("PATHFINDER_N5_MATERIALIZATION_TOKEN")
+            if not token:
+                raise ConfigError(
+                    "PATHFINDER_N5_MATERIALIZATION_TOKEN is required for "
+                    "this service"
+                )
+            service = N5MaterializationHttpService(
+                runtime=N5MaterializationRuntime(),
+                bearer_token=token,
+                state_dir=args.state_dir,
+            )
+            server = N5MaterializationHttpServer(
+                (args.host, args.port),
+                service,
+            )
+            try:
+                server.serve_forever(poll_interval=0.2)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                server.server_close()
+            return 0
+        if args.command == "run-simulator-n5-n4-live-frame-bundle-smoke":
+            from .simulator.full_flow_live_provisioning_smoke import (
+                N4PublicationHttpClientConfig,
+                run_n5_n4_live_frame_bundle_provisioning_smoke,
+            )
+            from .simulator.n5_materialization import (
+                N5MaterializationHttpClientConfig,
+            )
+
+            n5_token = os.environ.get(
+                "PATHFINDER_N5_MATERIALIZATION_TOKEN"
+            )
+            n4_token = os.environ.get("PATHFINDER_N4_PUBLICATION_TOKEN")
+            if not n5_token or not n4_token:
+                raise ConfigError(
+                    "PATHFINDER_N5_MATERIALIZATION_TOKEN and "
+                    "PATHFINDER_N4_PUBLICATION_TOKEN are required"
+                )
+            n5_plan = _load_strict_json_file(
+                args.n5_plan,
+                label="N5 frame-bundle plan",
+                expected_type=dict,
+            )
+            private_hosts = tuple(args.allow_http_simulator_host)
+            payload = run_n5_n4_live_frame_bundle_provisioning_smoke(
+                n5_plan,
+                args.source_video.read_bytes(),
+                n5_config=N5MaterializationHttpClientConfig(
+                    base_url=args.n5_base_url,
+                    bearer_token=n5_token,
+                    simulator_private_http_hosts=private_hosts,
+                    timeout_seconds=args.timeout_seconds,
+                ),
+                n4_config=N4PublicationHttpClientConfig(
+                    base_url=args.n4_base_url,
+                    bearer_token=n4_token,
+                    simulator_private_http_hosts=private_hosts,
+                    timeout_seconds=args.timeout_seconds,
+                ),
+                smoke_id=args.smoke_id,
+                publication_id=args.publication_id,
+                package_id=args.package_id,
+                catalog_version=args.catalog_version,
+                expected_current_catalog_version=(
+                    args.expected_current_catalog_version
+                ),
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n5-n4-live-frame-bundle-smoke":
+            from .simulator.full_flow_live_provisioning_smoke import (
+                verify_n5_n4_live_frame_bundle_provisioning_smoke,
+            )
+
+            n5_plan = _load_strict_json_file(
+                args.n5_plan,
+                label="N5 frame-bundle plan",
+                expected_type=dict,
+            )
+            payload = verify_n5_n4_live_frame_bundle_provisioning_smoke(
+                args.output_dir,
+                n5_plan=n5_plan,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-simulator-n5-n4-live-digest-smoke":
+            from .simulator.full_flow_live_provisioning_smoke import (
+                HttpN5DigestMaterializationExecutor,
+                N4PublicationHttpClientConfig,
+                N5DigestHttpClientConfig,
+                run_n5_n4_live_multimodal_digest_provisioning_smoke,
+            )
+
+            n5_token = os.environ.get("PATHFINDER_N5_DIGEST_TOKEN")
+            n4_token = os.environ.get("PATHFINDER_N4_PUBLICATION_TOKEN")
+            if not n5_token or not n4_token:
+                raise ConfigError(
+                    "PATHFINDER_N5_DIGEST_TOKEN and "
+                    "PATHFINDER_N4_PUBLICATION_TOKEN are required"
+                )
+            private_hosts = tuple(args.allow_http_simulator_host)
+            executor = HttpN5DigestMaterializationExecutor(
+                N5DigestHttpClientConfig(
+                    base_url=args.n5_digest_base_url,
+                    bearer_token=n5_token,
+                    simulator_private_http_hosts=private_hosts,
+                    timeout_seconds=args.timeout_seconds,
+                )
+            )
+            payload = run_n5_n4_live_multimodal_digest_provisioning_smoke(
+                args.n5_digest_plan_dir,
+                args.source_video,
+                n5_executor=executor,
+                n4_config=N4PublicationHttpClientConfig(
+                    base_url=args.n4_base_url,
+                    bearer_token=n4_token,
+                    simulator_private_http_hosts=private_hosts,
+                    timeout_seconds=args.timeout_seconds,
+                ),
+                smoke_id=args.smoke_id,
+                request_id=args.request_id,
+                publication_id=args.publication_id,
+                package_id=args.package_id,
+                catalog_version=args.catalog_version,
+                expected_current_catalog_version=(
+                    args.expected_current_catalog_version
+                ),
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n5-n4-live-digest-smoke":
+            from .simulator.full_flow_live_provisioning_smoke import (
+                verify_n5_n4_live_multimodal_digest_provisioning_smoke,
+            )
+
+            payload = verify_n5_n4_live_multimodal_digest_provisioning_smoke(
+                args.output_dir,
+                n5_digest_plan_dir=args.n5_digest_plan_dir,
+                source_video_path=args.source_video,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "freeze-simulator-full-flow-bulk-provisioning-source-manifest"
+        ):
+            from .simulator.full_flow_bulk_live_provisioning import (
+                freeze_full_flow_bulk_live_provisioning_source_manifest,
+            )
+
+            payload = freeze_full_flow_bulk_live_provisioning_source_manifest(
+                args.provisioning_catalog_dir,
+                args.artifact_binding_dir,
+                args.n4_package_dir,
+                args.object_mapping,
+                output_path=args.output_path,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "run-simulator-full-flow-bulk-live-provisioning"
+        ):
+            from .simulator.full_flow_bulk_live_provisioning import (
+                ExistingDigestBulkExecutor,
+                ExistingFrameBundleBulkExecutor,
+                run_full_flow_bulk_live_provisioning,
+            )
+            from .simulator.full_flow_live_provisioning_smoke import (
+                HttpN5DigestMaterializationExecutor,
+                N4PublicationHttpClientConfig,
+                N5DigestHttpClientConfig,
+            )
+            from .simulator.n5_materialization import (
+                N5MaterializationHttpClientConfig,
+            )
+
+            n5_frame_token = os.environ.get(
+                "PATHFINDER_N5_MATERIALIZATION_TOKEN"
+            )
+            n5_digest_token = os.environ.get("PATHFINDER_N5_DIGEST_TOKEN")
+            n4_token = os.environ.get("PATHFINDER_N4_PUBLICATION_TOKEN")
+            if not n5_frame_token or not n5_digest_token or not n4_token:
+                raise ConfigError(
+                    "PATHFINDER_N5_MATERIALIZATION_TOKEN, "
+                    "PATHFINDER_N5_DIGEST_TOKEN, and "
+                    "PATHFINDER_N4_PUBLICATION_TOKEN are required"
+                )
+            private_hosts = tuple(args.allow_http_simulator_host)
+            n4_config = N4PublicationHttpClientConfig(
+                base_url=args.n4_base_url,
+                bearer_token=n4_token,
+                simulator_private_http_hosts=private_hosts,
+                timeout_seconds=args.timeout_seconds,
+            )
+            frame_executor = ExistingFrameBundleBulkExecutor(
+                n5_config=N5MaterializationHttpClientConfig(
+                    base_url=args.n5_frame_base_url,
+                    bearer_token=n5_frame_token,
+                    simulator_private_http_hosts=private_hosts,
+                    timeout_seconds=args.timeout_seconds,
+                ),
+                n4_config=n4_config,
+            )
+            digest_executor = ExistingDigestBulkExecutor(
+                n5_executor=HttpN5DigestMaterializationExecutor(
+                    N5DigestHttpClientConfig(
+                        base_url=args.n5_digest_base_url,
+                        bearer_token=n5_digest_token,
+                        simulator_private_http_hosts=private_hosts,
+                        timeout_seconds=args.timeout_seconds,
+                    )
+                ),
+                n4_config=n4_config,
+            )
+            payload = run_full_flow_bulk_live_provisioning(
+                args.provisioning_catalog_dir,
+                args.artifact_binding_dir,
+                args.n4_package_dir,
+                args.operator_source_manifest,
+                frame_executor=frame_executor,
+                digest_executor=digest_executor,
+                run_id=args.run_id,
+                output_dir=args.output_dir,
+                resume=args.resume,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if (
+            args.command
+            == "verify-simulator-full-flow-bulk-live-provisioning"
+        ):
+            from .simulator.full_flow_bulk_live_provisioning import (
+                verify_full_flow_bulk_live_provisioning,
+            )
+
+            payload = verify_full_flow_bulk_live_provisioning(
+                args.output_dir,
+                provisioning_catalog_dir=args.provisioning_catalog_dir,
+                artifact_binding_dir=args.artifact_binding_dir,
+                n4_package_dir=args.n4_package_dir,
+                operator_source_manifest=args.operator_source_manifest,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command in {
+            "freeze-simulator-full-flow-pre-upcloud-readiness",
+            "verify-simulator-full-flow-pre-upcloud-readiness",
+        }:
+            from .simulator.full_flow_pre_upcloud_readiness import (
+                freeze_full_flow_pre_upcloud_readiness,
+                verify_full_flow_pre_upcloud_readiness,
+            )
+
+            n1_evidence_secret = None
+            if args.n1_oracle_package_dir is not None:
+                secret_text = os.environ.get(
+                    "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET"
+                )
+                if not secret_text:
+                    raise ConfigError(
+                        "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET is required "
+                        "when --n1-oracle-package-dir is used"
+                    )
+                n1_evidence_secret = secret_text.encode("utf-8")
+            n4_live_gate_sources = _load_n4_live_gate_sources(
+                args.n4_live_gate_sources
+            )
+            readiness_sources = {
+                "source_git_revision": args.source_git_revision,
+                "operator_attests_clean_committed_source": (
+                    args.attest_clean_committed_source
+                ),
+                "source_archive_path": args.source_archive,
+                "provisioning_catalog_dir": args.provisioning_catalog_dir,
+                "artifact_binding_dir": args.artifact_binding_dir,
+                "n4_package_dir": args.n4_package_dir,
+                "logical_route_dir": args.logical_route_dir,
+                "scenario_path": args.scenario,
+                "container_plan_dir": args.container_plan_dir,
+                "task_plane_dir": args.task_plane_dir,
+                "n3_package_dir": args.n3_package_dir,
+                "w4_route_package_dir": args.w4_route_package_dir,
+                "w4_index_package_dir": args.w4_index_package_dir,
+                "w4_index_crosswalk_dir": args.w4_index_crosswalk_dir,
+                "neutral_observation_dir": args.neutral_observation_dir,
+                "neutral_semantic_matrix_run_dir": (
+                    args.neutral_semantic_matrix_run_dir
+                ),
+                "semantic_execution_admission_dir": (
+                    args.semantic_execution_admission_dir
+                ),
+                "smoke_gated_semantic_matrix_run_dir": (
+                    args.smoke_gated_semantic_matrix_run_dir
+                ),
+                "ten_smoke_dir": args.ten_smoke_dir,
+                "n4_serve_gate_dir": args.n4_serve_gate_dir,
+                "compose_overlay_dir": args.compose_overlay_dir,
+                "service_bootstrap_dir": args.service_bootstrap_dir,
+                "deployment_binding_dir": args.deployment_binding_dir,
+                "semantic_matrix_dir": args.semantic_matrix_dir,
+                "public_task_set_path": args.public_task_set,
+                "semantic_artifact_binding_path": (
+                    args.semantic_artifact_binding
+                ),
+                "n4_live_gate_sources": n4_live_gate_sources,
+                "n1_oracle_package_dir": args.n1_oracle_package_dir,
+                "n1_evidence_secret": n1_evidence_secret,
+                "bulk_provisioning_output_dir": (
+                    args.bulk_provisioning_output_dir
+                ),
+                "bulk_source_manifest": args.bulk_source_manifest,
+                "bulk_live_receipt_bindings": (
+                    args.bulk_live_receipt_bindings
+                ),
+                "w4_component_receipt_dir": (
+                    args.w4_component_receipt_dir
+                ),
+                "w4_coordinator_run_dir": args.w4_coordinator_run_dir,
+                "w4_retrieval_contract_dir": (
+                    args.w4_retrieval_contract_dir
+                ),
+                "w4_retrieval_evaluation_dir": (
+                    args.w4_retrieval_evaluation_dir
+                ),
+                "flowmesh_matrix_plan_dir": args.flowmesh_matrix_plan_dir,
+                "flowmesh_formal_profile_dir": (
+                    args.flowmesh_formal_profile_dir
+                ),
+                "flowmesh_coordinator_plan_dir": (
+                    args.flowmesh_coordinator_plan_dir
+                ),
+                "flowmesh_matrix_run_dir": args.flowmesh_matrix_run_dir,
+                "flowmesh_w4_plan_dir": args.flowmesh_w4_plan_dir,
+                "flowmesh_w4_run_dir": args.flowmesh_w4_run_dir,
+                "output_dir": args.output_dir,
+            }
+            if (
+                args.command
+                == "freeze-simulator-full-flow-pre-upcloud-readiness"
+            ):
+                payload = freeze_full_flow_pre_upcloud_readiness(
+                    audit_id=args.audit_id,
+                    **readiness_sources,
+                )
+            else:
+                payload = verify_full_flow_pre_upcloud_readiness(
+                    **readiness_sources
+                )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "freeze-simulator-n5-digest-plan":
+            from .simulator.n5_digest_materialization import (
+                freeze_n5_multimodal_digest_plan,
+            )
+            from .video_prep import sample_video
+
+            frames, duration = sample_video(
+                args.source_video,
+                frame_count=args.frame_count,
+                jpeg_max_dimension=args.jpeg_max_dimension,
+            )
+            payload = freeze_n5_multimodal_digest_plan(
+                args.source_video,
+                frames,
+                source_duration_seconds=duration,
+                object_id=args.object_id,
+                model_id=args.model_id,
+                output_dir=args.output_dir,
+                plan_id=args.plan_id,
+                jpeg_max_dimension=args.jpeg_max_dimension,
+                seed=args.seed,
+                maximum_digest_bytes=args.maximum_digest_bytes,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n5-digest-plan":
+            from .simulator.n5_digest_materialization import (
+                verify_n5_multimodal_digest_plan,
+            )
+
+            payload = verify_n5_multimodal_digest_plan(
+                args.plan_dir,
+                args.source_video,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "run-simulator-n5-digest-materialization":
+            from .simulator.n5_digest_materialization import (
+                OpenAICompatibleVisionDigestAdapter,
+                materialize_n5_multimodal_digest,
+                verify_n5_multimodal_digest_plan,
+            )
+
+            base_url = (
+                os.environ.get("PATHFINDER_N5_DIGEST_LLM_BASE_URL")
+                or os.environ.get("UTU_LLM_BASE_URL")
+            )
+            api_key = (
+                os.environ.get("PATHFINDER_N5_DIGEST_LLM_API_KEY")
+                or os.environ.get("UTU_LLM_API_KEY")
+            )
+            configured_model = (
+                os.environ.get("PATHFINDER_N5_DIGEST_LLM_MODEL")
+                or os.environ.get("UTU_LLM_MODEL")
+            )
+            if not base_url or not api_key or not configured_model:
+                raise ConfigError(
+                    "PATHFINDER_N5_DIGEST_LLM_BASE_URL, "
+                    "PATHFINDER_N5_DIGEST_LLM_MODEL, and "
+                    "PATHFINDER_N5_DIGEST_LLM_API_KEY are required "
+                    "(UTU_LLM_* aliases are accepted)"
+                )
+            verified = verify_n5_multimodal_digest_plan(
+                args.plan_dir,
+                args.source_video,
+            )
+            if configured_model != verified["model_id"]:
+                raise ConfigError(
+                    "runtime vision model differs from the frozen N5 plan"
+                )
+            adapter = OpenAICompatibleVisionDigestAdapter(
+                base_url=base_url,
+                api_key=api_key,
+                model_id=configured_model,
+                allowed_http_simulator_hosts=(
+                    args.allow_http_simulator_host
+                ),
+                timeout_seconds=args.timeout_seconds,
+                max_attempts=args.max_attempts,
+            )
+            payload = materialize_n5_multimodal_digest(
+                args.plan_dir,
+                args.source_video,
+                output_dir=args.output_dir,
+                vision_adapter=adapter,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n5-digest-materialization":
+            from .simulator.n5_digest_materialization import (
+                verify_n5_multimodal_digest_materialization,
+            )
+
+            payload = verify_n5_multimodal_digest_materialization(
+                args.output_dir,
+                args.plan_dir,
+                args.source_video,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "freeze-simulator-policy-routes":
+            from .simulator.policy_oed_bridge import freeze_policy_assignment
+
+            assignments: dict[str, list[str]] = {}
+            for item in args.assignment:
+                workload_class, separator, designs = item.partition("=")
+                if not separator or workload_class in assignments:
+                    raise ConfigError(
+                        "each --assignment must uniquely use Wn=Dm[,Dm]"
+                    )
+                assignments[workload_class] = designs.split(",")
+            payload = freeze_policy_assignment(
+                logical_route_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                policy_id=args.policy_id,
+                awm_policy_sha256=args.awm_policy_sha256,
+                assignments=assignments,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-policy-routes":
+            from .simulator.policy_oed_bridge import verify_policy_assignment
+
+            payload = verify_policy_assignment(
+                assignment_dir=args.assignment_dir,
+                logical_route_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "freeze-simulator-oed-routes":
+            from .simulator.policy_oed_bridge import (
+                freeze_oed_prospective_selection,
+            )
+
+            payload = freeze_oed_prospective_selection(
+                logical_route_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                oed_request_id=args.oed_request_id,
+                oed_request_sha256=args.oed_request_sha256,
+                requested_trial_keys=args.trial_key,
+                output_dir=args.output_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-oed-routes":
+            from .simulator.policy_oed_bridge import (
+                verify_oed_prospective_selection,
+            )
+
+            payload = verify_oed_prospective_selection(
+                selection_dir=args.selection_dir,
+                logical_route_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "freeze-simulator-full-flow-observations":
+            from .simulator.policy_oed_bridge import (
+                freeze_full_flow_observations,
+            )
+
+            evidence = None
+            if args.evidence_json is not None:
+                evidence = [
+                    _load_strict_json_file(
+                        path,
+                        label="semantic route evidence",
+                        expected_type=dict,
+                    )
+                    for path in args.evidence_json
+                ]
+            external_cost = None
+            if args.external_real_cost_manifest is not None:
+                external_cost = _load_strict_json_file(
+                    args.external_real_cost_manifest,
+                    label="external real-cost manifest",
+                    expected_type=dict,
+                )
+            n1_secret = None
+            if args.n1_oracle_package is not None:
+                secret_text = os.environ.get(
+                    "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET"
+                )
+                if not secret_text:
+                    raise ConfigError(
+                        "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET is required "
+                        "when --n1-oracle-package is used"
+                    )
+                n1_secret = secret_text.encode("utf-8")
+            payload = freeze_full_flow_observations(
+                logical_route_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                observation_set_id=args.observation_set_id,
+                evidence_records=evidence,
+                output_dir=args.output_dir,
+                external_real_cost_manifest=external_cost,
+                n1_oracle_package_dir=args.n1_oracle_package,
+                n1_evidence_secret=n1_secret,
+                semantic_execution_admission_dir=(
+                    args.semantic_execution_admission_dir
+                ),
+                semantic_matrix_run_dir=args.semantic_matrix_run_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-full-flow-observations":
+            from .simulator.policy_oed_bridge import (
+                verify_full_flow_observations,
+            )
+
+            evidence = None
+            if args.evidence_json is not None:
+                evidence = [
+                    _load_strict_json_file(
+                        path,
+                        label="semantic route evidence",
+                        expected_type=dict,
+                    )
+                    for path in args.evidence_json
+                ]
+            n1_secret = None
+            if args.n1_oracle_package is not None:
+                secret_text = os.environ.get(
+                    "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET"
+                )
+                if not secret_text:
+                    raise ConfigError(
+                        "PATHFINDER_N1_ORACLE_EVIDENCE_SECRET is required "
+                        "when --n1-oracle-package is used"
+                    )
+                n1_secret = secret_text.encode("utf-8")
+            payload = verify_full_flow_observations(
+                observation_dir=args.observation_dir,
+                logical_route_plan_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                evidence_records=evidence,
+                n1_oracle_package_dir=args.n1_oracle_package,
+                n1_evidence_secret=n1_secret,
+                semantic_execution_admission_dir=(
+                    args.semantic_execution_admission_dir
+                ),
+                semantic_matrix_run_dir=args.semantic_matrix_run_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "freeze-simulator-neutral-awm-oed-analysis":
+            from .simulator.neutral_awm_oed_consumer import (
+                freeze_neutral_awm_oed_analysis,
+            )
+
+            cost_support = (
+                tuple(args.cost_saving_support)
+                if args.cost_saving_support is not None
+                else None
+            )
+            if cost_support is not None and not (
+                cost_support[0] < cost_support[1]
+            ):
+                raise ConfigError(
+                    "--cost-saving-support LOWER must be less than UPPER"
+                )
+            payload = freeze_neutral_awm_oed_analysis(
+                observation_dir=args.observation_dir,
+                analysis_id=args.analysis_id,
+                output_dir=args.output_dir,
+                baseline_design_id=args.baseline_design_id,
+                oed_selection_size=args.oed_selection_size,
+                require_real_cost=args.require_real_cost,
+                alpha=args.alpha,
+                delta_success_margin=args.delta_success_margin,
+                minimum_cost_saving=args.minimum_cost_saving,
+                cost_saving_support=cost_support,
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-neutral-awm-oed-analysis":
+            from .simulator.neutral_awm_oed_consumer import (
+                verify_neutral_awm_oed_analysis,
+            )
+
+            payload = verify_neutral_awm_oed_analysis(
+                observation_dir=args.observation_dir,
+                analysis_dir=args.analysis_dir,
+            )
+            return _print_payload(payload, compact=args.compact)
         if args.command == "preflight-local-container-host":
             from .simulator import preflight_local_container_host
 
@@ -2572,6 +7906,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 semantic_url=semantic_url,
                 health_url=health_url,
                 expected_execution_node_id=expected_executor,
+                bearer_token=os.environ.get(
+                    "PATHFINDER_CONTAINER_NODE_TOKEN"
+                ),
                 timeout_seconds=args.request_timeout,
             )
             payload = execute_data_agent_frame_bundle_semantic_trial(
@@ -3395,17 +8732,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_data_agent_server,
             )
 
+            settings = DataAgentServerSettings.from_environment(
+                host=args.host,
+                port=args.port,
+                public_base_url=args.public_base_url,
+                artifact_url_ttl_seconds=args.artifact_url_ttl,
+                max_request_bytes=args.max_request_bytes,
+                max_inline_bytes=args.max_inline_bytes,
+            )
+            if args.require_token and settings.token is None:
+                raise ConfigError(
+                    "PATHFINDER_DATA_AGENT_TOKEN is required for this service"
+                )
+            if (
+                args.require_artifact_secret
+                and settings.artifact_secret is None
+            ):
+                raise ConfigError(
+                    "PATHFINDER_DATA_AGENT_ARTIFACT_SECRET is required for "
+                    "this service"
+                )
             run_data_agent_server(
                 manifest_path=args.manifest,
                 operation_db=args.operation_db,
-                settings=DataAgentServerSettings.from_environment(
-                    host=args.host,
-                    port=args.port,
-                    public_base_url=args.public_base_url,
-                    artifact_url_ttl_seconds=args.artifact_url_ttl,
-                    max_request_bytes=args.max_request_bytes,
-                    max_inline_bytes=args.max_inline_bytes,
-                ),
+                settings=settings,
             )
             return 0
         if args.command == "run-flowmesh-pilot":

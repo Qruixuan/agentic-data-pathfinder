@@ -774,6 +774,8 @@ class DataAgentSemanticVerticalTest(unittest.TestCase):
 class HttpContainerSemanticVisionAdapterTest(unittest.TestCase):
     def setUp(self) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.authorizations: list[str | None] = []
+        self.health_authorizations: list[str | None] = []
         self.raw_post_response: bytes | None = None
         self.health_epochs = ["4" * 32, "4" * 32]
         self.health_credentials_recorded = False
@@ -799,6 +801,9 @@ class HttpContainerSemanticVisionAdapterTest(unittest.TestCase):
                 if self.path != "/healthz":
                     self.send_error(404)
                     return
+                owner.health_authorizations.append(
+                    self.headers.get("Authorization")
+                )
                 epoch = owner.health_epochs[
                     min(owner.health_count, len(owner.health_epochs) - 1)
                 ]
@@ -823,6 +828,7 @@ class HttpContainerSemanticVisionAdapterTest(unittest.TestCase):
                     self.send_error(404)
                     return
                 length = int(self.headers["Content-Length"])
+                owner.authorizations.append(self.headers.get("Authorization"))
                 owner.requests.append(json.loads(self.rfile.read(length)))
                 if owner.raw_post_response is None:
                     self._send({"sentinel": "fake-container-result"})
@@ -850,6 +856,7 @@ class HttpContainerSemanticVisionAdapterTest(unittest.TestCase):
             ),
             health_url=f"http://127.0.0.1:{port}/healthz",
             expected_execution_node_id="N6",
+            bearer_token="test-only-semantic-node-bearer",
             timeout_seconds=2.0,
         )
 
@@ -861,6 +868,11 @@ class HttpContainerSemanticVisionAdapterTest(unittest.TestCase):
 
         self.assertEqual("fake-container-result", result["sentinel"])
         self.assertEqual([request], self.requests)
+        self.assertEqual(
+            ["Bearer test-only-semantic-node-bearer"],
+            self.authorizations,
+        )
+        self.assertEqual([None, None], self.health_authorizations)
         self.assertTrue(adapter.health_verified)
         self.assertEqual("4" * 32, adapter.last_runtime_epoch)
 
@@ -921,7 +933,28 @@ class HttpContainerSemanticVisionAdapterTest(unittest.TestCase):
                 ),
                 health_url="http://127.0.0.1:1/healthz",
                 expected_execution_node_id="N6",
+                bearer_token="test-only-semantic-node-bearer",
             )
+
+    def test_semantic_bearer_is_required_and_not_normalized(self) -> None:
+        port = self.server.server_port
+        for token in (None, "", " token", "token ", "token\n"):
+            with (
+                self.subTest(token=token),
+                self.assertRaisesRegex(
+                    DataAgentSemanticVerticalError,
+                    "PATHFINDER_CONTAINER_NODE_TOKEN is required",
+                ),
+            ):
+                HttpContainerSemanticVisionAdapter(
+                    semantic_url=(
+                        f"http://127.0.0.1:{port}"
+                        "/v1/semantic/chat-completions"
+                    ),
+                    health_url=f"http://127.0.0.1:{port}/healthz",
+                    expected_execution_node_id="N6",
+                    bearer_token=token,
+                )
 
     def test_public_adapter_refuses_nonliteral_loopback_endpoints(self) -> None:
         port = self.server.server_port
@@ -940,6 +973,7 @@ class HttpContainerSemanticVisionAdapterTest(unittest.TestCase):
                     semantic_url=semantic_url,
                     health_url=f"http://127.0.0.1:{port}/healthz",
                     expected_execution_node_id="N6",
+                    bearer_token="test-only-semantic-node-bearer",
                 )
 
     def test_duplicate_container_response_key_is_refused(self) -> None:

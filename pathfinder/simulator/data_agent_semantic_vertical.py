@@ -51,9 +51,7 @@ from ..frame_bundle_transfer import (
     build_frame_bundle_access_request,
     fetch_validated_frame_bundle,
 )
-from ..integrations.flowmesh.container_matrix import (
-    verify_flowmesh_container_matrix_plan,
-)
+from .container_node import CONTAINER_NODE_BEARER_TOKEN_ENV
 
 
 DATA_AGENT_SEMANTIC_RECORD_SCHEMA_VERSION = (
@@ -340,6 +338,7 @@ class HttpContainerSemanticVisionAdapter:
         semantic_url: str,
         health_url: str,
         expected_execution_node_id: str,
+        bearer_token: str | None = None,
         timeout_seconds: float = 240.0,
         max_request_bytes: int = 16 * 1024 * 1024,
         max_response_bytes: int = 2 * 1024 * 1024,
@@ -358,6 +357,17 @@ class HttpContainerSemanticVisionAdapter:
             self._origin(self._semantic_url) == self._origin(self._health_url),
             "semantic_url and health_url must have the same origin",
         )
+        _require(
+            isinstance(bearer_token, str)
+            and bool(bearer_token)
+            and bearer_token == bearer_token.strip()
+            and bearer_token.isascii()
+            and len(bearer_token.encode("ascii")) <= 8192
+            and all(33 <= ord(character) <= 126 for character in bearer_token),
+            f"{CONTAINER_NODE_BEARER_TOKEN_ENV} is required and must be "
+            "printable ASCII",
+        )
+        self._authorization = "Bearer " + bearer_token
         self._expected_execution_node_id = _text(
             expected_execution_node_id,
             "expected_execution_node_id",
@@ -446,6 +456,7 @@ class HttpContainerSemanticVisionAdapter:
         method: str,
         payload: Mapping[str, Any] | None = None,
         max_bytes: int,
+        authenticated: bool = False,
     ) -> dict[str, Any]:
         body = None if payload is None else _canonical_bytes(payload)
         if body is not None:
@@ -457,6 +468,8 @@ class HttpContainerSemanticVisionAdapter:
             "Accept": "application/json",
             "User-Agent": "pathfinder-data-agent-semantic-vertical/1",
         }
+        if authenticated:
+            headers["Authorization"] = self._authorization
         if body is not None:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(
@@ -560,6 +573,7 @@ class HttpContainerSemanticVisionAdapter:
             method="POST",
             payload=request,
             max_bytes=self._max_response_bytes,
+            authenticated=True,
         )
         after = self._health()
         _require(
@@ -862,6 +876,17 @@ def _validated_declared_option_answer(answer: Any, contract: Any) -> str:
         "container final_answer is not one declared option response",
     )
     return value
+
+
+def verify_flowmesh_container_matrix_plan(
+    plan_dir: str | Path,
+) -> dict[str, Any]:
+    """Resolve the FlowMesh verifier lazily while preserving the test seam."""
+    from ..integrations.flowmesh.container_matrix import (
+        verify_flowmesh_container_matrix_plan as verify,
+    )
+
+    return verify(plan_dir)
 
 
 def _matrix_binding(

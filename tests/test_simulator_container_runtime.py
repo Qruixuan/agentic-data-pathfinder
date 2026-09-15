@@ -44,6 +44,7 @@ from pathfinder.simulator import (
     verify_local_container_semantic_score_alignment,
 )
 from pathfinder.simulator.container_node import (
+    semantic_fusion_representation_sha256,
     semantic_frame_sequence_sha256,
 )
 
@@ -1172,6 +1173,7 @@ _TEST_JPEG_BASE64 = (
     "5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD7V+C37O3wp1v4OeBNR1H4ZeDr/ULzQbC4"
     "ubu60C0klnle3Rnd3aMlmYkkknJJJNFFFf0xln+40P8ABH8keXiP40/V/mf/2Q=="
 )
+SEMANTIC_NODE_TOKEN = "test-only-container-node-token"
 
 
 def _vision_frame(
@@ -1296,6 +1298,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
                 direct_url + "/v1/semantic/chat-completions",
                 {"sentinel": "private"},
                 2.0,
+                SEMANTIC_NODE_TOKEN,
             )
 
         self.assertEqual("ok", health["status"])
@@ -1360,6 +1363,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
                 source_url + "/v1/semantic/chat-completions",
                 {"sentinel": "private"},
                 2.0,
+                SEMANTIC_NODE_TOKEN,
             )
 
         self.assertEqual(["GET", "POST"], source_requests)
@@ -1428,11 +1432,51 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             "frames": selected,
         }
 
+    @staticmethod
+    def _fusion_request() -> dict:
+        frames = [
+            _vision_frame(0, 0.5),
+            _vision_frame(1, 1.5),
+        ]
+        digest_text = "Two musicians perform while a woman approaches."
+        digest_sha256 = sha256(digest_text.encode("utf-8")).hexdigest()
+        frame_sha256 = semantic_frame_sequence_sha256(frames)
+        question = "Which option is correct? Return exactly one option ID."
+        prompt = ContainerNodeRuntime.build_semantic_fusion_prompt(
+            "multimodal_digest+sampled_frame_bundle",
+            digest_text,
+            len(frames),
+            question,
+        )
+        return {
+            "schema_version": (
+                "pathfinder.container-node-semantic-request/v1alpha3"
+            ),
+            "semantic_request_id": "fusion-test-v3",
+            "execution_node_id": "N6",
+            "representation_id": (
+                "multimodal_digest+sampled_frame_bundle"
+            ),
+            "representation_sha256": (
+                semantic_fusion_representation_sha256(
+                    digest_sha256,
+                    frame_sha256,
+                )
+            ),
+            "digest_text": digest_text,
+            "digest_sha256": digest_sha256,
+            "question": question,
+            "prompt_sha256": sha256(prompt.encode("utf-8")).hexdigest(),
+            "frame_sequence_sha256": frame_sha256,
+            "frames": frames,
+        }
+
     def test_semantic_http_endpoint_requires_json_content_type(self) -> None:
         node = create_container_node_server(
             "N6",
             self.root / "content-type-state",
             enable_semantic_llm=True,
+            semantic_bearer_token=SEMANTIC_NODE_TOKEN,
         )
         self._start(node)
         body = json.dumps(self._vision_request()).encode("utf-8")
@@ -1449,7 +1493,10 @@ class LocalSemanticExecutionTest(unittest.TestCase):
                 "POST",
                 "/v1/semantic/chat-completions",
                 body=body,
-                headers={"Content-Type": "text/plain"},
+                headers={
+                    "Content-Type": "text/plain",
+                    "Authorization": "Bearer " + SEMANTIC_NODE_TOKEN,
+                },
             )
             response = connection.getresponse()
             response_body = response.read().decode("utf-8")
@@ -1465,6 +1512,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             "N6",
             self.root / "n6-state",
             enable_semantic_llm=True,
+            semantic_bearer_token=SEMANTIC_NODE_TOKEN,
         )
         self._start(node)
         node_port = int(node.server_address[1])
@@ -1485,6 +1533,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             "PATHFINDER_SEMANTIC_LLM_MODEL": "test-text-model",
             "PATHFINDER_SEMANTIC_LLM_API_KEY": "not-a-real-secret",
             "PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS": "10",
+            "PATHFINDER_CONTAINER_NODE_TOKEN": SEMANTIC_NODE_TOKEN,
         }, clear=False):
             report = execute_local_container_semantic_run(
                 compose,
@@ -1522,6 +1571,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             "N6",
             self.root / "snapshot-n6-state",
             enable_semantic_llm=True,
+            semantic_bearer_token=SEMANTIC_NODE_TOKEN,
         )
         self._start(node)
         node_port = int(node.server_address[1])
@@ -1590,6 +1640,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
                 "PATHFINDER_SEMANTIC_LLM_MODEL": "test-text-model",
                 "PATHFINDER_SEMANTIC_LLM_API_KEY": "snapshot-test-secret",
                 "PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS": "10",
+                "PATHFINDER_CONTAINER_NODE_TOKEN": SEMANTIC_NODE_TOKEN,
             }, clear=False),
         ):
             report = execute_local_container_semantic_run(
@@ -1684,6 +1735,84 @@ class LocalSemanticExecutionTest(unittest.TestCase):
         self.assertNotIn("vision-test-secret", result_text)
         for frame in frames:
             self.assertNotIn(frame["jpeg_base64"], result_text)
+
+    def test_v3_fusion_binds_digest_and_frames_without_persisting_payloads(
+        self,
+    ) -> None:
+        llm = ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            _FakeSemanticLLMHandler,
+        )
+        llm.requests = []  # type: ignore[attr-defined]
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "n6-fusion-state",
+            enable_semantic_llm=True,
+        )
+        request = self._fusion_request()
+        with mock.patch.dict(os.environ, {
+            "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                f"http://127.0.0.1:{llm.server_port}"
+            ),
+            "PATHFINDER_SEMANTIC_LLM_MODEL": "test-fusion-model",
+            "PATHFINDER_SEMANTIC_LLM_API_KEY": "fusion-test-secret",
+            "PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS": "10",
+        }, clear=False):
+            result = runtime.semantic_complete(request)
+
+        self.assertEqual(
+            "pathfinder.container-node-semantic-result/v1alpha3",
+            result["schema_version"],
+        )
+        self.assertEqual(
+            "digest-and-ordered-jpeg-frames",
+            result["semantic_input_kind"],
+        )
+        self.assertEqual(request["digest_sha256"], result["digest_sha256"])
+        self.assertEqual(
+            request["frame_sequence_sha256"],
+            result["frame_sequence_sha256"],
+        )
+        self.assertEqual(
+            request["representation_sha256"],
+            result["representation_sha256"],
+        )
+        self.assertTrue(result["semantic_digest_payload_integrity_verified"])
+        self.assertTrue(result["semantic_frame_payload_integrity_verified"])
+        self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
+        content = llm.requests[0]["payload"]["messages"][0]["content"]  # type: ignore[attr-defined]
+        self.assertEqual("text", content[0]["type"])
+        self.assertIn(request["digest_text"], content[0]["text"])
+        self.assertEqual(2, len(content[1:]))
+        result_text = json.dumps(result, sort_keys=True)
+        self.assertNotIn(request["digest_text"], result_text)
+        self.assertNotIn(request["question"], result_text)
+        self.assertNotIn("fusion-test-secret", result_text)
+
+    def test_v3_fusion_rejects_component_drift_before_llm_call(self) -> None:
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "n6-fusion-drift-state",
+            enable_semantic_llm=True,
+        )
+        cases = []
+        wrong_digest = self._fusion_request()
+        wrong_digest["semantic_request_id"] = "fusion-drift-digest-v3"
+        wrong_digest["digest_text"] += " changed"
+        cases.append((wrong_digest, "does not match digest_text"))
+        wrong_binding = self._fusion_request()
+        wrong_binding["semantic_request_id"] = "fusion-drift-binding-v3"
+        wrong_binding["representation_sha256"] = "0" * 64
+        cases.append((wrong_binding, "does not bind both fusion components"))
+        for request, message in cases:
+            with (
+                self.subTest(message=message),
+                mock.patch.object(runtime, "_call_semantic_llm") as call,
+                self.assertRaisesRegex(ContainerNodeError, message),
+            ):
+                runtime.semantic_complete(request)
+            call.assert_not_called()
 
     def test_semantic_llm_response_model_must_match_requested_model(self) -> None:
         llm = ThreadingHTTPServer(
@@ -2237,6 +2366,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             "N6",
             self.root / "n6-state",
             enable_semantic_llm=True,
+            semantic_bearer_token=SEMANTIC_NODE_TOKEN,
         )
         self._start(node)
         node_port = int(node.server_address[1])
@@ -2257,6 +2387,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             "PATHFINDER_SEMANTIC_LLM_BASE_URL": f"http://127.0.0.1:{llm.server_address[1]}",
             "PATHFINDER_SEMANTIC_LLM_MODEL": "test-text-model",
             "PATHFINDER_SEMANTIC_LLM_API_KEY": "not-a-real-secret",
+            "PATHFINDER_CONTAINER_NODE_TOKEN": SEMANTIC_NODE_TOKEN,
         }, clear=False):
             legacy_report = execute_local_container_semantic_run(
                 compose,
@@ -2295,6 +2426,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             "N3",
             self.root / "n3-state",
             semantic_artifact_root=representations,
+            semantic_bearer_token=SEMANTIC_NODE_TOKEN,
         )
         self._start(source)
         llm = ThreadingHTTPServer(("127.0.0.1", 0), _FakeSemanticLLMHandler)
@@ -2315,6 +2447,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             enable_semantic_llm=True,
             transfer_port=int(source.server_address[1]),
             semantic_allowed_source_containers=("127.0.0.1",),
+            semantic_bearer_token=SEMANTIC_NODE_TOKEN,
         )
         with mock.patch.dict(os.environ, {
             "PATHFINDER_SEMANTIC_LLM_BASE_URL": f"http://127.0.0.1:{llm.server_address[1]}",

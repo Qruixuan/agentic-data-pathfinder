@@ -15,14 +15,47 @@ It can also generate a non-launching local Docker Compose package whose node
 protocol performs bounded real file I/O and exact-byte HTTP transfer with
 semantic quality explicitly disabled. See
 [FLOWMESH_INFRA_SIMULATOR.md](FLOWMESH_INFRA_SIMULATOR.md).
-An additional one-trial integration slice now binds a frozen simulator trial
-to a routed Data Agent frame bundle, a vision-capable container execution, a
-frozen multiple-choice score, and an offline cross-layer evidence package.
-The host calls N6 directly rather than through FlowMesh semantic scheduling,
-so the association is posthoc and the infrastructure and semantic routes
-remain explicitly non-unified. It supplies no cost basis, AWM/OED input, or
-scientific eligibility, and its evidence excludes credentials, questions, and
-base64 frame payloads. See
+The migration-oriented full-flow layer now provides real component contracts
+for N1 hidden scoring, N2 indexing, N3 raw Data Agent access, N4 derived Data
+Agent access, N5 frame/digest materialization, N6 semantic inference, and
+N7/N8 execution-side caches. It joins verified N3/N4 content identities to
+label-free public tasks, compiles 64 endpoint-free semantic trial envelopes,
+validates separate Compose or multi-host deployment bindings, and renders a
+reproducible unified Compose overlay without launching it. Runtime-only
+authentication uses a bearer token at N6 and a request-bound HMAC at N7; no
+credential value is frozen. N1 v1alpha2 allows only one scored prediction per
+oracle/run/trial evaluation unit, and a public hash commitment can bind the
+hidden oracle before policy selection without exposing label values. A direct
+one-task local harness exercises all eight components without exposing the
+hidden reference label to the inference path. The local component layer also
+supports a resumable 36-object N5-to-N4 provisioning coordinator, immutable
+ N4 serve admission, a complete-candidate W4 retrieval coordinator, a globally
+ serial worker-pinned 16-task W4 FlowMesh wrapper, verified N2/N7/N8 index
+ bindings, authenticated N3/N4 reads, N7/N8 caches, bounded N6 text/vision
+ ranking, and a neutral AWM/OED consumer that refuses to invent monetary cost.
+ The generated single-host overlay now exposes the W4 coordinators as separate
+ N7/N8 services and gives each one a dedicated cache namespace, so the same
+ service contracts can later be rebound to private multi-host endpoints without
+ sharing state with the historical semantic-route caches.
+
+The direct development harness calls N6 directly and does not establish
+FlowMesh semantic scheduling. Its posthoc evidence has no cost basis derived
+from real measurements, cannot authorize a policy commitment, and does not
+confer scientific eligibility. It may support descriptive policy diagnostics
+and prospective
+fresh-workload collection only when the corresponding source-bound evidence
+has been verified.
+Rendered questions and base64 frame payloads exist only in bounded runtime
+requests;
+credentials are neither frozen nor written to evidence.
+
+This work remains separate from the completed 64-trial infrastructure run:
+that run is routing and transport conformance evidence. The new 64-trial
+semantic matrix is a reproducibly frozen **plan**, not a completed semantic
+run. Local execution can next validate component interoperability, but real
+multi-host network, storage, queueing, failure, and monetary evidence still
+requires the target deployment. See
+[FULL_FLOW_SIMULATOR.md](FULL_FLOW_SIMULATOR.md) and the older
 [DATA_AGENT_SIMULATOR_COUPLING.md](DATA_AGENT_SIMULATOR_COUPLING.md).
 
 This repository now includes a minimal, runnable Python implementation of the

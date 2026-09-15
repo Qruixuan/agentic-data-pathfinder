@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import socket
 import time
 from collections.abc import Callable, Mapping
@@ -29,6 +30,11 @@ DATA_AGENT_API_VERSION = "pathfinder.data-agent/v1alpha1"
 _AGENT_ARTIFACT_ACCEPT = "application/json, text/*;q=0.9"
 
 logger = logging.getLogger("pathfinder.data_agent_client")
+
+_SIMULATOR_PRIVATE_HOST = re.compile(
+    r"(?:pathfinder-sim|pathfinder-full-flow)-"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z"
+)
 
 
 def _is_loopback_hostname(hostname: str | None) -> bool:
@@ -167,6 +173,7 @@ class DataAgentClientSettings:
     max_retries: int = 1
     max_response_bytes: int = 4 * 1024 * 1024
     max_artifact_bytes: int = 4 * 1024 * 1024
+    simulator_private_http_hosts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.base_url, str) or not self.base_url.strip():
@@ -184,12 +191,31 @@ class DataAgentClientSettings:
                 "Data Agent base_url cannot contain credentials; use "
                 "PATHFINDER_DATA_AGENT_TOKEN"
             )
+        private_hosts = tuple(self.simulator_private_http_hosts)
         if (
-            parsed_url.scheme == "http"
-            and not _is_loopback_hostname(parsed_url.hostname)
+            len(private_hosts) != len(set(private_hosts))
+            or any(
+                not isinstance(host, str)
+                or _SIMULATOR_PRIVATE_HOST.fullmatch(host) is None
+                for host in private_hosts
+            )
         ):
             raise ValueError(
-                "Data Agent base_url must use HTTPS unless it is loopback"
+                "simulator_private_http_hosts must contain unique frozen "
+                "Pathfinder simulator service names"
+            )
+        object.__setattr__(
+            self,
+            "simulator_private_http_hosts",
+            private_hosts,
+        )
+        if parsed_url.scheme == "http" and not (
+            _is_loopback_hostname(parsed_url.hostname)
+            or parsed_url.hostname in private_hosts
+        ):
+            raise ValueError(
+                "Data Agent base_url must use HTTPS unless it is loopback "
+                "or an explicitly bound Pathfinder simulator-private host"
             )
         if (
             not isinstance(self.timeout_seconds, (int, float))
@@ -635,6 +661,49 @@ class DataAgentBinaryArtifact:
         }
 
 
+@dataclass(frozen=True)
+class DataAgentBinaryRangeArtifact:
+    """One content-bound byte range from a verified full artifact.
+
+    The full-object digest comes from the signed Data Agent access response
+    and HTTP ETag.  The range digest is supplied by a frozen segment/index
+    descriptor and recomputed over the returned bytes.  Keeping both
+    identities prevents a convenient byte fraction from being mistaken for
+    a real indexed segment.
+    """
+
+    access_id: str
+    media_type: str
+    data: bytes
+    range_start: int
+    range_end: int
+    range_size_bytes: int
+    range_sha256: str
+    full_artifact_size_bytes: int
+    full_artifact_sha256: str
+    object_id: str | None = None
+    object_catalog_version: str | None = None
+    location: str | None = None
+    service_latency_ms: float | None = None
+    client_round_trip_ms: float | None = None
+    download_elapsed_ms: float | None = None
+
+    def to_metadata_dict(self) -> dict[str, Any]:
+        return {
+            "access_id": self.access_id,
+            "media_type": self.media_type,
+            "range_start": self.range_start,
+            "range_end": self.range_end,
+            "range_size_bytes": self.range_size_bytes,
+            "range_sha256": self.range_sha256,
+            "full_artifact_size_bytes": self.full_artifact_size_bytes,
+            "full_artifact_sha256": self.full_artifact_sha256,
+            "object_id": self.object_id,
+            "object_catalog_version": self.object_catalog_version,
+            "location": self.location,
+        }
+
+
 class DataAgentBinaryClientProtocol(Protocol):
     """Internal capability to download bounded non-text artifacts.
 
@@ -650,6 +719,18 @@ class DataAgentBinaryClientProtocol(Protocol):
         on_phase: Callable[[str], None] | None = None,
     ) -> DataAgentBinaryArtifact:
         """Download one bounded artifact of an explicitly allowed type."""
+
+    def fetch_binary_artifact_range(
+        self,
+        request: "DataAgentAccessRequest",
+        *,
+        range_start: int,
+        range_end: int,
+        expected_range_sha256: str,
+        allowed_media_types: frozenset[str] | set[str] | tuple[str, ...],
+        on_phase: Callable[[str], None] | None = None,
+    ) -> DataAgentBinaryRangeArtifact:
+        """Download one exact, pre-hashed range from a full artifact."""
 
 
 @dataclass(frozen=True)
@@ -902,10 +983,16 @@ class HttpDataAgentClient:
 
     def _default_opener(self) -> Callable[..., Any]:
         handlers: list[Any] = []
-        if _is_loopback_hostname(urlparse(self.settings.base_url).hostname):
+        configured_host = urlparse(self.settings.base_url).hostname
+        if (
+            _is_loopback_hostname(configured_host)
+            or configured_host
+            in self.settings.simulator_private_http_hosts
+        ):
             # Access JSON can contain object identifiers and artifact URLs;
             # artifact responses carry the bytes themselves.  Never let
-            # ambient proxy configuration export loopback Data Agent traffic.
+            # ambient proxy configuration export simulator-private Data Agent
+            # traffic outside the deployment network.
             handlers.append(ProxyHandler({}))
         handlers.append(_RejectRedirects())
         return build_opener(*handlers).open
@@ -1051,6 +1138,113 @@ class HttpDataAgentClient:
             data=raw,
             size_bytes=len(raw),
             sha256=digest,
+            object_id=refreshed.object_id,
+            object_catalog_version=refreshed.object_catalog_version,
+            location=refreshed.location,
+            service_latency_ms=refreshed.service_latency_ms,
+            client_round_trip_ms=refreshed.client_round_trip_ms,
+            download_elapsed_ms=elapsed_ms,
+        )
+
+    def fetch_binary_artifact_range(
+        self,
+        request: DataAgentAccessRequest,
+        *,
+        range_start: int,
+        range_end: int,
+        expected_range_sha256: str,
+        allowed_media_types: frozenset[str] | set[str] | tuple[str, ...],
+        on_phase: Callable[[str], None] | None = None,
+    ) -> DataAgentBinaryRangeArtifact:
+        """Fetch one exact byte range bound by a frozen range digest.
+
+        This method intentionally has no percentage/fraction argument.  A
+        caller must carry the exact inclusive offsets and SHA-256 produced by
+        a real segment or range index.  The server's full-object ETag is also
+        checked against the signed access response.
+        """
+
+        if (
+            not isinstance(range_start, int)
+            or isinstance(range_start, bool)
+            or range_start < 0
+            or not isinstance(range_end, int)
+            or isinstance(range_end, bool)
+            or range_end < range_start
+        ):
+            raise ValueError("artifact byte range is invalid")
+        expected_size = range_end - range_start + 1
+        if expected_size > self.settings.max_artifact_bytes:
+            raise DataAgentArtifactTooLargeError(
+                "Data Agent artifact range exceeds max_artifact_bytes"
+            )
+        if (
+            not isinstance(expected_range_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_range_sha256) is None
+        ):
+            raise ValueError("expected_range_sha256 must be lowercase SHA-256")
+        allowed = _normalized_media_types(allowed_media_types)
+        refreshed = self.access(request)
+        if on_phase is not None:
+            on_phase("access_completed")
+        payload = refreshed.payload
+        if payload.kind != "artifact_uri":
+            raise DataAgentArtifactUnsupportedError(
+                f"Data Agent access {request.access_id} does not refer to "
+                "a downloadable artifact"
+            )
+        declared_media_type = _base_media_type(payload.media_type)
+        if declared_media_type not in allowed:
+            raise DataAgentArtifactUnsupportedError(
+                "Data Agent artifact media type is not permitted for this "
+                f"range download: {declared_media_type}"
+            )
+        if payload.sha256 is None:
+            raise DataAgentProtocolError(
+                "Data Agent artifact payload must include sha256"
+            )
+        artifact_url = self._validated_artifact_url(
+            payload.value,
+            request.access_id,
+        )
+        if on_phase is not None:
+            on_phase("artifact_download_started")
+        started = time.perf_counter()
+        raw, response_media_type, full_size, full_digest = (
+            self._download_artifact_range(
+                artifact_url,
+                accept=", ".join(sorted(allowed)),
+                range_start=range_start,
+                range_end=range_end,
+            )
+        )
+        elapsed_ms = (time.perf_counter() - started) * 1_000.0
+        if on_phase is not None:
+            on_phase("artifact_download_completed")
+        if response_media_type != declared_media_type:
+            raise DataAgentProtocolError(
+                "Data Agent range Content-Type does not match access response"
+            )
+        if full_digest != payload.sha256:
+            raise DataAgentArtifactIntegrityError(
+                "Data Agent range ETag does not match full artifact digest"
+            )
+        range_digest = sha256(raw).hexdigest()
+        if range_digest != expected_range_sha256:
+            raise DataAgentArtifactIntegrityError(
+                f"Data Agent artifact range for access {request.access_id} "
+                "failed SHA-256 verification"
+            )
+        return DataAgentBinaryRangeArtifact(
+            access_id=request.access_id,
+            media_type=response_media_type,
+            data=raw,
+            range_start=range_start,
+            range_end=range_end,
+            range_size_bytes=len(raw),
+            range_sha256=range_digest,
+            full_artifact_size_bytes=full_size,
+            full_artifact_sha256=full_digest,
             object_id=refreshed.object_id,
             object_catalog_version=refreshed.object_catalog_version,
             location=refreshed.location,
@@ -1227,6 +1421,105 @@ class HttpDataAgentClient:
                 "Data Agent artifact Content-Type is required"
             )
         return raw, media_type
+
+    def _download_artifact_range(
+        self,
+        artifact_url: str,
+        *,
+        accept: str,
+        range_start: int,
+        range_end: int,
+    ) -> tuple[bytes, str, int, str]:
+        expected_size = range_end - range_start + 1
+        headers = {
+            "Accept": accept,
+            "Range": f"bytes={range_start}-{range_end}",
+            "User-Agent": "pathfinder-data-agent-client/0.1",
+            "X-Pathfinder-Protocol-Version": DATA_AGENT_API_VERSION,
+        }
+        if self.settings.token:
+            headers["Authorization"] = f"Bearer {self.settings.token}"
+        request = Request(artifact_url, headers=headers, method="GET")
+        try:
+            with self._artifact_opener(
+                request,
+                timeout=self.settings.timeout_seconds,
+            ) as response:
+                status = getattr(response, "status", None)
+                if status is None and hasattr(response, "getcode"):
+                    status = response.getcode()
+                if status != 206:
+                    raise DataAgentProtocolError(
+                        "Data Agent range response must use HTTP 206"
+                    )
+                content_range = response.headers.get("Content-Range")
+                match = re.fullmatch(
+                    r"bytes ([0-9]+)-([0-9]+)/([0-9]+)",
+                    content_range or "",
+                )
+                if match is None:
+                    raise DataAgentProtocolError(
+                        "Data Agent range Content-Range is invalid"
+                    )
+                observed_start, observed_end, full_size = (
+                    int(match.group(1)),
+                    int(match.group(2)),
+                    int(match.group(3)),
+                )
+                if (
+                    observed_start != range_start
+                    or observed_end != range_end
+                    or full_size <= range_end
+                ):
+                    raise DataAgentProtocolError(
+                        "Data Agent range Content-Range differs from request"
+                    )
+                content_length = response.headers.get("Content-Length")
+                try:
+                    declared_length = int(content_length or "")
+                except ValueError as exc:
+                    raise DataAgentProtocolError(
+                        "Data Agent range Content-Length is invalid"
+                    ) from exc
+                if declared_length != expected_size:
+                    raise DataAgentProtocolError(
+                        "Data Agent range Content-Length differs from request"
+                    )
+                media_type = _base_media_type(
+                    response.headers.get("Content-Type", "")
+                )
+                etag = response.headers.get("ETag", "")
+                if re.fullmatch(r'"[0-9a-f]{64}"', etag) is None:
+                    raise DataAgentProtocolError(
+                        "Data Agent range ETag must be a full artifact SHA-256"
+                    )
+                raw = response.read(expected_size + 1)
+        except HTTPError as exc:
+            try:
+                status_code = exc.code
+            finally:
+                exc.close()
+            if 300 <= status_code < 400:
+                raise DataAgentArtifactRedirectError(
+                    "Data Agent artifact redirects are not allowed"
+                ) from None
+            raise DataAgentHTTPError(
+                status_code,
+                "artifact range request failed",
+            ) from None
+        except (URLError, TimeoutError, socket.timeout):
+            raise DataAgentUnavailableError(
+                "cannot reach the configured Data Agent artifact endpoint"
+            ) from None
+        if len(raw) != expected_size:
+            raise DataAgentProtocolError(
+                "Data Agent artifact range body length differs from request"
+            )
+        if not media_type:
+            raise DataAgentProtocolError(
+                "Data Agent artifact range Content-Type is required"
+            )
+        return raw, media_type, full_size, etag[1:-1]
 
     def get_access_telemetry(
         self,

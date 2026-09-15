@@ -165,17 +165,22 @@ def _compose_bytes(
                 '      - "/artifacts"',
             ])
         lines.extend(command_lines)
-        if node_id == semantic_executor_node_id:
+        if node_id == semantic_executor_node_id or node_id in source_node_ids:
             # Bare environment names deliberately inherit values at `docker
             # compose up` time.  The generated package contains no secret,
             # endpoint, or model value.
-            lines.extend([
+            environment = [
                 "    environment:",
+                "      - PATHFINDER_CONTAINER_NODE_TOKEN",
+            ]
+            if node_id == semantic_executor_node_id:
+                environment.extend([
                 "      - PATHFINDER_SEMANTIC_LLM_BASE_URL",
                 "      - PATHFINDER_SEMANTIC_LLM_MODEL",
                 "      - PATHFINDER_SEMANTIC_LLM_API_KEY",
                 "      - PATHFINDER_SEMANTIC_LLM_TIMEOUT_SECONDS",
-            ])
+                ])
+            lines.extend(environment)
         lines.extend([
             "    read_only: true",
             "    tmpfs:",
@@ -629,6 +634,9 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
                 f"Compose build policy changed for {node['node_id']}",
             )
             semantic_enabled = node["node_id"] == semantic_executor_node_id
+            is_artifact_source = (
+                node["node_id"] in semantic_artifact_source_node_ids
+            )
             _require(
                 ('      - "--enable-semantic-llm"' in service_block) is semantic_enabled,
                 f"Compose semantic executor policy changed for {node['node_id']}",
@@ -654,7 +662,11 @@ def verify_local_container_compose(output_dir: str | Path) -> dict[str, Any]:
                         f"      - {_yaml_scalar(source_name)}" in service_block,
                         f"missing semantic allowed source container: {source_name}",
                     )
-            is_artifact_source = node["node_id"] in semantic_artifact_source_node_ids
+            if semantic_enabled or is_artifact_source:
+                _require(
+                    "      - PATHFINDER_CONTAINER_NODE_TOKEN" in service_block,
+                    "missing semantic node bearer-token environment passthrough",
+                )
             _require(
                 ('      - "--semantic-artifact-root"' in service_block)
                 == is_artifact_source,

@@ -32,6 +32,7 @@ from pathfinder.distributed.scoring import (
 )
 
 from .container_node import (
+    CONTAINER_NODE_BEARER_TOKEN_ENV,
     CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION,
     ContainerNodeRuntime,
@@ -197,13 +198,22 @@ def _load_semantic_workloads(path: str | Path) -> tuple[bytes, dict[str, Any], l
     return raw, document, normalized
 
 
-def _request_json(url: str, payload: Mapping[str, Any], timeout_seconds: float) -> dict[str, Any]:
+def _request_json(
+    url: str,
+    payload: Mapping[str, Any],
+    timeout_seconds: float,
+    bearer_token: str,
+) -> dict[str, Any]:
     body = _canonical_bytes(payload)
     request = Request(
         url,
         data=body,
         method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": "Bearer " + bearer_token,
+        },
     )
     try:
         with _loopback_opener().open(
@@ -283,6 +293,15 @@ def execute_local_container_semantic_run(
     compose_root = Path(compose_package_dir).resolve()
     compose = verify_local_container_compose(compose_root)
     _require(compose.get("semantic_quality_enabled") is True, "Compose package has no semantic executor")
+    bearer_token = os.environ.get(CONTAINER_NODE_BEARER_TOKEN_ENV)
+    _require(
+        isinstance(bearer_token, str)
+        and bool(bearer_token)
+        and bearer_token == bearer_token.strip()
+        and bearer_token.isascii()
+        and all(33 <= ord(character) <= 126 for character in bearer_token),
+        f"{CONTAINER_NODE_BEARER_TOKEN_ENV} is required and must be printable ASCII",
+    )
     raw_manifest, manifest, workloads = _load_semantic_workloads(semantic_workload_manifest)
     scoring_rule = str(manifest["success_scoring_rule"])
     executor_node_id = str(manifest["semantic_executor_node_id"])
@@ -400,7 +419,12 @@ def execute_local_container_semantic_run(
             })
         else:
             request["prompt"] = prompt
-        response = _request_json(semantic_url, request, request_timeout_seconds)
+        response = _request_json(
+            semantic_url,
+            request,
+            request_timeout_seconds,
+            bearer_token,
+        )
         _require(
             response.get("schema_version") == CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION,
             "semantic executor returned an unsupported result schema",

@@ -753,6 +753,7 @@ class DataAgentService:
             "api_version": DATA_AGENT_API_VERSION,
             "node_id": self.manifest.node_id,
             "representations": sorted(self.manifest.representations),
+            "credentials_recorded": False,
         }
         if self.manifest.object_catalog is not None:
             payload["object_catalog_version"] = (

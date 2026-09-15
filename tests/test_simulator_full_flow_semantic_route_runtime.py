@@ -1,0 +1,826 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import unittest
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Mapping, Sequence
+
+from pathfinder.simulator.full_flow_semantic_route_runtime import (
+    AdapterTelemetry,
+    ArtifactAccess,
+    ArtifactIdentity,
+    AuthenticatedN1Score,
+    CacheInsertResult,
+    CacheLookupResult,
+    ControlAdmission,
+    ExactContentRange,
+    GenericSemanticRouteCoordinator,
+    InMemoryRouteExecutionStore,
+    IndexSelection,
+    PreparedSemanticInput,
+    ProvisioningReference,
+    SemanticInferenceResult,
+    SemanticRouteAdapters,
+    SemanticRouteRuntimeError,
+    TransferResult,
+)
+from tests import test_simulator_full_flow_semantic_execution_admission as admission_fixture
+
+
+def _canonical(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _sha(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+PAYLOADS = {
+    "raw_video": b"0123456789-raw-video-content",
+    "multimodal_digest": b"a person opens the door, then walks outside",
+    "sampled_frame_bundle": b"ustar-fixture-with-two-ordered-jpeg-frames",
+}
+ORACLE_ID = "generic-route-oracle-v1"
+PUBLIC_SET_SHA = _sha(b"generic-route-public-task-set")
+
+
+def _bound_case(
+    trials: Sequence[Mapping[str, Any]],
+    stages: Sequence[Mapping[str, Any]],
+    *,
+    route_family: str,
+    workload_class: str | None = None,
+    executor_node_id: str | None = None,
+    repetition: int | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    trial = next(
+        json.loads(json.dumps(value))
+        for value in trials
+        if value["route_family"] == route_family
+        and (workload_class is None or value["workload_class"] == workload_class)
+        and (executor_node_id is None or value["executor_node_id"] == executor_node_id)
+        and (repetition is None or value["repetition"] == repetition)
+    )
+    rows = {
+        row["stage_key"]: json.loads(json.dumps(row))
+        for row in stages
+        if row["trial_key"] == trial["trial_key"]
+    }
+    selected = [rows[key] for key in trial["semantic_stage_keys"]]
+
+    for identity in trial["representation_identities"]:
+        representation = identity["representation_id"]
+        payload = PAYLOADS[representation]
+        identity["representation_binding"]["artifact_sha256"] = _sha(payload)
+        identity["representation_binding"]["artifact_size_bytes"] = len(payload)
+    identity_by_representation = {
+        row["representation_id"]: row for row in trial["representation_identities"]
+    }
+    for row in selected:
+        stage_identity = row["object_representation_identity"]
+        representation = stage_identity["representation_id"]
+        if representation is not None:
+            source = identity_by_representation[representation]
+            stage_identity["representation_binding"] = json.loads(
+                json.dumps(source["representation_binding"])
+            )
+    trial["bound_stage_sha256"] = [_sha(_canonical(row)) for row in selected]
+    return trial, selected
+
+
+class FakeAdapters:
+    def __init__(
+        self,
+        *,
+        cache_branch: str = "miss",
+        omit_index_range: bool = False,
+        unauthenticated_score: bool = False,
+        substitute_transfer: bool = False,
+    ) -> None:
+        self.cache_branch = cache_branch
+        self.omit_index_range = omit_index_range
+        self.unauthenticated_score = unauthenticated_score
+        self.substitute_transfer = substitute_transfer
+        self.calls: Counter[str] = Counter()
+        self.events: list[tuple[str, str]] = []
+        self.last_range_call: dict[str, Any] | None = None
+        self.last_score_request: dict[str, Any] | None = None
+
+    @staticmethod
+    def _metric(*, read: int = 0, sent: int = 0) -> AdapterTelemetry:
+        return AdapterTelemetry(service_time_ms=1.25, bytes_read=read, bytes_sent=sent)
+
+    def admit(self, *, run_id: str, trial: Mapping[str, Any], stage: Mapping[str, Any]) -> ControlAdmission:
+        self.calls["admit"] += 1
+        self.events.append(("admit", stage["stage_key"]))
+        return ControlAdmission(_sha(f"{run_id}|{trial['trial_key']}".encode()), self._metric())
+
+    def query(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        public_task: Mapping[str, Any],
+        expected_object_id: str,
+    ) -> IndexSelection:
+        del run_id, public_task
+        self.calls["query"] += 1
+        self.events.append(("query", stage["stage_key"]))
+        segment = None
+        if trial["route_family"] == "indexed-raw" and not self.omit_index_range:
+            identity = next(
+                row for row in trial["representation_identities"]
+                if row["representation_id"] == "raw_video"
+            )["representation_binding"]
+            raw = PAYLOADS["raw_video"]
+            start, end = 3, 11
+            segment = ExactContentRange(
+                object_id=expected_object_id,
+                representation_id="raw_video",
+                object_catalog_version=identity["object_catalog_version"],
+                full_artifact_size_bytes=len(raw),
+                full_artifact_sha256=_sha(raw),
+                range_start=start,
+                range_end=end,
+                range_sha256=_sha(raw[start : end + 1]),
+            )
+        commitment = {
+            "selected_object_id": expected_object_id,
+            "segment": None if segment is None else segment.to_dict(),
+        }
+        return IndexSelection(
+            selected_object_id=expected_object_id,
+            index_result_sha256=_sha(_canonical(commitment)),
+            segment=segment,
+            telemetry=self._metric(sent=len(_canonical(commitment))),
+        )
+
+    def fetch_full(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        identity: ArtifactIdentity,
+        upstream_values: Sequence[Any],
+    ) -> ArtifactAccess:
+        del run_id, trial, upstream_values
+        self.calls[f"fetch-{stage['logical_node_ids'][0]}"] += 1
+        self.events.append(("fetch", stage["stage_key"]))
+        payload = PAYLOADS[identity.representation_id]
+        return ArtifactAccess(
+            source_identity=identity,
+            payload=payload,
+            telemetry=self._metric(read=len(payload)),
+        )
+
+    def build_request(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        identity: ArtifactIdentity,
+        selection: IndexSelection,
+    ) -> Any:
+        self.calls["range-request"] += 1
+        return {
+            "run_id": run_id,
+            "trial_key": trial["trial_key"],
+            "stage_key": stage["stage_key"],
+            "identity": identity,
+            "selection": selection,
+        }
+
+    def fetch_binary_artifact_range(
+        self,
+        request: Any,
+        *,
+        range_start: int,
+        range_end: int,
+        expected_range_sha256: str,
+        allowed_media_types: frozenset[str] | set[str] | tuple[str, ...],
+        on_phase: Any = None,
+    ) -> Any:
+        del on_phase
+        self.calls["range-fetch"] += 1
+        identity: ArtifactIdentity = request["identity"]
+        raw = PAYLOADS["raw_video"]
+        selected = raw[range_start : range_end + 1]
+        self.last_range_call = {
+            "range_start": range_start,
+            "range_end": range_end,
+            "expected_range_sha256": expected_range_sha256,
+            "allowed_media_types": tuple(allowed_media_types),
+        }
+        return SimpleNamespace(
+            data=selected,
+            range_start=range_start,
+            range_end=range_end,
+            range_size_bytes=len(selected),
+            range_sha256=_sha(selected),
+            full_artifact_size_bytes=len(raw),
+            full_artifact_sha256=_sha(raw),
+            object_id=identity.object_id,
+            object_catalog_version=identity.object_catalog_version,
+            download_elapsed_ms=2.5,
+        )
+
+    def transfer(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        value: Any,
+    ) -> TransferResult:
+        del run_id, trial
+        self.calls["transfer"] += 1
+        self.events.append(("transfer", stage["stage_key"]))
+        forwarded = value
+        if self.substitute_transfer and isinstance(value, ArtifactAccess):
+            forwarded = ArtifactAccess(
+                source_identity=value.source_identity,
+                payload=b"substitution",
+            )
+        if isinstance(value, ArtifactAccess):
+            size = len(value.payload)
+        elif isinstance(value, PreparedSemanticInput):
+            size = len(value.payload)
+        elif isinstance(value, SemanticInferenceResult):
+            size = len(value.final_answer.encode())
+        else:
+            size = len(_canonical({"kind": type(value).__name__}))
+        return TransferResult(
+            value=forwarded,
+            transfer_sha256=_sha(f"{stage['stage_key']}|{size}".encode()),
+            telemetry=self._metric(sent=size),
+        )
+
+    def lookup(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        identity: ArtifactIdentity,
+    ) -> CacheLookupResult:
+        del run_id
+        self.calls["lookup"] += 1
+        self.events.append(("lookup", stage["stage_key"]))
+        return CacheLookupResult(
+            node_id=trial["executor_node_id"],
+            cache_id=f"cache-{trial['executor_node_id'].lower()}",
+            branch=self.cache_branch,
+            runtime_epoch="cache-epoch-v1",
+            source_insert_trial_key=(
+                trial["trial_key"].rsplit("|", 1)[0]
+                + f"|r{trial['repetition'] - 1:04d}"
+                if self.cache_branch == "hit"
+                else None
+            ),
+            lookup_sha256=_sha(
+                f"{identity.commitment}|{self.cache_branch}".encode()
+            ),
+            telemetry=self._metric(),
+        )
+
+    def read(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        identity: ArtifactIdentity,
+        lookup: CacheLookupResult,
+    ) -> ArtifactAccess:
+        del run_id, trial, lookup
+        self.calls["cache-read"] += 1
+        self.events.append(("cache-read", stage["stage_key"]))
+        payload = PAYLOADS[identity.representation_id]
+        return ArtifactAccess(
+            identity,
+            payload,
+            telemetry=self._metric(read=len(payload)),
+        )
+
+    def insert(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        identity: ArtifactIdentity,
+        lookup: CacheLookupResult,
+        artifact: ArtifactAccess,
+    ) -> CacheInsertResult:
+        del run_id
+        self.calls["cache-insert"] += 1
+        self.events.append(("cache-insert", stage["stage_key"]))
+        return CacheInsertResult(
+            node_id=trial["executor_node_id"],
+            cache_id=lookup.cache_id,
+            runtime_epoch=lookup.runtime_epoch,
+            insert_sha256=_sha(f"{stage['stage_key']}|{identity.commitment}".encode()),
+            artifact=artifact,
+            telemetry=self._metric(sent=len(artifact.payload)),
+        )
+
+    def prepare(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        public_task: Mapping[str, Any],
+        mode: str,
+        artifacts: Sequence[ArtifactAccess],
+    ) -> PreparedSemanticInput:
+        del run_id, trial, stage, public_task
+        self.calls[f"prepare-{mode}"] += 1
+        payload = _canonical({
+            "mode": mode,
+            "artifact_payload_sha256": [value.payload_sha256 for value in artifacts],
+        })
+        identities = tuple(value.source_identity for value in artifacts)
+        commitment = _sha(_canonical({
+            "mode": mode,
+            "payload_sha256": _sha(payload),
+            "payload_size_bytes": len(payload),
+            "component_identity_sha256": [value.commitment for value in identities],
+        }))
+        return PreparedSemanticInput(
+            mode=mode,
+            payload=payload,
+            component_identities=identities,
+            preparation_sha256=commitment,
+            telemetry=self._metric(read=sum(len(value.payload) for value in artifacts)),
+        )
+
+    def infer(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        public_task: Mapping[str, Any],
+        model_input: PreparedSemanticInput,
+    ) -> SemanticInferenceResult:
+        del run_id, trial, stage, public_task
+        self.calls["infer"] += 1
+        request_sha = _sha(b"request|" + model_input.payload)
+        return SemanticInferenceResult(
+            final_answer="B",
+            model="qwen3.8-27b",
+            input_sha256=model_input.payload_sha256,
+            request_sha256=request_sha,
+            result_sha256=_sha(f"{request_sha}|B".encode()),
+            telemetry=self._metric(read=len(model_input.payload), sent=1),
+        )
+
+    def score_once_and_verify(self, request: Mapping[str, Any]) -> AuthenticatedN1Score:
+        self.calls["score"] += 1
+        self.last_score_request = dict(request)
+        result = {
+            "schema_version": "pathfinder.n1-score-result/v1alpha2",
+            "status": "SCORED",
+            "score_request_id": request["score_request_id"],
+            "evaluation_unit_id": request["evaluation_unit_id"],
+            "oracle_id": ORACLE_ID,
+            "node_id": "N1",
+            "run_id": request["run_id"],
+            "trial_id": request["trial_id"],
+            "object_id": request["object_id"],
+            "task_binding_sha256": request["task_binding_sha256"],
+            "request_sha256": _sha(_canonical(request)),
+            "prediction_sha256": _sha(request["predicted_answer"].encode()),
+            "success_scoring_rule": "multiple-choice-option-id-exact-match-v1",
+            "correct": True,
+            "score": 1.0,
+            "public_task_set_sha256": PUBLIC_SET_SHA,
+            "oracle_instance_hmac_sha256": "a" * 64,
+            "score_evidence_hmac_sha256": "b" * 64,
+            "idempotent_replay": False,
+            "hidden_answer_returned": False,
+            "credentials_recorded": False,
+            "eligible_for_scientific_claims": False,
+        }
+        result["result_content_sha256"] = _sha(_canonical(result))
+        verification = _sha(_canonical({
+            "domain": "pathfinder.authenticated-n1-score-verification/v1",
+            "request_sha256": result["request_sha256"],
+            "result_content_sha256": result["result_content_sha256"],
+            "score_evidence_hmac_sha256": result["score_evidence_hmac_sha256"],
+        }))
+        return AuthenticatedN1Score(
+            result=result,
+            authentication_verified=not self.unauthenticated_score,
+            verification_sha256=verification,
+            telemetry=self._metric(sent=len(_canonical(result))),
+        )
+
+    def resolve(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        chain_id: str,
+        logical_object_id: str,
+        identity: ArtifactIdentity,
+    ) -> ProvisioningReference:
+        del run_id, trial
+        self.calls["provision"] += 1
+        return ProvisioningReference(
+            chain_id=chain_id,
+            logical_object_id=logical_object_id,
+            artifact_identity=identity,
+            n5_evidence_sha256=_sha(f"N5|{identity.commitment}".encode()),
+            n4_publication_sha256=_sha(f"N4|{identity.commitment}".encode()),
+            available=True,
+        )
+
+    def bundle(self) -> SemanticRouteAdapters:
+        return SemanticRouteAdapters(
+            control=self,
+            index=self,
+            artifacts=self,
+            range_fetcher=self,
+            range_request_factory=self,
+            transport=self,
+            cache=self,
+            model_input=self,
+            semantic=self,
+            scorer=self,
+            provisioning=self,
+        )
+
+
+def _coordinator(fake: FakeAdapters, store: InMemoryRouteExecutionStore | None = None) -> GenericSemanticRouteCoordinator:
+    return GenericSemanticRouteCoordinator(
+        adapters=fake.bundle(),
+        store=store or InMemoryRouteExecutionStore(),
+        oracle_id=ORACLE_ID,
+        oracle_public_task_set_sha256=PUBLIC_SET_SHA,
+    )
+
+
+class FullFlowSemanticRouteRuntimeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        admission_fixture.FullFlowSemanticExecutionAdmissionTest.setUpClass()
+        owner = admission_fixture.FullFlowSemanticExecutionAdmissionTest(
+            "test_freezes_all_trials_as_blocked_not_submittable"
+        )
+        cls.admission = owner._freeze("generic-route-runtime-source")
+        cls.trials = admission_fixture._read_jsonl(
+            cls.admission / "semantic-execution-trials.jsonl"
+        )
+        cls.stages = admission_fixture._read_jsonl(
+            cls.admission / "semantic-execution-stages.jsonl"
+        )
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        admission_fixture.FullFlowSemanticExecutionAdmissionTest.tearDownClass()
+
+    def test_raw_route_runs_n3_n7_n6_n1_with_prepared_frames(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="raw",
+            executor_node_id="N7",
+        )
+        fake = FakeAdapters()
+        evidence = _coordinator(fake).execute(
+            run_id="generic-raw-run-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertEqual(evidence["status"], "COMPLETE")
+        self.assertEqual(evidence["route"]["executor_node_id"], "N7")
+        self.assertEqual(evidence["model_input"]["mode"], "raw-prepared-frames")
+        self.assertEqual(fake.calls["fetch-N3"], 1)
+        self.assertEqual(fake.calls["range-fetch"], 0)
+        self.assertEqual(fake.calls["infer"], 1)
+        self.assertEqual(fake.calls["score"], 1)
+        self.assertTrue(evidence["n1_exactly_once_authenticated_score_verified"])
+        self.assertNotIn("final_answer", evidence["semantic"])
+
+    def test_indexed_raw_uses_exact_n2_range_and_compatible_range_fetcher(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="indexed-raw",
+            executor_node_id="N7",
+        )
+        fake = FakeAdapters()
+        evidence = _coordinator(fake).execute(
+            run_id="generic-indexed-run-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertEqual(fake.calls["query"], 1)
+        self.assertEqual(fake.calls["range-request"], 1)
+        self.assertEqual(fake.calls["range-fetch"], 1)
+        self.assertEqual(fake.calls["fetch-N3"], 0)
+        self.assertEqual(
+            fake.last_range_call,
+            {
+                "range_start": 3,
+                "range_end": 11,
+                "expected_range_sha256": _sha(PAYLOADS["raw_video"][3:12]),
+                "allowed_media_types": ("video/mp4",),
+            },
+        )
+        self.assertEqual(evidence["model_input"]["mode"], "raw-prepared-frames")
+        self.assertTrue(evidence["n2_exact_range_required_for_indexed_raw"])
+
+    def test_indexed_raw_fails_closed_without_content_bound_range(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="indexed-raw",
+        )
+        fake = FakeAdapters(omit_index_range=True)
+        with self.assertRaisesRegex(
+            SemanticRouteRuntimeError,
+            "exact content-bound N2 range",
+        ):
+            _coordinator(fake).execute(
+                run_id="generic-no-range-v1",
+                bound_trial=trial,
+                bound_stages=stages,
+            )
+        self.assertEqual(fake.calls["range-fetch"], 0)
+        self.assertEqual(fake.calls["infer"], 0)
+        self.assertEqual(fake.calls["score"], 0)
+
+    def test_remote_digest_and_n5_publication_reference_are_preserved(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="remote-derived",
+            workload_class="W1",
+            executor_node_id="N7",
+        )
+        fake = FakeAdapters()
+        evidence = _coordinator(fake).execute(
+            run_id="generic-digest-run-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertEqual(evidence["model_input"]["mode"], "digest")
+        self.assertEqual(fake.calls["fetch-N4"], 1)
+        self.assertEqual(fake.calls["provision"], 1)
+        self.assertEqual(len(evidence["provisioning_references"]), 1)
+        self.assertTrue(evidence["n5_provisioning_references_verified"])
+
+    def test_remote_digest_frames_fusion_runs_on_n8(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="remote-derived",
+            workload_class="W3",
+            executor_node_id="N8",
+        )
+        fake = FakeAdapters()
+        evidence = _coordinator(fake).execute(
+            run_id="generic-fusion-n8-run-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertEqual(evidence["route"]["executor_node_id"], "N8")
+        self.assertEqual(evidence["model_input"]["mode"], "digest+frames-fusion")
+        self.assertEqual(fake.calls["fetch-N4"], 2)
+        self.assertEqual(fake.calls["provision"], 2)
+        self.assertEqual(fake.calls["prepare-digest+frames-fusion"], 1)
+
+    def test_cache_miss_executes_only_remote_insert_branch(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="local-cache-derived",
+            workload_class="W3",
+            executor_node_id="N7",
+        )
+        fake = FakeAdapters(cache_branch="miss")
+        evidence = _coordinator(fake).execute(
+            run_id="generic-cache-miss-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertEqual(fake.calls["lookup"], 2)
+        self.assertEqual(fake.calls["cache-read"], 0)
+        self.assertEqual(fake.calls["cache-insert"], 2)
+        self.assertEqual(fake.calls["fetch-N4"], 2)
+        self.assertEqual(
+            {row["branch"] for row in evidence["cache_branches"]},
+            {"miss"},
+        )
+        skipped = {
+            row["stage_key"].rsplit("|", 1)[-1]
+            for row in evidence["stage_results"]
+            if row["state"] == "SKIPPED_INACTIVE_CONDITION"
+        }
+        self.assertEqual(skipped, {"read-local-digest", "read-local-frames"})
+
+    def test_cache_hit_executes_only_local_branch_on_n8(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="local-cache-derived",
+            workload_class="W4",
+            executor_node_id="N8",
+            repetition=1,
+        )
+        fake = FakeAdapters(cache_branch="hit")
+        evidence = _coordinator(fake).execute(
+            run_id="generic-cache-hit-n8-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertEqual(evidence["route"]["executor_node_id"], "N8")
+        self.assertEqual(evidence["model_input"]["mode"], "frame-bundle")
+        self.assertEqual(fake.calls["cache-read"], 1)
+        self.assertEqual(fake.calls["cache-insert"], 0)
+        self.assertEqual(fake.calls["fetch-N4"], 0)
+        skipped = {
+            row["stage_key"].rsplit("|", 1)[-1]
+            for row in evidence["stage_results"]
+            if row["state"] == "SKIPPED_INACTIVE_CONDITION"
+        }
+        self.assertEqual(skipped, {"read-remote", "transfer-remote", "insert"})
+        self.assertEqual(evidence["cache_branches"][0]["branch"], "hit")
+
+    def test_cache_hit_without_frozen_paired_predecessor_is_rejected(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="local-cache-derived",
+            workload_class="W4",
+            executor_node_id="N8",
+            repetition=0,
+        )
+        fake = FakeAdapters(cache_branch="hit")
+        with self.assertRaisesRegex(
+            SemanticRouteRuntimeError,
+            "frozen repetition lifecycle",
+        ):
+            _coordinator(fake).execute(
+                run_id="generic-cache-wrong-branch-v1",
+                bound_trial=trial,
+                bound_stages=stages,
+            )
+        self.assertEqual(fake.calls["cache-read"], 0)
+        self.assertEqual(fake.calls["score"], 0)
+
+    def test_replay_returns_stored_evidence_without_duplicate_score(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="remote-derived",
+            workload_class="W1",
+        )
+        fake = FakeAdapters()
+        store = InMemoryRouteExecutionStore()
+        coordinator = _coordinator(fake, store)
+        first = coordinator.execute(
+            run_id="generic-idempotent-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        calls = fake.calls.copy()
+        second = coordinator.execute(
+            run_id="generic-idempotent-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertFalse(first["idempotent_replay"])
+        self.assertTrue(second["idempotent_replay"])
+        self.assertEqual(fake.calls, calls)
+        self.assertEqual(fake.calls["score"], 1)
+        self.assertEqual(first["evidence_sha256"], second["evidence_sha256"])
+
+        changed = json.loads(json.dumps(trial))
+        changed["worker_alias"] = "different-worker-alias"
+        with self.assertRaisesRegex(
+            SemanticRouteRuntimeError,
+            "reused for different frozen input",
+        ):
+            coordinator.execute(
+                run_id="generic-idempotent-v1",
+                bound_trial=changed,
+                bound_stages=stages,
+            )
+        self.assertEqual(fake.calls["score"], 1)
+
+    def test_bound_stage_tampering_is_rejected_before_any_adapter(self) -> None:
+        trial, stages = _bound_case(self.trials, self.stages, route_family="raw")
+        stages[1]["logical_node_ids"] = ["N4"]
+        fake = FakeAdapters()
+        with self.assertRaisesRegex(SemanticRouteRuntimeError, "content changed"):
+            _coordinator(fake).execute(
+                run_id="generic-tamper-v1",
+                bound_trial=trial,
+                bound_stages=stages,
+            )
+        self.assertFalse(fake.calls)
+
+    def test_missing_and_extra_stage_are_rejected(self) -> None:
+        trial, stages = _bound_case(self.trials, self.stages, route_family="raw")
+        for changed in (stages[:-1], stages + [dict(stages[-1])]):
+            fake = FakeAdapters()
+            with self.assertRaisesRegex(
+                SemanticRouteRuntimeError,
+                "missing or contains unused",
+            ):
+                _coordinator(fake).execute(
+                    run_id="generic-stage-set-v1",
+                    bound_trial=trial,
+                    bound_stages=changed,
+                )
+            self.assertFalse(fake.calls)
+
+    def test_unauthenticated_score_is_never_emitted_as_evidence(self) -> None:
+        trial, stages = _bound_case(self.trials, self.stages, route_family="raw")
+        fake = FakeAdapters(unauthenticated_score=True)
+        with self.assertRaisesRegex(SemanticRouteRuntimeError, "not authenticated"):
+            _coordinator(fake).execute(
+                run_id="generic-unauthenticated-v1",
+                bound_trial=trial,
+                bound_stages=stages,
+            )
+        self.assertEqual(fake.calls["score"], 1)
+
+    def test_transport_substitution_fails_closed(self) -> None:
+        trial, stages = _bound_case(self.trials, self.stages, route_family="raw")
+        fake = FakeAdapters(substitute_transfer=True)
+        with self.assertRaisesRegex(SemanticRouteRuntimeError, "substituted"):
+            _coordinator(fake).execute(
+                run_id="generic-substitution-v1",
+                bound_trial=trial,
+                bound_stages=stages,
+            )
+        self.assertEqual(fake.calls["infer"], 0)
+        self.assertEqual(fake.calls["score"], 0)
+
+    def test_public_task_tampering_is_rejected_before_execution(self) -> None:
+        trial, stages = _bound_case(self.trials, self.stages, route_family="raw")
+        trial["public_task_binding"]["question"] += " changed"
+        fake = FakeAdapters()
+        with self.assertRaisesRegex(SemanticRouteRuntimeError, "not canonical"):
+            _coordinator(fake).execute(
+                run_id="generic-task-tamper-v1",
+                bound_trial=trial,
+                bound_stages=stages,
+            )
+        self.assertFalse(fake.calls)
+
+    def test_evidence_is_neutral_credential_free_and_bridge_ready(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="remote-derived",
+            workload_class="W1",
+        )
+        evidence = _coordinator(FakeAdapters()).execute(
+            run_id="generic-neutral-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        encoded = json.dumps(evidence, sort_keys=True)
+        self.assertNotIn("correct_answer_id", encoded)
+        self.assertNotIn("bearer_token", encoded)
+        self.assertNotIn("http://", encoded)
+        self.assertFalse(evidence["credentials_recorded"])
+        self.assertEqual("B", evidence["n1_score_request"]["predicted_answer"])
+        self.assertFalse(
+            evidence["n1_score_result"]["hidden_answer_returned"]
+        )
+        self.assertEqual(
+            evidence["semantic"]["final_answer_sha256"],
+            evidence["n1_score_result"]["prediction_sha256"],
+        )
+        self.assertEqual(
+            evidence["scoring"]["score_evidence_hmac_sha256"],
+            evidence["n1_score_result"]["score_evidence_hmac_sha256"],
+        )
+        candidate = evidence["neutral_observation_candidate"]
+        self.assertTrue(candidate["score_authenticity_verified"])
+        self.assertFalse(candidate["monetary_measurement_available"])
+        self.assertIn("component_service_time_ms", candidate)
+        self.assertIn("byte_measurements", candidate)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,5 +1,7 @@
 """FlowMesh-compatible physical-layout infrastructure simulator."""
 
+from importlib import import_module
+
 from .admission import (
     TRIAL_ADMISSION_ALGORITHM,
     TRIAL_ADMISSION_SCHEMA_VERSION,
@@ -39,11 +41,14 @@ from .container_contract import (
 from .container_node import (
     CONTAINER_NODE_API_VERSION,
     CONTAINER_NODE_RESULT_SCHEMA_VERSION,
+    CONTAINER_NODE_SEMANTIC_FUSION_REQUEST_SCHEMA_VERSION,
+    CONTAINER_NODE_SEMANTIC_FUSION_RESULT_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION,
     ContainerNodeError,
     ContainerNodeRuntime,
     create_container_node_server,
+    semantic_fusion_representation_sha256,
     serve_container_node,
 )
 from .semantic_execution import (
@@ -156,13 +161,172 @@ from .trace_import import (
     verify_flowmesh_trace_import,
 )
 
+
+def _lazy(module: str, *names: str) -> dict[str, tuple[str, str]]:
+    return {name: (module, name) for name in names}
+
+
+# These higher-level modules intentionally load only when their public symbol
+# is requested.  Eagerly importing them here creates a cycle when a caller
+# starts at ``pathfinder.integrations.flowmesh``: FlowMesh imports a simulator
+# leaf module, Python initializes this package, and the orchestration modules
+# would otherwise import FlowMesh again before it has finished initializing.
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    **_lazy(
+        "full_flow_bulk_live_provisioning",
+        "AGGREGATE_RECEIPT_NAME",
+        "AGGREGATE_RECEIPT_SCHEMA_VERSION",
+        "BULK_RUN_SCHEMA_VERSION",
+        "CHECKPOINTS_DIRECTORY_NAME",
+        "CHECKPOINT_SCHEMA_VERSION",
+        "FINAL_CHECKSUMS_NAME",
+        "FINAL_DIRECTORY_NAME",
+        "JOURNAL_NAME",
+        "JOURNAL_SCHEMA_VERSION",
+        "LIVE_RECEIPT_BINDINGS_NAME",
+        "RECEIPTS_DIRECTORY_NAME",
+        "SOURCE_MANIFEST_SCHEMA_VERSION",
+        "SOURCE_MAPPING_SCHEMA_VERSION",
+        "BulkProvisioningOperation",
+        "DataProvisioningFailure",
+        "DigestBulkExecutor",
+        "ExistingDigestBulkExecutor",
+        "ExistingFrameBundleBulkExecutor",
+        "FrameBundleBulkExecutor",
+        "FullFlowBulkLiveProvisioningError",
+        "InfrastructureProvisioningFailure",
+        "LiveProvisioningOperationFailure",
+        "SemanticProvisioningFailure",
+        "freeze_full_flow_bulk_live_provisioning_source_manifest",
+        "run_full_flow_bulk_live_provisioning",
+        "verify_full_flow_bulk_live_provisioning",
+    ),
+    **_lazy(
+        "full_flow_pre_upcloud_readiness",
+        "FLOWMESH_EVIDENCE_MISSING",
+        "FLOWMESH_EVIDENCE_PRESENT",
+        "LOCAL_LIVE_EVIDENCE_MISSING",
+        "LOCAL_LIVE_EVIDENCE_PRESENT",
+        "READINESS_MANIFEST_SCHEMA_VERSION",
+        "READINESS_REPORT_SCHEMA_VERSION",
+        "REQUIRED_CODE_READY",
+        "UPCLOUD_ONLY_GAPS_REMAIN",
+        "FullFlowPreUpcloudReadinessError",
+        "freeze_full_flow_pre_upcloud_readiness",
+        "verify_full_flow_pre_upcloud_readiness",
+    ),
+    "PRE_UPCLOUD_READINESS_CHECKSUMS_NAME": (
+        "full_flow_pre_upcloud_readiness",
+        "CHECKSUMS_NAME",
+    ),
+    "PRE_UPCLOUD_READINESS_MANIFEST_NAME": (
+        "full_flow_pre_upcloud_readiness",
+        "MANIFEST_NAME",
+    ),
+    "PRE_UPCLOUD_READINESS_REPORT_NAME": (
+        "full_flow_pre_upcloud_readiness",
+        "REPORT_NAME",
+    ),
+    **_lazy(
+        "full_flow_w4_live_executor",
+        "FullFlowW4LiveExecutorError",
+        "LiveW4CandidateOperationExecutor",
+        "W4AdmissionAdapter",
+        "W4ArtifactAccessAdapter",
+        "W4ByteTransportAdapter",
+        "W4CacheAdapter",
+        "W4IndexDeployment",
+        "W4LiveComponents",
+        "W4PublicIndexAdapter",
+        "W4RankingReturnAdapter",
+        "W4SemanticRankingAdapter",
+        "W4_ARTIFACT_ACCESS_RESULT_SCHEMA_VERSION",
+        "W4_BYTE_TRANSFER_RESULT_SCHEMA_VERSION",
+        "W4_CONTROL_RESULT_SCHEMA_VERSION",
+        "W4_INDEX_ARTIFACT_CROSSWALK_SCHEMA_VERSION",
+        "W4_LIVE_COMPONENT_EVENT_SCHEMA_VERSION",
+        "W4_LIVE_COMPONENT_RECEIPT_SCHEMA_VERSION",
+        "W4_SEMANTIC_RANKING_RESULT_SCHEMA_VERSION",
+        "freeze_full_flow_w4_component_execution_receipt",
+        "freeze_full_flow_w4_index_artifact_crosswalk",
+        "verify_full_flow_w4_component_execution_receipt",
+        "verify_full_flow_w4_index_artifact_crosswalk",
+    ),
+    **_lazy(
+        "full_flow_w4_local_factory",
+        "DataAgentW4ArtifactAccessAdapter",
+        "FullFlowW4LocalFactoryError",
+        "InMemoryW4PayloadRegistry",
+        "InProcessW4AdmissionAdapter",
+        "InProcessW4ByteTransportAdapter",
+        "InProcessW4RankingReturnAdapter",
+        "N6ContainerW4SemanticRankingAdapter",
+        "RecordingW4CacheAdapter",
+        "W4ContainerSemanticClient",
+        "W4LocalRuntimeInputs",
+        "build_local_w4_live_components",
+        "local_w4_component_claim_boundary",
+    ),
+    **_lazy(
+        "full_flow_w4_local_run",
+        "FullFlowW4LocalRunError",
+        "run_full_flow_w4_local_component_execution",
+    ),
+    **{
+        name: ("neutral_awm_oed_consumer", source)
+        for name, source in {
+            "NEUTRAL_AWM_DATASET_ROW_SCHEMA_VERSION": (
+                "DATASET_ROW_SCHEMA_VERSION"
+            ),
+            "NEUTRAL_AWM_DATASET_SCHEMA_VERSION": "DATASET_SCHEMA_VERSION",
+            "NEUTRAL_AWM_EVALUATION_SCHEMA_VERSION": (
+                "EVALUATION_SCHEMA_VERSION"
+            ),
+            "NEUTRAL_AWM_OED_MANIFEST_SCHEMA_VERSION": (
+                "MANIFEST_SCHEMA_VERSION"
+            ),
+            "NEUTRAL_OED_ROW_SCHEMA_VERSION": "OED_ROW_SCHEMA_VERSION",
+            "NEUTRAL_OED_SELECTION_SCHEMA_VERSION": (
+                "OED_SELECTION_SCHEMA_VERSION"
+            ),
+            "NeutralAwmOedConsumerError": "NeutralAwmOedConsumerError",
+            "freeze_neutral_awm_oed_analysis": (
+                "freeze_neutral_awm_oed_analysis"
+            ),
+            "verify_neutral_awm_oed_analysis": (
+                "verify_neutral_awm_oed_analysis"
+            ),
+        }.items()
+    },
+}
+
+
+def __getattr__(name: str) -> object:
+    binding = _LAZY_EXPORTS.get(name)
+    if binding is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute_name = binding
+    value = getattr(import_module(f"{__name__}.{module_name}"), attribute_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
+
 __all__ = [
+    "AGGREGATE_RECEIPT_NAME",
+    "AGGREGATE_RECEIPT_SCHEMA_VERSION",
+    "BULK_RUN_SCHEMA_VERSION",
+    "BulkProvisioningOperation",
     "build_portable_execution_plan",
     "build_simulator_trials",
     "CALIBRATION_CONFIG_SCHEMA_VERSION",
     "CALIBRATION_MANIFEST_SCHEMA_VERSION",
     "CALIBRATION_REPORT_SCHEMA_VERSION",
     "calibrate_simulator_scenario",
+    "CHECKPOINTS_DIRECTORY_NAME",
+    "CHECKPOINT_SCHEMA_VERSION",
     "CONTAINER_OPERATION_SCHEMA_VERSION",
     "CONTAINER_OPERATION_LEGACY_SCHEMA_VERSION",
     "CONTAINER_EXECUTION_CHECKPOINT_ENTRY_SCHEMA_VERSION",
@@ -176,6 +340,8 @@ __all__ = [
     "CONTAINER_NODE_API_VERSION",
     "CONTAINER_NODE_RESULT_LEGACY_SCHEMA_VERSION",
     "CONTAINER_NODE_RESULT_SCHEMA_VERSION",
+    "CONTAINER_NODE_SEMANTIC_FUSION_REQUEST_SCHEMA_VERSION",
+    "CONTAINER_NODE_SEMANTIC_FUSION_RESULT_SCHEMA_VERSION",
     "CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION",
     "CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION",
     "CONTAINER_PLAN_MANIFEST_SCHEMA_VERSION",
@@ -187,6 +353,9 @@ __all__ = [
     "ContainerExecutionError",
     "ContainerNodeError",
     "ContainerNodeRuntime",
+    "DataProvisioningFailure",
+    "DataAgentW4ArtifactAccessAdapter",
+    "DigestBulkExecutor",
     "SemanticExecutionError",
     "create_container_node_server",
     "calibrate_container_backend",
@@ -197,6 +366,10 @@ __all__ = [
     "EVIDENCE_OBSERVATION_SCHEMA_VERSION",
     "EVIDENCE_SPEC_SCHEMA_VERSION",
     "EVIDENCE_SUMMARY_SCHEMA_VERSION",
+    "ExistingDigestBulkExecutor",
+    "ExistingFrameBundleBulkExecutor",
+    "FINAL_CHECKSUMS_NAME",
+    "FINAL_DIRECTORY_NAME",
     "FIT_MANIFEST_SCHEMA_VERSION",
     "FIT_REPORT_SCHEMA_VERSION",
     "FLOWMESH_ACCESS_OBSERVATION_SCHEMA_VERSION",
@@ -204,14 +377,35 @@ __all__ = [
     "FLOWMESH_TRACE_SUMMARY_SCHEMA_VERSION",
     "FLOWMESH_TRIAL_OBSERVATION_SCHEMA_VERSION",
     "FlowMeshTraceImportError",
+    "FLOWMESH_EVIDENCE_MISSING",
+    "FLOWMESH_EVIDENCE_PRESENT",
+    "FrameBundleBulkExecutor",
+    "FullFlowBulkLiveProvisioningError",
+    "FullFlowPreUpcloudReadinessError",
+    "FullFlowW4LiveExecutorError",
+    "FullFlowW4LocalFactoryError",
+    "FullFlowW4LocalRunError",
+    "InMemoryW4PayloadRegistry",
+    "InProcessW4AdmissionAdapter",
+    "InProcessW4ByteTransportAdapter",
+    "InProcessW4RankingReturnAdapter",
+    "LiveW4CandidateOperationExecutor",
+    "N6ContainerW4SemanticRankingAdapter",
     "evaluate_backend_parity",
     "execute_local_container_plan",
     "execute_local_container_semantic_run",
     "align_local_container_semantic_scores",
     "import_flowmesh_trace",
+    "InfrastructureProvisioningFailure",
+    "JOURNAL_NAME",
+    "JOURNAL_SCHEMA_VERSION",
     "load_simulator_scenario",
     "LOCAL_COMPOSE_MANIFEST_SCHEMA_VERSION",
     "LOCAL_CONTAINER_PREFLIGHT_SCHEMA_VERSION",
+    "LIVE_RECEIPT_BINDINGS_NAME",
+    "LiveProvisioningOperationFailure",
+    "LOCAL_LIVE_EVIDENCE_MISSING",
+    "LOCAL_LIVE_EVIDENCE_PRESENT",
     "LocalContainerError",
     "OPERATION_KINDS",
     "PARITY_MANIFEST_SCHEMA_VERSION",
@@ -226,7 +420,14 @@ __all__ = [
     "PORTABLE_PLAN_SCHEMA_VERSION",
     "PORTABLE_TRIAL_SCHEMA_VERSION",
     "PortablePlanError",
+    "PRE_UPCLOUD_READINESS_CHECKSUMS_NAME",
+    "PRE_UPCLOUD_READINESS_MANIFEST_NAME",
+    "PRE_UPCLOUD_READINESS_REPORT_NAME",
+    "READINESS_MANIFEST_SCHEMA_VERSION",
+    "READINESS_REPORT_SCHEMA_VERSION",
     "RESOURCE_KINDS",
+    "RECEIPTS_DIRECTORY_NAME",
+    "REQUIRED_CODE_READY",
     "RETRIEVAL_ANSWER_SCHEMA_VERSION",
     "RETRIEVAL_COHORT_SCHEMA_VERSION",
     "RETRIEVAL_CONFIG_SCHEMA_VERSION",
@@ -234,8 +435,12 @@ __all__ = [
     "RETRIEVAL_INDEX_SCHEMA_VERSION",
     "RETRIEVAL_MANIFEST_SCHEMA_VERSION",
     "RETRIEVAL_RANKING_SCHEMA_VERSION",
+    "RecordingW4CacheAdapter",
     "run_discrete_event_simulation",
+    "run_full_flow_bulk_live_provisioning",
+    "run_full_flow_w4_local_component_execution",
     "run_simulator_scenario",
+    "semantic_fusion_representation_sha256",
     "serve_container_node",
     "SIMULATOR_EVENT_SCHEMA_VERSION",
     "SIMULATOR_PLAN_SCHEMA_VERSION",
@@ -246,6 +451,7 @@ __all__ = [
     "SEMANTIC_RUN_MANIFEST_SCHEMA_VERSION",
     "SEMANTIC_SCORE_ALIGNMENT_SCHEMA_VERSION",
     "SEMANTIC_WORKLOAD_MANIFEST_SCHEMA_VERSION",
+    "SemanticProvisioningFailure",
     "SimulationEvent",
     "SimulationResult",
     "SimulatorConfigError",
@@ -255,10 +461,36 @@ __all__ = [
     "SimulatorRetrievalError",
     "SimulatorScenario",
     "SimulatorTrial",
+    "SOURCE_MANIFEST_SCHEMA_VERSION",
+    "SOURCE_MAPPING_SCHEMA_VERSION",
     "TRIAL_ADMISSION_ALGORITHM",
     "TRIAL_ADMISSION_SCHEMA_VERSION",
     "TRIAL_LATENCY_ORIGIN",
     "TrialAdmissionError",
+    "W4AdmissionAdapter",
+    "W4ArtifactAccessAdapter",
+    "W4_ARTIFACT_ACCESS_RESULT_SCHEMA_VERSION",
+    "W4ByteTransportAdapter",
+    "W4_BYTE_TRANSFER_RESULT_SCHEMA_VERSION",
+    "W4CacheAdapter",
+    "W4ContainerSemanticClient",
+    "W4_CONTROL_RESULT_SCHEMA_VERSION",
+    "W4IndexDeployment",
+    "W4_INDEX_ARTIFACT_CROSSWALK_SCHEMA_VERSION",
+    "W4LiveComponents",
+    "W4LocalRuntimeInputs",
+    "W4_LIVE_COMPONENT_EVENT_SCHEMA_VERSION",
+    "W4_LIVE_COMPONENT_RECEIPT_SCHEMA_VERSION",
+    "W4PublicIndexAdapter",
+    "W4RankingReturnAdapter",
+    "W4SemanticRankingAdapter",
+    "W4_SEMANTIC_RANKING_RESULT_SCHEMA_VERSION",
+    "freeze_full_flow_w4_component_execution_receipt",
+    "freeze_full_flow_w4_index_artifact_crosswalk",
+    "freeze_full_flow_bulk_live_provisioning_source_manifest",
+    "freeze_full_flow_pre_upcloud_readiness",
+    "build_local_w4_live_components",
+    "local_w4_component_claim_boundary",
     "trial_admission_contract",
     "validate_trial_admission_contract",
     "verify_simulator_run",
@@ -274,8 +506,22 @@ __all__ = [
     "verify_container_backend_calibration",
     "verify_local_container_compose",
     "verify_flowmesh_trace_import",
+    "verify_full_flow_bulk_live_provisioning",
+    "verify_full_flow_pre_upcloud_readiness",
+    "verify_full_flow_w4_component_execution_receipt",
+    "verify_full_flow_w4_index_artifact_crosswalk",
     "verify_portable_execution_plan",
+    "UPCLOUD_ONLY_GAPS_REMAIN",
     "fit_simulator_scenario",
     "build_local_container_compose",
     "MODEL_TIMING_SCHEMA_VERSION",
+    "NEUTRAL_AWM_DATASET_ROW_SCHEMA_VERSION",
+    "NEUTRAL_AWM_DATASET_SCHEMA_VERSION",
+    "NEUTRAL_AWM_EVALUATION_SCHEMA_VERSION",
+    "NEUTRAL_AWM_OED_MANIFEST_SCHEMA_VERSION",
+    "NEUTRAL_OED_ROW_SCHEMA_VERSION",
+    "NEUTRAL_OED_SELECTION_SCHEMA_VERSION",
+    "NeutralAwmOedConsumerError",
+    "freeze_neutral_awm_oed_analysis",
+    "verify_neutral_awm_oed_analysis",
 ]

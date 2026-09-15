@@ -712,6 +712,25 @@ class ArtifactHTTPResponse:
         return False
 
 
+class ArtifactRangeHTTPResponse(ArtifactHTTPResponse):
+    def __init__(
+        self,
+        body: bytes,
+        media_type: str,
+        *,
+        start: int,
+        end: int,
+        full_size: int,
+        full_sha256: str,
+    ) -> None:
+        super().__init__(body, media_type)
+        self.status = 206
+        self.headers.update({
+            "Content-Range": f"bytes {start}-{end}/{full_size}",
+            "ETag": f'"{full_sha256}"',
+        })
+
+
 class RecordingArtifactOpener:
     def __init__(self, response: Any) -> None:
         self.response = response
@@ -904,6 +923,102 @@ class DataAgentArtifactFetchTest(unittest.TestCase):
         )
         with self.assertRaises(DataAgentArtifactIntegrityError):
             client.fetch_artifact(self.request())
+
+    def test_fetches_an_exact_content_bound_binary_range(self) -> None:
+        full = b"0123456789"
+        selected = full[2:6]
+        response = ArtifactRangeHTTPResponse(
+            selected,
+            "video/mp4",
+            start=2,
+            end=5,
+            full_size=len(full),
+            full_sha256=sha256(full).hexdigest(),
+        )
+        client, opener = self.build(
+            full,
+            "video/mp4",
+            artifact_response=response,
+        )
+
+        result = client.fetch_binary_artifact_range(
+            self.request(),
+            range_start=2,
+            range_end=5,
+            expected_range_sha256=sha256(selected).hexdigest(),
+            allowed_media_types={"video/mp4"},
+        )
+
+        self.assertEqual(selected, result.data)
+        self.assertEqual(2, result.range_start)
+        self.assertEqual(5, result.range_end)
+        self.assertEqual(len(full), result.full_artifact_size_bytes)
+        self.assertEqual(sha256(full).hexdigest(), result.full_artifact_sha256)
+        headers = {
+            name.lower(): value
+            for name, value in opener.requests[0].header_items()
+        }
+        self.assertEqual("bytes=2-5", headers["range"])
+        self.assertEqual("Bearer test-token", headers["authorization"])
+
+    def test_range_download_rejects_unbound_or_misaligned_bytes(self) -> None:
+        full = b"0123456789"
+        selected = full[2:6]
+        cases = {
+            "range-digest": (
+                ArtifactRangeHTTPResponse(
+                    selected,
+                    "video/mp4",
+                    start=2,
+                    end=5,
+                    full_size=len(full),
+                    full_sha256=sha256(full).hexdigest(),
+                ),
+                "0" * 64,
+            ),
+            "full-digest": (
+                ArtifactRangeHTTPResponse(
+                    selected,
+                    "video/mp4",
+                    start=2,
+                    end=5,
+                    full_size=len(full),
+                    full_sha256="0" * 64,
+                ),
+                sha256(selected).hexdigest(),
+            ),
+            "offset": (
+                ArtifactRangeHTTPResponse(
+                    selected,
+                    "video/mp4",
+                    start=3,
+                    end=6,
+                    full_size=len(full),
+                    full_sha256=sha256(full).hexdigest(),
+                ),
+                sha256(selected).hexdigest(),
+            ),
+        }
+        for label, (response, range_digest) in cases.items():
+            with self.subTest(label):
+                client, _ = self.build(
+                    full,
+                    "video/mp4",
+                    artifact_response=response,
+                )
+                with self.assertRaises(
+                    (
+                        DataAgentArtifactIntegrityError,
+                        DataAgentProtocolError,
+                    )
+                ):
+                    client.fetch_binary_artifact_range(
+                        self.request(),
+                        range_start=2,
+                        range_end=5,
+                        expected_range_sha256=range_digest,
+                        allowed_media_types={"video/mp4"},
+                    )
 
 
 class TelemetryQuiescenceTest(unittest.TestCase):
@@ -1343,6 +1458,49 @@ class DataAgentClientTest(unittest.TestCase):
         )
         self.assertEqual("http", urlparse(loopback.base_url).scheme)
         self.assertEqual("https", urlparse(remote.base_url).scheme)
+
+    def test_settings_allow_only_exact_bound_simulator_private_host(
+        self,
+    ) -> None:
+        settings = DataAgentClientSettings(
+            base_url=(
+                "http://pathfinder-sim-n4-origin-warm-data-agent:8780"
+            ),
+            simulator_private_http_hosts=(
+                "pathfinder-sim-n4-origin-warm-data-agent",
+            ),
+        )
+        self.assertEqual(
+            (
+                "pathfinder-sim-n4-origin-warm-data-agent",
+            ),
+            settings.simulator_private_http_hosts,
+        )
+
+        with self.assertRaisesRegex(ValueError, "must use HTTPS"):
+            DataAgentClientSettings(
+                base_url="http://pathfinder-sim-n3-origin-cold-data-agent:8780",
+                simulator_private_http_hosts=(
+                    "pathfinder-sim-n4-origin-warm-data-agent",
+                ),
+            )
+
+    def test_settings_reject_invalid_simulator_private_host_allowlist(
+        self,
+    ) -> None:
+        for hosts in (
+            ("data-agent",),
+            ("pathfinder-sim-N4",),
+            ("pathfinder-sim-n4", "pathfinder-sim-n4"),
+        ):
+            with self.subTest(hosts=hosts), self.assertRaisesRegex(
+                ValueError,
+                "simulator_private_http_hosts",
+            ):
+                DataAgentClientSettings(
+                    base_url="https://data-agent.example",
+                    simulator_private_http_hosts=hosts,
+                )
 
 
 class RemoteDataAgentBackendTest(unittest.TestCase):

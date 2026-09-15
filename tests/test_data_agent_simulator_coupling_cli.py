@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -68,6 +69,15 @@ class DataAgentSimulatorCouplingCliTest(unittest.TestCase):
             payload = {"status": "COMPLETE", "semantic_run_id": "semantic-1"}
 
             with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PATHFINDER_CONTAINER_NODE_TOKEN": (
+                            "test-only-semantic-node-bearer"
+                        )
+                    },
+                    clear=False,
+                ),
                 mock.patch(
                     "pathfinder.distributed.registry.load_endpoint_registry",
                     return_value=registry,
@@ -155,6 +165,7 @@ class DataAgentSimulatorCouplingCliTest(unittest.TestCase):
                 ),
                 health_url="http://127.0.0.1:19086/healthz",
                 expected_execution_node_id="N6",
+                bearer_token="test-only-semantic-node-bearer",
                 timeout_seconds=12.5,
             )
 
