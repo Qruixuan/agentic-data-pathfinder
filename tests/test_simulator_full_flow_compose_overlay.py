@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from pathfinder.simulator.container_contract import plan_container_backend
+from pathfinder.simulator import full_flow_compose_overlay as overlay_module
 from pathfinder.simulator.full_flow_compose_overlay import (
     CHECKSUMS_NAME,
     COMPOSE_NAME,
+    COMPOSE_OVERLAY_SCHEMA_VERSION,
     GATE_NAME,
+    LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
     MANIFEST_NAME,
     FullFlowComposeOverlayError,
     render_full_flow_local_compose_overlay,
@@ -62,8 +66,9 @@ def _write_json(path: Path, value: object) -> Path:
 
 def _restamp(output: Path) -> None:
     documents = {
-        name: (output / name).read_bytes()
-        for name in (COMPOSE_NAME, GATE_NAME, MANIFEST_NAME)
+        path.name: path.read_bytes()
+        for path in output.iterdir()
+        if path.name != CHECKSUMS_NAME
     }
     (output / CHECKSUMS_NAME).write_bytes(b"".join(
         (
@@ -263,12 +268,23 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
         report = self._render(output, binding)
         manifest = _json(output / MANIFEST_NAME)
         compose = (output / COMPOSE_NAME).read_text(encoding="utf-8")
+        n3_service = "pathfinder-full-flow-n3-raw-data-agent"
+        n4_service = "pathfinder-full-flow-n4-derived-data-agent"
+        n3_fragment = (
+            output / f"compose.service.{n3_service}.yaml"
+        ).read_text(encoding="utf-8")
+        n4_fragment = (
+            output / f"compose.service.{n4_service}.yaml"
+        ).read_text(encoding="utf-8")
 
         self.assertEqual(
             "VERIFIED_LOCAL_COMPOSE_OVERLAY_NOT_LAUNCHED",
             report["status"],
         )
         self.assertEqual(8, report["logical_node_count"])
+        self.assertEqual(
+            COMPOSE_OVERLAY_SCHEMA_VERSION, report["schema_version"]
+        )
         self.assertEqual(19, report["compose_service_count"])
         self.assertEqual(12, report["primary_service_count"])
         self.assertEqual(7, report["companion_service_count"])
@@ -366,8 +382,18 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
         self.assertTrue(manifest["flowmesh_owns_transport_and_control"])
         self.assertFalse(manifest["services_started"])
         self.assertFalse(manifest["docker_invoked"])
+        self.assertEqual(19, manifest["selective_service_unit_count"])
+        self.assertEqual(19, report["selective_service_unit_count"])
+        self.assertEqual(
+            2, manifest["data_agent_complete_package_mount_count"]
+        )
+        self.assertEqual(
+            2, report["data_agent_complete_package_mount_count"]
+        )
+        self.assertEqual(23, len(list(output.iterdir())))
 
         self.assertEqual(19, compose.count("pathfinder.logical-node:"))
+        self.assertEqual(19, compose.count("\n    entrypoint: []\n"))
         for service in (
             "pathfinder-full-flow-n1-hidden-score",
             (
@@ -417,11 +443,96 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
         )
         self.assertIn("PATHFINDER_FULL_FLOW_SERVICE_IMAGE:?set", compose)
         self.assertIn("PATHFINDER_FULL_FLOW_NETWORK_NAME:?set", compose)
+        self.assertNotIn("PATHFINDER_N3_DATA_AGENT_MANIFEST", compose)
+        self.assertNotIn("PATHFINDER_N4_DATA_AGENT_MANIFEST", compose)
         self.assertIn(
-            "${PATHFINDER_N3_DATA_AGENT_MANIFEST:?set "
-            "PATHFINDER_N3_DATA_AGENT_MANIFEST}",
+            "/opt/pathfinder/full-flow/n3-package/"
+            "config/data-agent-manifest.json",
             compose,
         )
+        self.assertIn(
+            "${PATHFINDER_N3_PACKAGE_DIR:?set PATHFINDER_N3_PACKAGE_DIR}",
+            compose,
+        )
+        for fragment, node, service in (
+            (n3_fragment, "N3", n3_service),
+            (n4_fragment, "N4", n4_service),
+        ):
+            self.assertEqual(1, fragment.count("pathfinder.logical-node:"))
+            self.assertIn(f"  {service}:\n", fragment)
+            self.assertIn(
+                f"/opt/pathfinder/full-flow/{node.casefold()}-package/"
+                "config/data-agent-manifest.json",
+                fragment,
+            )
+            self.assertIn(
+                f"${{PATHFINDER_{node}_PACKAGE_DIR:?set "
+                f"PATHFINDER_{node}_PACKAGE_DIR}}",
+                fragment,
+            )
+            self.assertIn("        read_only: true", fragment)
+            self.assertIn("          create_host_path: false", fragment)
+            self.assertIn("    entrypoint: []", fragment)
+            self.assertNotIn(
+                f"PATHFINDER_{node}_DATA_AGENT_MANIFEST", fragment
+            )
+            self.assertIn(
+                "PATHFINDER_DATA_AGENT_TOKEN="
+                f"${{PATHFINDER_{node}_DATA_AGENT_TOKEN:?set "
+                f"PATHFINDER_{node}_DATA_AGENT_TOKEN}}",
+                fragment,
+            )
+            for unrelated in (
+                {f"N{index}" for index in range(1, 9)} - {node}
+            ):
+                self.assertNotIn(f"PATHFINDER_{unrelated}_", fragment)
+        n2_fragment = (
+            output / "compose.service.pathfinder-full-flow-n2-global-index.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("\nvolumes:\n", n2_fragment)
+
+        units = {
+            row["root_service_name"]: row
+            for row in manifest["selective_service_units"]
+        }
+        for node, service in (("N3", n3_service), ("N4", n4_service)):
+            required = units[service]["required_runtime_environment_names"]
+            credentials = units[service]["credential_environment_names"]
+            self.assertIn(f"PATHFINDER_{node}_DATA_AGENT_TOKEN", required)
+            self.assertIn(f"PATHFINDER_{node}_DATA_AGENT_TOKEN", credentials)
+            self.assertNotIn("PATHFINDER_DATA_AGENT_TOKEN", required)
+            self.assertNotIn("PATHFINDER_DATA_AGENT_TOKEN", credentials)
+
+        expected_fragments = {
+            row["compose_file"] for row in manifest["selective_service_units"]
+        }
+        actual_fragments = {
+            path.name for path in output.glob("compose.service.*.yaml")
+        }
+        self.assertEqual(expected_fragments, actual_fragments)
+        for unit in manifest["selective_service_units"]:
+            payload = (output / unit["compose_file"]).read_bytes()
+            self.assertEqual(
+                hashlib.sha256(payload).hexdigest(), unit["compose_sha256"]
+            )
+            text = payload.decode("utf-8")
+            service_names = {
+                line[2:-1]
+                for line in text.splitlines()
+                if line.startswith("  pathfinder-full-flow-")
+                and line.endswith(":")
+            }
+            self.assertEqual(
+                set(unit["included_service_names"]), service_names
+            )
+            placeholders = set(re.findall(
+                r"\$\{([A-Z][A-Z0-9_]+):\?set ", text
+            ))
+            self.assertTrue(
+                placeholders
+                <= set(unit["required_runtime_environment_names"])
+            )
+            self.assertFalse(text.endswith("volumes:\n"))
         for node_id in ("n7", "n8"):
             route = _service_block(
                 compose,
@@ -547,9 +658,18 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
             gate["serve_services"],
         )
         self.assertEqual(
-            "PATHFINDER_N4_DATA_AGENT_MANIFEST",
+            "PATHFINDER_N4_PACKAGE_DIR",
             gate["rebind_env_name"],
         )
+        self.assertEqual(
+            "PATHFINDER_N4_DATA_AGENT_MANIFEST",
+            gate["rebind_manifest_contract_env_name"],
+        )
+        self.assertEqual(
+            "config/data-agent-manifest.json",
+            gate["rebind_manifest_relative_path"],
+        )
+        self.assertTrue(gate["complete_package_read_only_mount_required"])
         self.assertIn(
             "N4-publication-service-stopped",
             gate["required_evidence_before_rebind"],
@@ -602,6 +722,141 @@ class FullFlowComposeOverlayTest(unittest.TestCase):
         self.assertEqual(
             {path.name: path.read_bytes() for path in first.iterdir()},
             {path.name: path.read_bytes() for path in second.iterdir()},
+        )
+
+    def test_w4_fragments_include_exact_dependency_closures(self) -> None:
+        binding = self._binding("w4-closures")
+        output = self.case_root / "overlay"
+        self._render(output, binding)
+        manifest = _json(output / MANIFEST_NAME)
+        units = {
+            row["root_service_name"]: row
+            for row in manifest["selective_service_units"]
+        }
+        common = {
+            "pathfinder-full-flow-n2-global-index",
+            "pathfinder-full-flow-n3-raw-data-agent",
+            "pathfinder-full-flow-n4-derived-data-agent",
+            "pathfinder-full-flow-n6-semantic-inference",
+            "pathfinder-full-flow-n7-local-index",
+            "pathfinder-full-flow-n8-local-index",
+        }
+        for node in ("n7", "n8"):
+            root = (
+                f"pathfinder-full-flow-{node}-execution-compute-"
+                "full-flow-w4-flowmesh-service"
+            )
+            cache = (
+                f"pathfinder-full-flow-{node}-execution-compute-"
+                "full-flow-cache"
+            )
+            self.assertEqual(
+                common | {root, cache},
+                set(units[root]["included_service_names"]),
+            )
+            fragment = (output / units[root]["compose_file"]).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("pathfinder-full-flow-n5-materializer:", fragment)
+            self.assertNotIn("pathfinder-full-flow-n1-hidden-score:", fragment)
+
+    def test_rechecksummed_extra_file_is_rejected_before_document_reads(
+        self,
+    ) -> None:
+        binding = self._binding("extra-file")
+        output = self.case_root / "overlay"
+        self._render(output, binding)
+        (output / "unexpected.bin").write_bytes(b"not part of the overlay")
+        _restamp(output)
+        with self.assertRaisesRegex(
+            FullFlowComposeOverlayError,
+            "file set changed",
+        ):
+            self._verify(output, binding)
+
+    def test_selective_fragment_tampering_fails_rederivation(self) -> None:
+        binding = self._binding("fragment-tamper")
+        output = self.case_root / "overlay"
+        self._render(output, binding)
+        fragment = output / (
+            "compose.service."
+            "pathfinder-full-flow-n3-raw-data-agent.yaml"
+        )
+        fragment.write_bytes(
+            fragment.read_bytes().replace(
+                b"pids_limit: 128", b"pids_limit: 999", 1
+            )
+        )
+        _restamp(output)
+        with self.assertRaisesRegex(
+            FullFlowComposeOverlayError,
+            "does not match the verified source contracts",
+        ):
+            self._verify(output, binding)
+
+    def test_missing_selective_fragment_fails_even_when_rechecksummed(
+        self,
+    ) -> None:
+        binding = self._binding("fragment-missing")
+        output = self.case_root / "overlay"
+        self._render(output, binding)
+        (output / (
+            "compose.service."
+            "pathfinder-full-flow-n3-raw-data-agent.yaml"
+        )).unlink()
+        _restamp(output)
+        with self.assertRaisesRegex(
+            FullFlowComposeOverlayError,
+            "file set changed",
+        ):
+            self._verify(output, binding)
+
+    def test_legacy_v1alpha2_overlay_remains_verifiable(self) -> None:
+        binding = self._binding("legacy-overlay")
+        output = self.case_root / "overlay"
+        inputs = overlay_module._verified_inputs(
+            self.bootstrap,
+            binding,
+            logical_plan_dir=self.logical,
+            scenario_path=SCENARIO,
+            container_plan_dir=self.container,
+        )
+        documents = overlay_module._documents(
+            overlay_id="local-eight-node-full-flow-v1",
+            bootstrap_root=inputs[0],
+            bootstrap_report=inputs[2],
+            deployment_report=inputs[3],
+            launchers=inputs[4],
+            deployment=inputs[5],
+            schema_version=LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
+        )
+        documents[CHECKSUMS_NAME] = overlay_module._checksums(documents)
+        output.mkdir()
+        for name, payload in documents.items():
+            (output / name).write_bytes(payload)
+
+        report = self._verify(output, binding)
+        manifest = _json(output / MANIFEST_NAME)
+        gate = _json(output / GATE_NAME)
+        compose = (output / COMPOSE_NAME).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
+            report["schema_version"],
+        )
+        self.assertEqual(0, report["selective_service_unit_count"])
+        self.assertEqual(4, len(list(output.iterdir())))
+        self.assertNotIn("selective_service_units", manifest)
+        self.assertIn("PATHFINDER_N3_DATA_AGENT_MANIFEST", compose)
+        self.assertEqual(
+            "pathfinder.full-flow-local-compose-stage-gate/v1alpha1",
+            gate["schema_version"],
+        )
+        self.assertEqual(
+            "PATHFINDER_N4_DATA_AGENT_MANIFEST", gate["rebind_env_name"]
+        )
+        self.assertNotIn(
+            "complete_package_read_only_mount_required", gate
         )
 
     def test_rechecksummed_compose_tampering_fails_rederivation(self) -> None:

@@ -48,18 +48,24 @@ from .full_flow_service_bootstrap import (
 )
 
 
-COMPOSE_OVERLAY_SCHEMA_VERSION = (
+LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION = (
     "pathfinder.full-flow-local-compose-overlay/v1alpha2"
 )
-COMPOSE_GATE_SCHEMA_VERSION = (
+COMPOSE_OVERLAY_SCHEMA_VERSION = (
+    "pathfinder.full-flow-local-compose-overlay/v1alpha3"
+)
+LEGACY_COMPOSE_GATE_SCHEMA_VERSION = (
     "pathfinder.full-flow-local-compose-stage-gate/v1alpha1"
+)
+COMPOSE_GATE_SCHEMA_VERSION = (
+    "pathfinder.full-flow-local-compose-stage-gate/v1alpha2"
 )
 COMPOSE_NAME = "compose.full-flow-services.yaml"
 MANIFEST_NAME = "full-flow-compose-overlay-manifest.json"
 GATE_NAME = "full-flow-compose-stage-gate.json"
 CHECKSUMS_NAME = "SHA256SUMS"
 
-_OUTPUT_NAMES = {COMPOSE_NAME, MANIFEST_NAME, GATE_NAME}
+_BASE_OUTPUT_NAMES = {COMPOSE_NAME, MANIFEST_NAME, GATE_NAME}
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\Z")
 _ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 _PLACEHOLDER = re.compile(r"\$\{([A-Z][A-Z0-9_]{0,127})\}")
@@ -69,6 +75,21 @@ _IMAGE_ENV = "PATHFINDER_FULL_FLOW_SERVICE_IMAGE"
 _NETWORK_ENV = "PATHFINDER_FULL_FLOW_NETWORK_NAME"
 _BIND_ADDRESS_ENV = "PATHFINDER_FULL_FLOW_BIND_ADDRESS"
 _RUNTIME_USER_ENV = "PATHFINDER_FULL_FLOW_RUNTIME_UID_GID"
+
+_DATA_AGENT_PACKAGE_MOUNTS = {
+    "N3.raw-data-agent": {
+        "manifest_env_name": "PATHFINDER_N3_DATA_AGENT_MANIFEST",
+        "package_dir_env_name": "PATHFINDER_N3_PACKAGE_DIR",
+        "container_package_dir": "/opt/pathfinder/full-flow/n3-package",
+        "service_token_env_name": "PATHFINDER_N3_DATA_AGENT_TOKEN",
+    },
+    "N4.derived-data-agent": {
+        "manifest_env_name": "PATHFINDER_N4_DATA_AGENT_MANIFEST",
+        "package_dir_env_name": "PATHFINDER_N4_PACKAGE_DIR",
+        "container_package_dir": "/opt/pathfinder/full-flow/n4-package",
+        "service_token_env_name": "PATHFINDER_N4_DATA_AGENT_TOKEN",
+    },
+}
 
 
 class FullFlowComposeOverlayError(ValueError):
@@ -753,24 +774,148 @@ def _health_script(port_env_name: str, route: str) -> str:
     )
 
 
-def _compose_bytes(components: Sequence[Mapping[str, Any]]) -> bytes:
+def _data_agent_package_mount(
+    row: Mapping[str, Any],
+) -> dict[str, str] | None:
+    """Resolve a Data Agent manifest inside one complete read-only package.
+
+    Data Agent catalogs resolve artifacts relative to the manifest.  Binding
+    only ``config/data-agent-manifest.json`` therefore hides both the sibling
+    object catalog and ``artifacts/`` tree.  The Compose backend widens that
+    one file binding to the verified package root while keeping the process
+    contract's manifest argument at a fixed container-local path.
+    """
+
+    if (
+        row.get("component_kind") != "primary"
+        or row.get("implementation_id") != "pathfinder.data_agent_server"
+    ):
+        return None
+    contract_id = str(row.get("service_contract_id"))
+    raw = _DATA_AGENT_PACKAGE_MOUNTS.get(contract_id)
+    _require(raw is not None, "unexpected primary Data Agent contract")
+    result = {str(key): str(value) for key, value in raw.items()}
+    manifest_env = result["manifest_env_name"]
+    _require(
+        row.get("artifact_binding_env_names") == [manifest_env]
+        and "${" + manifest_env + "}" in row.get("command", []),
+        f"{contract_id} manifest binding changed",
+    )
+    result["container_manifest_path"] = (
+        result["container_package_dir"]
+        + "/config/data-agent-manifest.json"
+    )
+    return result
+
+
+def _render_command_argument(
+    value: str,
+    package_mount: Mapping[str, str] | None,
+) -> str:
+    if (
+        package_mount is not None
+        and value == "${" + package_mount["manifest_env_name"] + "}"
+    ):
+        return package_mount["container_manifest_path"]
+    return _required_command_argument(value)
+
+
+def _component_runtime_environment_names(
+    row: Mapping[str, Any],
+    *,
+    complete_data_agent_package_mounts: bool,
+) -> list[str]:
+    names = set(str(name) for name in row["environment_names"])
+    package_mount = (
+        _data_agent_package_mount(row)
+        if complete_data_agent_package_mounts
+        else None
+    )
+    if package_mount is not None:
+        names.discard(package_mount["manifest_env_name"])
+        names.discard("PATHFINDER_DATA_AGENT_TOKEN")
+        names.add(package_mount["package_dir_env_name"])
+        names.add(package_mount["service_token_env_name"])
+    names.add(str(row["host_port_env_name"]))
+    if row["state_volume_env_name"] is not None:
+        names.add(str(row["state_volume_env_name"]))
+    return sorted(names)
+
+
+def _component_runtime_credential_names(
+    row: Mapping[str, Any],
+    *,
+    complete_data_agent_package_mounts: bool,
+) -> list[str]:
+    names = set(str(name) for name in row["credential_env_names"])
+    package_mount = (
+        _data_agent_package_mount(row)
+        if complete_data_agent_package_mounts
+        else None
+    )
+    if package_mount is not None:
+        names.discard("PATHFINDER_DATA_AGENT_TOKEN")
+        names.add(package_mount["service_token_env_name"])
+    return sorted(names)
+
+
+def _compose_bytes(
+    components: Sequence[Mapping[str, Any]],
+    *,
+    complete_data_agent_package_mounts: bool,
+) -> bytes:
     lines = ["services:"]
     for row in components:
         service = str(row["service_name"])
+        package_mount = (
+            _data_agent_package_mount(row)
+            if complete_data_agent_package_mounts
+            else None
+        )
         lines.extend([
             f"  {service}:",
             f"    image: {_yaml_scalar(_compose_required(_IMAGE_ENV))}",
             '    pull_policy: "never"',
+        ])
+        if complete_data_agent_package_mounts:
+            lines.append("    entrypoint: []")
+        lines.extend([
             f"    user: {_yaml_scalar(_compose_required(_RUNTIME_USER_ENV))}",
             "    command:",
         ])
         for argument in row["command"]:
             lines.append(
                 "      - "
-                + _yaml_scalar(_required_command_argument(str(argument)))
+                + _yaml_scalar(
+                    _render_command_argument(str(argument), package_mount)
+                )
             )
         lines.append("    environment:")
         for name in row["environment_names"]:
+            if (
+                package_mount is not None
+                and name == package_mount["manifest_env_name"]
+            ):
+                continue
+            if (
+                package_mount is not None
+                and name == package_mount["service_token_env_name"]
+            ):
+                continue
+            if (
+                package_mount is not None
+                and name == "PATHFINDER_DATA_AGENT_TOKEN"
+            ):
+                lines.append(
+                    "      - "
+                    + _yaml_scalar(
+                        "PATHFINDER_DATA_AGENT_TOKEN="
+                        + _compose_required(
+                            package_mount["service_token_env_name"]
+                        )
+                    )
+                )
+                continue
             if name in row["ephemeral_state_path_env_names"]:
                 lines.append(f'      - "{name}=/scratch"')
             else:
@@ -855,6 +1000,16 @@ def _compose_bytes(components: Sequence[Mapping[str, Any]]) -> bytes:
         if row["state_volume_required"]:
             volume_rows.append((str(row["state_volume_key"]), "/state", False))
         for env_name in row["artifact_binding_env_names"]:
+            if (
+                package_mount is not None
+                and env_name == package_mount["manifest_env_name"]
+            ):
+                volume_rows.append((
+                    _compose_required(package_mount["package_dir_env_name"]),
+                    package_mount["container_package_dir"],
+                    True,
+                ))
+                continue
             placeholder = _compose_required(str(env_name))
             volume_rows.append((placeholder, placeholder, True))
         if volume_rows:
@@ -867,18 +1022,24 @@ def _compose_bytes(components: Sequence[Mapping[str, Any]]) -> bytes:
                 ])
                 if read_only:
                     lines.append("        read_only: true")
-    lines.extend([
-        "networks:",
-        "  pathfinder-full-flow:",
-        "    external: true",
-        f"    name: {_yaml_scalar(_compose_required(_NETWORK_ENV))}",
-        "volumes:",
-    ])
+                    if complete_data_agent_package_mounts:
+                        lines.extend([
+                            "        bind:",
+                            "          create_host_path: false",
+                        ])
     volumes = {
         (str(row["state_volume_key"]), str(row["state_volume_env_name"]))
         for row in components
         if row["state_volume_required"]
     }
+    lines.extend([
+        "networks:",
+        "  pathfinder-full-flow:",
+        "    external: true",
+        f"    name: {_yaml_scalar(_compose_required(_NETWORK_ENV))}",
+    ])
+    if volumes:
+        lines.append("volumes:")
     for key, env_name in sorted(volumes):
         lines.extend([
             f"  {key}:",
@@ -894,6 +1055,7 @@ def _stage_gate(
     *,
     overlay_id: str,
     components: Sequence[Mapping[str, Any]],
+    complete_data_agent_package_mounts: bool,
 ) -> dict[str, Any]:
     publication = next(
         row
@@ -917,8 +1079,12 @@ def _stage_gate(
         for row in components
         if "serve-frozen" in row["profiles"]
     )
-    return {
-        "schema_version": COMPOSE_GATE_SCHEMA_VERSION,
+    value = {
+        "schema_version": (
+            COMPOSE_GATE_SCHEMA_VERSION
+            if complete_data_agent_package_mounts
+            else LEGACY_COMPOSE_GATE_SCHEMA_VERSION
+        ),
         "status": "OPERATOR_GATE_REQUIRED_NOT_SATISFIED",
         "overlay_id": overlay_id,
         "gate_id": "N4-publish-before-immutable-data-agent-rebind",
@@ -932,7 +1098,11 @@ def _stage_gate(
             "immutable-N4-generation-manifest-frozen",
             "N4-publication-service-stopped",
         ],
-        "rebind_env_name": "PATHFINDER_N4_DATA_AGENT_MANIFEST",
+        "rebind_env_name": (
+            "PATHFINDER_N4_PACKAGE_DIR"
+            if complete_data_agent_package_mounts
+            else "PATHFINDER_N4_DATA_AGENT_MANIFEST"
+        ),
         "serve_profile": "serve-frozen",
         "serve_services": serving,
         "data_agent_service": data_agent["service_name"],
@@ -947,6 +1117,17 @@ def _stage_gate(
         "workflow_submitted": False,
         "credentials_recorded": False,
     }
+    if complete_data_agent_package_mounts:
+        value.update({
+            "rebind_manifest_contract_env_name": (
+                "PATHFINDER_N4_DATA_AGENT_MANIFEST"
+            ),
+            "rebind_manifest_relative_path": (
+                "config/data-agent-manifest.json"
+            ),
+            "complete_package_read_only_mount_required": True,
+        })
+    return value
 
 
 def _persistent_volume_bindings(
@@ -985,6 +1166,93 @@ def _persistent_volume_bindings(
     return result
 
 
+def _service_fragment_name(service_name: str) -> str:
+    _identifier(service_name, "Compose service name")
+    return f"compose.service.{service_name}.yaml"
+
+
+def _service_dependency_closure(
+    service_name: str,
+    components: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    by_name = {str(row["service_name"]): row for row in components}
+    _require(service_name in by_name, "Compose fragment service is unknown")
+    selected: set[str] = set()
+    active: set[str] = set()
+
+    def visit(name: str) -> None:
+        _require(name in by_name, f"Compose dependency {name} is missing")
+        if name in selected:
+            return
+        _require(name not in active, "Compose dependency cycle detected")
+        active.add(name)
+        for dependency in by_name[name]["depends_on_service_names"]:
+            visit(str(dependency))
+        active.remove(name)
+        selected.add(name)
+
+    visit(service_name)
+    return [by_name[name] for name in sorted(selected)]
+
+
+def _selective_service_units(
+    components: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+    units: list[dict[str, Any]] = []
+    documents: dict[str, bytes] = {}
+    for row in components:
+        service_name = str(row["service_name"])
+        included = _service_dependency_closure(service_name, components)
+        file_name = _service_fragment_name(service_name)
+        payload = _compose_bytes(
+            included,
+            complete_data_agent_package_mounts=True,
+        )
+        _require(file_name not in documents, "Compose fragment name repeats")
+        documents[file_name] = payload
+        environment_names = sorted({
+            _IMAGE_ENV,
+            _NETWORK_ENV,
+            _BIND_ADDRESS_ENV,
+            _RUNTIME_USER_ENV,
+            *(
+                name
+                for component in included
+                for name in _component_runtime_environment_names(
+                    component,
+                    complete_data_agent_package_mounts=True,
+                )
+            ),
+        })
+        credential_names = sorted({
+            name
+            for component in included
+            for name in _component_runtime_credential_names(
+                component,
+                complete_data_agent_package_mounts=True,
+            )
+        })
+        package_mounts = [
+            mount
+            for component in included
+            if (mount := _data_agent_package_mount(component)) is not None
+        ]
+        units.append({
+            "root_service_name": service_name,
+            "compose_file": file_name,
+            "compose_sha256": _sha256(payload),
+            "included_service_names": [
+                str(component["service_name"])
+                for component in included
+            ],
+            "dependency_closure_complete": True,
+            "required_runtime_environment_names": environment_names,
+            "credential_environment_names": credential_names,
+            "data_agent_package_mounts": package_mounts,
+        })
+    return units, documents
+
+
 def _documents(
     *,
     overlay_id: str,
@@ -993,7 +1261,19 @@ def _documents(
     deployment_report: Mapping[str, Any],
     launchers: Sequence[Mapping[str, Any]],
     deployment: Mapping[str, Any],
+    schema_version: str = COMPOSE_OVERLAY_SCHEMA_VERSION,
 ) -> dict[str, bytes]:
+    _require(
+        schema_version
+        in {
+            LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
+            COMPOSE_OVERLAY_SCHEMA_VERSION,
+        },
+        "Compose overlay schema is unsupported",
+    )
+    complete_data_agent_package_mounts = (
+        schema_version == COMPOSE_OVERLAY_SCHEMA_VERSION
+    )
     overlay_id = _identifier(overlay_id, "overlay_id")
     binding_rows = deployment.get("service_bindings")
     _require(isinstance(binding_rows, list), "deployment service bindings are invalid")
@@ -1028,8 +1308,25 @@ def _documents(
         bindings,
         runtime_bindings,
     )
-    compose = _compose_bytes(components)
-    gate = _stage_gate(overlay_id=overlay_id, components=components)
+    compose = _compose_bytes(
+        components,
+        complete_data_agent_package_mounts=(
+            complete_data_agent_package_mounts
+        ),
+    )
+    selective_units: list[dict[str, Any]] = []
+    fragment_documents: dict[str, bytes] = {}
+    if complete_data_agent_package_mounts:
+        selective_units, fragment_documents = _selective_service_units(
+            components
+        )
+    gate = _stage_gate(
+        overlay_id=overlay_id,
+        components=components,
+        complete_data_agent_package_mounts=(
+            complete_data_agent_package_mounts
+        ),
+    )
     gate_bytes = _json_bytes(gate)
     persistent_volumes = _persistent_volume_bindings(components)
     node_groups = {
@@ -1046,21 +1343,27 @@ def _documents(
         _BIND_ADDRESS_ENV,
         _RUNTIME_USER_ENV,
         *(
-            str(name)
+            name
             for row in components
-            for name in (
-                list(row["environment_names"])
-                + [row["host_port_env_name"]]
-                + (
-                    [row["state_volume_env_name"]]
-                    if row["state_volume_env_name"] is not None
-                    else []
-                )
+            for name in _component_runtime_environment_names(
+                row,
+                complete_data_agent_package_mounts=(
+                    complete_data_agent_package_mounts
+                ),
             )
         ),
     })
     credential_names = sorted({
-        *(str(name) for row in components for name in row["credential_env_names"]),
+        *(
+            name
+            for row in components
+            for name in _component_runtime_credential_names(
+                row,
+                complete_data_agent_package_mounts=(
+                    complete_data_agent_package_mounts
+                ),
+            )
+        ),
         *(
             str(name)
             for row in embedded
@@ -1137,7 +1440,7 @@ def _documents(
         "Compose overlay must contain two dedicated W4 caches",
     )
     manifest: dict[str, Any] = {
-        "schema_version": COMPOSE_OVERLAY_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "status": "FROZEN_LOCAL_COMPOSE_OVERLAY_NOT_LAUNCHED",
         "overlay_id": overlay_id,
         "bootstrap_id": bootstrap_report["bootstrap_id"],
@@ -1216,9 +1519,31 @@ def _documents(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if complete_data_agent_package_mounts:
+        data_agent_mounts = [
+            mount
+            for row in components
+            if (mount := _data_agent_package_mount(row)) is not None
+        ]
+        manifest.update({
+            "service_inventory_artifact_binding_field_semantics": (
+                "launcher-contract-provenance; effective Data Agent package "
+                "bindings are recorded separately"
+            ),
+            "selective_service_compose_files_included": True,
+            "selective_service_unit_count": len(selective_units),
+            "selective_service_units": selective_units,
+            "selective_instantiation_requires_only_unit_environment": True,
+            "data_agent_complete_package_mount_count": len(
+                data_agent_mounts
+            ),
+            "data_agent_complete_package_mounts": data_agent_mounts,
+            "data_agent_manifest_file_only_mount_prohibited": True,
+        })
     manifest["manifest_sha256"] = _sha256(_canonical_bytes(manifest))
     documents = {
         COMPOSE_NAME: compose,
+        **fragment_documents,
         GATE_NAME: gate_bytes,
         MANIFEST_NAME: _json_bytes(manifest),
     }
@@ -1370,16 +1695,21 @@ def verify_full_flow_local_compose_overlay(
         all(path.is_file() and not path.is_symlink() for path in entries),
         "Compose overlay must contain regular files only",
     )
+    actual_names = {path.name for path in entries}
     _require(
-        {path.name for path in entries} == _OUTPUT_NAMES | {CHECKSUMS_NAME},
-        "Compose overlay file set changed",
-    )
-    documents = {name: (root / name).read_bytes() for name in _OUTPUT_NAMES}
-    _require(
-        (root / CHECKSUMS_NAME).read_bytes() == _checksums(documents),
-        "Compose overlay checksum failed",
+        _BASE_OUTPUT_NAMES | {CHECKSUMS_NAME} <= actual_names,
+        "Compose overlay base file set changed",
     )
     manifest = _strict_json(root / MANIFEST_NAME, "Compose overlay manifest")
+    schema_version = manifest.get("schema_version")
+    _require(
+        schema_version
+        in {
+            LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION,
+            COMPOSE_OVERLAY_SCHEMA_VERSION,
+        },
+        "Compose overlay schema is unsupported",
+    )
     recorded_digest = manifest.get("manifest_sha256")
     unsigned = dict(manifest)
     unsigned.pop("manifest_sha256", None)
@@ -1402,6 +1732,19 @@ def verify_full_flow_local_compose_overlay(
         deployment_report=inputs[3],
         launchers=inputs[4],
         deployment=inputs[5],
+        schema_version=str(schema_version),
+    )
+    _require(
+        actual_names == set(expected) | {CHECKSUMS_NAME},
+        "Compose overlay file set changed",
+    )
+    documents = {
+        name: (root / name).read_bytes()
+        for name in expected
+    }
+    _require(
+        (root / CHECKSUMS_NAME).read_bytes() == _checksums(documents),
+        "Compose overlay checksum failed",
     )
     for name, payload in expected.items():
         _require(
@@ -1415,6 +1758,7 @@ def verify_full_flow_local_compose_overlay(
     )
     return {
         "status": "VERIFIED_LOCAL_COMPOSE_OVERLAY_NOT_LAUNCHED",
+        "schema_version": schema_version,
         "overlay_id": manifest["overlay_id"],
         "deployment_id": manifest["deployment_id"],
         "logical_plan_sha256": manifest["logical_plan_sha256"],
@@ -1444,6 +1788,12 @@ def verify_full_flow_local_compose_overlay(
             "w4_cache_namespaces_exclusive"
         ],
         "persistent_volume_count": manifest["persistent_volume_count"],
+        "selective_service_unit_count": manifest.get(
+            "selective_service_unit_count", 0
+        ),
+        "data_agent_complete_package_mount_count": manifest.get(
+            "data_agent_complete_package_mount_count", 0
+        ),
         "n4_operator_gate_required": True,
         "n4_gate_satisfied": False,
         "n6_semantic_bearer_env_name": CONTAINER_NODE_BEARER_TOKEN_ENV,
@@ -1463,6 +1813,8 @@ __all__ = [
     "COMPOSE_NAME",
     "COMPOSE_OVERLAY_SCHEMA_VERSION",
     "GATE_NAME",
+    "LEGACY_COMPOSE_GATE_SCHEMA_VERSION",
+    "LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION",
     "MANIFEST_NAME",
     "FullFlowComposeOverlayError",
     "render_full_flow_local_compose_overlay",

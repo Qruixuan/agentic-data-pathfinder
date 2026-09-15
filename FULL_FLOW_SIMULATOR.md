@@ -101,15 +101,32 @@ package, or durable FlowMesh result:
 
 The N7 signature is request-bound, so it is not a reusable bearer credential.
 The generated Compose overlay contains environment-variable names and
-placeholders only. It renders 12 primary services plus seven required companion
-services: N1 verification, N4 publication, N5 digest materialization, and an
-independent W4 coordinator/cache pair on each of N7 and N8. The two W4 caches
-use dedicated identities and state namespaces; they cannot silently reuse the
-historical semantic-route cache state. Each W4 coordinator depends on healthy
-N2/N7/N8 indexes, N3/N4 Data Agents, N6 inference, and its own cache. Its health
-endpoint becomes unavailable if the cache identity or occupancy diverges.
-These controls authenticate transport between components; they do not turn
-local execution into independent scientific evidence.
+placeholders only. It renders 12 primary services plus seven required
+companion services: N1 verification, N4 publication, N5 digest
+materialization, and an independent W4 coordinator/cache pair on each of N7
+and N8. Alongside the unified file it freezes one checksum-bound Compose
+fragment per root service. A fragment contains only that service and its
+transitive health dependencies, so selecting N3 or N4 does not require values
+for unrelated N1/N2/N5/N6/N7/N8 variables. Its manifest records the exact
+environment-variable names required by each fragment; values remain
+operator-local. The two W4 caches use dedicated identities and state
+namespaces; they cannot silently reuse the historical semantic-route cache
+state. Each W4 coordinator depends on healthy N2/N7/N8 indexes, N3/N4 Data
+Agents, N6 inference, and its own cache. Its health endpoint becomes
+unavailable if the cache identity or occupancy diverges. These controls
+authenticate transport between components; they do not turn local execution
+into independent scientific evidence.
+
+N3 and N4 Data Agent fragments mount the complete frozen package root
+read-only, not only `config/data-agent-manifest.json`. Their commands use a
+fixed container-local manifest path, preserving resolution of the sibling
+object catalog and its relative `../artifacts/` references. The effective N4
+serve gate therefore rebinds `PATHFINDER_N4_PACKAGE_DIR`; the original
+manifest-variable name is retained only as source-contract provenance. Bind
+mounts disable automatic host-path creation, each service clears the image's
+default entrypoint before executing the bootstrap's complete argv, and the N3
+or N4 node-specific bearer is projected into the generic Data Agent server
+variable inside that service only.
 
 ## Architecture
 
@@ -302,19 +319,26 @@ verbs below describe implemented capabilities, not recorded live results:
    endpoint, health-schema identity, persistent-state declaration, and
    credential names. Legacy v1alpha1 bindings remain readable for historical
    verification but cannot authorize the current W4-ready Compose overlay.
-8. Reproducibly render a unified local Compose overlay from the verified
-   startup and deployment contracts. It maps N1-N8 to 12 primary services,
-   seven companion services, and ten persistent volumes without invoking
-   Docker. The additional companions are the N7/N8 W4 coordinators and their
-   exclusive cache and coordinator state volumes. Raw-video sampling uses a
-   separate bounded ephemeral mount. A separate
+8. Reproducibly render a unified local Compose overlay and one independently
+   instantiable, checksum-bound fragment per service from the verified startup
+   and deployment contracts. It maps N1-N8 to 12 primary services, seven
+   companion services, and ten persistent volumes without invoking Docker.
+   N3/N4 fragments bind their complete frozen Data Agent package roots
+   read-only, while unrelated runtime variables are absent. The additional
+   companions are the N7/N8 W4 coordinators and their exclusive cache and
+   coordinator state volumes. Raw-video sampling uses a separate bounded
+   ephemeral mount. A separate
    operator gate requires derived-artifact provisioning to finish, all
    published digests to verify, and an immutable N4 manifest to be frozen
    before the serving profile may start. The verified preprovisioned N4
    serve-gate receipt belongs at the execution coordinator's profile-selection
    boundary: it must be verified before selecting `serve-frozen`, and the
    `provision-derived` publication companion must remain excluded throughout
-   semantic trials.
+   semantic trials. Historical Compose v1alpha2 overlays and N4 serve-gate
+   v1alpha1 receipts remain verifiable, but they do not authorize a newly
+   rendered v1alpha3 overlay. Freeze a new N4 serve-gate v1alpha2 receipt in a
+   new directory after rendering the new overlay; never rewrite the old
+   artifacts.
 9. Provide a preflight for every distinct semantic artifact through
    authenticated N3/N4 Data Agent HTTP reads. It performs a complete fetch,
    checks the exact frozen digest and size, and challenges each service with

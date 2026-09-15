@@ -22,6 +22,8 @@ from typing import Any
 
 from .full_flow_compose_overlay import (
     CHECKSUMS_NAME as OVERLAY_CHECKSUMS_NAME,
+    COMPOSE_GATE_SCHEMA_VERSION,
+    COMPOSE_OVERLAY_SCHEMA_VERSION,
     GATE_NAME as OVERLAY_GATE_NAME,
     MANIFEST_NAME as OVERLAY_MANIFEST_NAME,
     verify_full_flow_local_compose_overlay,
@@ -37,8 +39,11 @@ from .n4_derived_data_plane import (
 )
 
 
-N4_SERVE_GATE_SCHEMA_VERSION = (
+LEGACY_N4_SERVE_GATE_SCHEMA_VERSION = (
     "pathfinder.full-flow-n4-preprovisioned-serve-gate/v1alpha1"
+)
+N4_SERVE_GATE_SCHEMA_VERSION = (
+    "pathfinder.full-flow-n4-preprovisioned-serve-gate/v1alpha2"
 )
 GATE_NAME = "n4-preprovisioned-serve-gate.json"
 CHECKSUMS_NAME = "SHA256SUMS"
@@ -144,6 +149,7 @@ def _verified_sources(
     provisioning_catalog_dir: Path,
     artifact_binding_dir: Path,
     n4_package_dir: Path,
+    require_complete_package_mounts: bool,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     try:
         overlay = verify_full_flow_local_compose_overlay(
@@ -196,6 +202,26 @@ def _verified_sources(
         is False,
         "Compose N4 stage-gate semantics changed",
     )
+    if require_complete_package_mounts:
+        _require(
+            overlay.get("schema_version") == COMPOSE_OVERLAY_SCHEMA_VERSION
+            and overlay.get("selective_service_unit_count") == 19
+            and overlay.get("data_agent_complete_package_mount_count") == 2,
+            "Compose source lacks complete Data Agent package mounts",
+        )
+        _require(
+            overlay_gate.get("schema_version")
+            == COMPOSE_GATE_SCHEMA_VERSION
+            and overlay_gate.get("rebind_env_name")
+            == "PATHFINDER_N4_PACKAGE_DIR"
+            and overlay_gate.get("rebind_manifest_contract_env_name")
+            == "PATHFINDER_N4_DATA_AGENT_MANIFEST"
+            and overlay_gate.get("rebind_manifest_relative_path")
+            == "config/data-agent-manifest.json"
+            and overlay_gate.get("complete_package_read_only_mount_required")
+            is True,
+            "Compose N4 stage gate lacks the complete-package invariant",
+        )
     return overlay, n4, provisioning
 
 
@@ -208,6 +234,7 @@ def _document(
     n4: Mapping[str, Any],
     provisioning_catalog_dir: Path,
     provisioning: Mapping[str, Any],
+    schema_version: str,
 ) -> dict[str, Any]:
     gate_id = _identifier(gate_id, "gate_id")
     n4_manifest = n4_package_dir / N4_PACKAGE_MANIFEST_NAME
@@ -215,7 +242,7 @@ def _document(
         provisioning_catalog_dir / PROVISIONING_CATALOG_NAME
     )
     document: dict[str, Any] = {
-        "schema_version": N4_SERVE_GATE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "status": "FROZEN_PREPROVISIONED_N4_SERVE_AUTHORIZATION",
         "gate_id": gate_id,
         "overlay_id": overlay["overlay_id"],
@@ -258,6 +285,13 @@ def _document(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if schema_version == N4_SERVE_GATE_SCHEMA_VERSION:
+        document.update({
+            "compose_overlay_schema_version": COMPOSE_OVERLAY_SCHEMA_VERSION,
+            "n4_complete_package_mount_verified": True,
+            "n4_package_rebind_env_name": "PATHFINDER_N4_PACKAGE_DIR",
+            "n4_manifest_relative_path": "config/data-agent-manifest.json",
+        })
     document["gate_sha256"] = _sha256(_canonical(document))
     return document
 
@@ -274,7 +308,16 @@ def _expected_document(
     provisioning_catalog_dir: Path,
     artifact_binding_dir: Path,
     n4_package_dir: Path,
+    schema_version: str = N4_SERVE_GATE_SCHEMA_VERSION,
 ) -> dict[str, Any]:
+    _require(
+        schema_version
+        in {
+            LEGACY_N4_SERVE_GATE_SCHEMA_VERSION,
+            N4_SERVE_GATE_SCHEMA_VERSION,
+        },
+        "N4 serve gate schema is unsupported",
+    )
     overlay, n4, provisioning = _verified_sources(
         compose_overlay_dir=compose_overlay_dir,
         service_bootstrap_dir=service_bootstrap_dir,
@@ -285,6 +328,9 @@ def _expected_document(
         provisioning_catalog_dir=provisioning_catalog_dir,
         artifact_binding_dir=artifact_binding_dir,
         n4_package_dir=n4_package_dir,
+        require_complete_package_mounts=(
+            schema_version == N4_SERVE_GATE_SCHEMA_VERSION
+        ),
     )
     return _document(
         gate_id=gate_id,
@@ -294,6 +340,7 @@ def _expected_document(
         n4=n4,
         provisioning_catalog_dir=provisioning_catalog_dir,
         provisioning=provisioning,
+        schema_version=schema_version,
     )
 
 
@@ -372,7 +419,11 @@ def _verify_gate_files(root: Path) -> dict[str, Any]:
         "N4 serve gate digest failed",
     )
     _require(
-        document.get("schema_version") == N4_SERVE_GATE_SCHEMA_VERSION
+        document.get("schema_version")
+        in {
+            LEGACY_N4_SERVE_GATE_SCHEMA_VERSION,
+            N4_SERVE_GATE_SCHEMA_VERSION,
+        }
         and document.get("status")
         == "FROZEN_PREPROVISIONED_N4_SERVE_AUTHORIZATION"
         and document.get("authorized_compose_profile") == "serve-frozen"
@@ -422,6 +473,7 @@ def verify_full_flow_n4_preprovisioned_serve_gate(
     }
     expected = _expected_document(
         gate_id=str(document["gate_id"]),
+        schema_version=str(document["schema_version"]),
         **paths,
     )
     _require(
@@ -447,6 +499,7 @@ __all__ = [
     "CHECKSUMS_NAME",
     "FullFlowN4ServeGateError",
     "GATE_NAME",
+    "LEGACY_N4_SERVE_GATE_SCHEMA_VERSION",
     "N4_SERVE_GATE_SCHEMA_VERSION",
     "freeze_full_flow_n4_preprovisioned_serve_gate",
     "verify_full_flow_n4_preprovisioned_serve_gate",

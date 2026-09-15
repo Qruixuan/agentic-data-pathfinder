@@ -7,10 +7,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pathfinder.simulator import full_flow_compose_overlay as overlay_module
+from pathfinder.simulator import full_flow_n4_serve_gate as gate_module
 from pathfinder.simulator.full_flow_n4_serve_gate import (
     CHECKSUMS_NAME,
     GATE_NAME,
     FullFlowN4ServeGateError,
+    LEGACY_N4_SERVE_GATE_SCHEMA_VERSION,
+    N4_SERVE_GATE_SCHEMA_VERSION,
     freeze_full_flow_n4_preprovisioned_serve_gate,
     verify_full_flow_n4_preprovisioned_serve_gate,
 )
@@ -122,6 +126,20 @@ class FullFlowN4ServeGateTest(unittest.TestCase):
         self.assertFalse(gate["performance_measured"])
         self.assertFalse(gate["monetary_cost_measured"])
         self.assertFalse(gate["upcloud_ready"])
+        self.assertEqual(N4_SERVE_GATE_SCHEMA_VERSION, gate["schema_version"])
+        self.assertEqual(
+            overlay_module.COMPOSE_OVERLAY_SCHEMA_VERSION,
+            gate["compose_overlay_schema_version"],
+        )
+        self.assertTrue(gate["n4_complete_package_mount_verified"])
+        self.assertEqual(
+            "PATHFINDER_N4_PACKAGE_DIR",
+            gate["n4_package_rebind_env_name"],
+        )
+        self.assertEqual(
+            "config/data-agent-manifest.json",
+            gate["n4_manifest_relative_path"],
+        )
 
     def test_is_deterministic_and_does_not_modify_sources(self) -> None:
         before = {
@@ -191,6 +209,67 @@ class FullFlowN4ServeGateTest(unittest.TestCase):
         with self.assertRaises(FullFlowN4ServeGateError):
             verify_full_flow_n4_preprovisioned_serve_gate(
                 output,
+                **arguments,
+            )
+
+    def test_legacy_gate_verifies_only_with_its_bound_legacy_overlay(
+        self,
+    ) -> None:
+        legacy_overlay = self.case_root / "legacy-overlay"
+        inputs = overlay_module._verified_inputs(
+            self.compose_case.bootstrap,
+            self.binding,
+            logical_plan_dir=self.compose_case.logical,
+            scenario_path=compose_fixture.SCENARIO,
+            container_plan_dir=self.compose_case.container,
+        )
+        overlay_documents = overlay_module._documents(
+            overlay_id="local-eight-node-full-flow-v1",
+            bootstrap_root=inputs[0],
+            bootstrap_report=inputs[2],
+            deployment_report=inputs[3],
+            launchers=inputs[4],
+            deployment=inputs[5],
+            schema_version=(
+                overlay_module.LEGACY_COMPOSE_OVERLAY_SCHEMA_VERSION
+            ),
+        )
+        overlay_documents[overlay_module.CHECKSUMS_NAME] = (
+            overlay_module._checksums(overlay_documents)
+        )
+        legacy_overlay.mkdir()
+        for name, payload in overlay_documents.items():
+            (legacy_overlay / name).write_bytes(payload)
+
+        arguments = self._arguments()
+        arguments["compose_overlay_dir"] = legacy_overlay
+        document = gate_module._expected_document(
+            gate_id="n4-preprovisioned-local-semantic-v1",
+            schema_version=LEGACY_N4_SERVE_GATE_SCHEMA_VERSION,
+            **arguments,
+        )
+        legacy_gate = self.case_root / "legacy-gate"
+        legacy_gate.mkdir()
+        payload = gate_module._json_bytes(document)
+        (legacy_gate / GATE_NAME).write_bytes(payload)
+        (legacy_gate / CHECKSUMS_NAME).write_text(
+            f"{hashlib.sha256(payload).hexdigest()}  {GATE_NAME}\n",
+            encoding="utf-8",
+        )
+
+        report = verify_full_flow_n4_preprovisioned_serve_gate(
+            legacy_gate,
+            **arguments,
+        )
+        self.assertEqual("VERIFIED", report["status"])
+
+        arguments["compose_overlay_dir"] = self.overlay
+        with self.assertRaisesRegex(
+            FullFlowN4ServeGateError,
+            "does not match",
+        ):
+            verify_full_flow_n4_preprovisioned_serve_gate(
+                legacy_gate,
                 **arguments,
             )
 
