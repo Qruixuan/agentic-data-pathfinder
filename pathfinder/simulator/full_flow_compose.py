@@ -14,10 +14,15 @@ import os
 import shutil
 import tempfile
 import re
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping
 
+from ._full_flow_primitives import (
+    checked_identifier,
+    checksum_manifest_bytes,
+    pretty_json_bytes,
+    sha256_hex,
+)
 from .full_flow_data_plane import verify_full_flow_data_plane_package
 from .local_container import verify_local_container_compose
 
@@ -43,27 +48,15 @@ def _require(condition: bool, message: str) -> None:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return pretty_json_bytes(value)
 
 
 def _digest(payload: bytes) -> str:
-    return sha256(payload).hexdigest()
+    return sha256_hex(payload)
 
 
 def _checksums(documents: Mapping[str, bytes]) -> bytes:
-    return b"".join(
-        f"{_digest(payload)}  {name}\n".encode("utf-8")
-        for name, payload in sorted(documents.items())
-    )
+    return checksum_manifest_bytes(documents)
 
 
 def _quoted(value: str) -> str:
@@ -103,11 +96,12 @@ def _node_names(base_root: Path) -> dict[str, str]:
 
 
 def _identifier(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None,
-        f"{name} is invalid",
+    return checked_identifier(
+        value,
+        name,
+        error_type=FullFlowComposeError,
+        pattern=_IDENTIFIER,
     )
-    return value
 
 
 def _route_values(

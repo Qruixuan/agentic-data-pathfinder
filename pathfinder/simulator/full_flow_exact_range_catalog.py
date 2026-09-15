@@ -15,7 +15,6 @@ content evidence.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -24,6 +23,14 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from ._full_flow_primitives import (
+    canonical_json_bytes,
+    checked_identifier,
+    checked_lower_sha256,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .full_flow_semantic_route_runtime import ArtifactIdentity, ExactContentRange
 from .raw_cold_data_plane import (
     CHECKSUMS_NAME as N3_CHECKSUMS_NAME,
@@ -57,51 +64,41 @@ def _require(condition: object, message: str) -> None:
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _canonical(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowExactRangeCatalogError(
-            "exact-range catalog is not canonical JSON"
-        ) from exc
+    return canonical_json_bytes(
+        value,
+        error_type=FullFlowExactRangeCatalogError,
+        error_message="exact-range catalog is not canonical JSON",
+    )
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            indent=2,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return pretty_json_bytes(value)
 
 
 def _identifier(value: Any, label: str) -> str:
-    _require(
-        isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None,
-        f"{label} is invalid",
+    return str(
+        checked_identifier(
+            value,
+            label,
+            error_type=FullFlowExactRangeCatalogError,
+            pattern=_IDENTIFIER,
+        )
     )
-    return str(value)
 
 
 def _digest(value: Any, label: str) -> str:
-    _require(
-        isinstance(value, str) and _SHA256.fullmatch(value) is not None,
-        f"{label} is not lowercase SHA-256",
+    return str(
+        checked_lower_sha256(
+            value,
+            label,
+            error_type=FullFlowExactRangeCatalogError,
+            pattern=_SHA256,
+        )
     )
-    return str(value)
 
 
 def _integer(value: Any, label: str, *, minimum: int = 0) -> int:
@@ -115,21 +112,13 @@ def _integer(value: Any, label: str, *, minimum: int = 0) -> int:
 def _strict_json(path: Path, label: str) -> dict[str, Any]:
     _require(path.is_file() and not path.is_symlink(), f"{label} is missing")
 
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            _require(key not in result, f"{label} repeats key {key}")
-            result[key] = value
-        return result
-
     try:
-        value = json.loads(
+        value = strict_json_loads(
             path.read_text(encoding="utf-8"),
-            object_pairs_hook=unique,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                FullFlowExactRangeCatalogError(
-                    f"{label} contains invalid constant {token}"
-                )
+            error_type=FullFlowExactRangeCatalogError,
+            duplicate_key_message=lambda key: f"{label} repeats key {key}",
+            nonfinite_number_message=(
+                lambda token: f"{label} contains invalid constant {token}"
             ),
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:

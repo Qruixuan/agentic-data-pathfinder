@@ -16,7 +16,6 @@ meant to exercise.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -26,6 +25,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ._full_flow_primitives import (
+    canonical_json_bytes,
+    checked_identifier,
+    checksum_manifest_bytes,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .container_node import (
     CONTAINER_NODE_BEARER_TOKEN_ENV,
     FULL_FLOW_INGRESS_HMAC_SECRET_ENV,
@@ -74,11 +81,14 @@ def _require(condition: object, message: str) -> None:
 
 
 def _identifier(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _SAFE_ID.fullmatch(value) is not None,
-        f"{name} is invalid",
+    return str(
+        checked_identifier(
+            value,
+            name,
+            error_type=FullFlowComposeOverlayError,
+            pattern=_SAFE_ID,
+        )
     )
-    return str(value)
 
 
 def _env_name(value: Any, name: str) -> str:
@@ -90,65 +100,36 @@ def _env_name(value: Any, name: str) -> str:
 
 
 def _sha256(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
+    return sha256_hex(payload)
 
 
 def _json_bytes(value: Any) -> bytes:
-    try:
-        return (
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                indent=2,
-            )
-            + "\n"
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowComposeOverlayError(
-            "Compose overlay document is not valid JSON"
-        ) from exc
-
-
-def _canonical_bytes(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowComposeOverlayError(
-            "Compose overlay document is not canonical JSON"
-        ) from exc
-
-
-def _checksums(documents: Mapping[str, bytes]) -> bytes:
-    return b"".join(
-        f"{_sha256(documents[name])}  {name}\n".encode("utf-8")
-        for name in sorted(documents)
+    return pretty_json_bytes(
+        value,
+        error_type=FullFlowComposeOverlayError,
+        error_message="Compose overlay document is not valid JSON",
     )
 
 
+def _canonical_bytes(value: Any) -> bytes:
+    return canonical_json_bytes(
+        value,
+        error_type=FullFlowComposeOverlayError,
+        error_message="Compose overlay document is not canonical JSON",
+    )
+
+
+def _checksums(documents: Mapping[str, bytes]) -> bytes:
+    return checksum_manifest_bytes(documents)
+
+
 def _strict_json(path: Path, label: str) -> dict[str, Any]:
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            _require(key not in result, f"{label} repeats key {key}")
-            result[key] = value
-        return result
-
-    def invalid(value: str) -> None:
-        raise FullFlowComposeOverlayError(f"{label} contains {value}")
-
     try:
-        value = json.loads(
+        value = strict_json_loads(
             path.read_text(encoding="utf-8"),
-            object_pairs_hook=unique,
-            parse_constant=invalid,
+            error_type=FullFlowComposeOverlayError,
+            duplicate_key_message=lambda key: f"{label} repeats key {key}",
+            nonfinite_number_message=lambda token: f"{label} contains {token}",
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FullFlowComposeOverlayError(f"cannot read {label}") from exc

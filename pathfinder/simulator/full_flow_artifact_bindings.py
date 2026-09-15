@@ -9,7 +9,6 @@ label.  The resulting binding set is accepted directly by
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -19,6 +18,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Mapping
 
+from ._full_flow_primitives import (
+    checked_identifier,
+    checksum_manifest_bytes,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .full_flow_logical_routes import (
     PLAN_NAME as LOGICAL_PLAN_NAME,
     STAGES_NAME as LOGICAL_STAGES_NAME,
@@ -63,46 +69,32 @@ def _require(condition: object, message: str) -> None:
 
 
 def _identifier(value: Any, label: str) -> str:
-    _require(
-        isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None,
-        f"{label} is invalid",
+    return str(
+        checked_identifier(
+            value,
+            label,
+            error_type=FullFlowArtifactBindingError,
+            pattern=_IDENTIFIER,
+        )
     )
-    return str(value)
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            indent=2,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return pretty_json_bytes(value)
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _strict_json_bytes(raw: bytes, label: str) -> dict[str, Any]:
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            _require(key not in result, f"{label} repeats key {key}")
-            result[key] = value
-        return result
-
     try:
-        value = json.loads(
+        value = strict_json_loads(
             raw.decode("utf-8"),
-            object_pairs_hook=unique,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                FullFlowArtifactBindingError(
-                    f"{label} contains non-finite value {token}"
-                )
+            error_type=FullFlowArtifactBindingError,
+            duplicate_key_message=lambda key: f"{label} repeats key {key}",
+            nonfinite_number_message=(
+                lambda token: f"{label} contains non-finite value {token}"
             ),
         )
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -433,10 +425,7 @@ def _documents(
 
 
 def _checksums(documents: Mapping[str, bytes]) -> bytes:
-    return b"".join(
-        f"{_sha256(documents[name])}  {name}\n".encode("utf-8")
-        for name in sorted(documents)
-    )
+    return checksum_manifest_bytes(documents)
 
 
 def build_full_flow_artifact_bindings(

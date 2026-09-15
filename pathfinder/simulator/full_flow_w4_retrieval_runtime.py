@@ -19,14 +19,22 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import tempfile
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
+from ._full_flow_primitives import (
+    LOWER_SHA256_PATTERN as _SHA256,
+    canonical_json_bytes,
+    canonical_json_lines_bytes,
+    checked_identifier,
+    checked_lower_sha256,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .full_flow_local_semantic_admission import (
     TRIALS_NAME as LOCAL_TRIALS_NAME,
     load_full_flow_local_semantic_execution_inputs,
@@ -82,8 +90,6 @@ _PACKAGE_FILES = frozenset(
 _RUN_FILES = frozenset(
     {OBSERVATIONS_NAME, RUNTIME_EVIDENCE_NAME, RUNTIME_RUN_NAME}
 )
-_SHA256 = re.compile(r"[0-9a-f]{64}")
-_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._|:+-]{0,255}")
 _ROUTE_FAMILY_BY_DESIGN = {
     "D0": "raw",
     "D1": "indexed-raw",
@@ -110,27 +116,16 @@ def _require(condition: object, message: str) -> None:
         raise FullFlowW4RetrievalRuntimeError(message)
 
 
-def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        _require(key not in result, f"duplicate JSON key: {key}")
-        result[key] = value
-    return result
-
-
-def _invalid_number(value: str) -> None:
-    raise FullFlowW4RetrievalRuntimeError(
-        f"non-finite JSON number: {value}"
-    )
-
-
 def _read_json(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
     try:
         raw = path.read_bytes()
-        value = json.loads(
+        value = strict_json_loads(
             raw.decode("utf-8"),
-            object_pairs_hook=_unique_keys,
-            parse_constant=_invalid_number,
+            error_type=FullFlowW4RetrievalRuntimeError,
+            duplicate_key_message=lambda key: f"duplicate JSON key: {key}",
+            nonfinite_number_message=(
+                lambda token: f"non-finite JSON number: {token}"
+            ),
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FullFlowW4RetrievalRuntimeError(
@@ -152,10 +147,13 @@ def _read_jsonl(path: Path, label: str) -> tuple[bytes, list[dict[str, Any]]]:
     for position, line in enumerate(lines):
         _require(bool(line), f"{label} contains a blank line")
         try:
-            value = json.loads(
+            value = strict_json_loads(
                 line,
-                object_pairs_hook=_unique_keys,
-                parse_constant=_invalid_number,
+                error_type=FullFlowW4RetrievalRuntimeError,
+                duplicate_key_message=lambda key: f"duplicate JSON key: {key}",
+                nonfinite_number_message=(
+                    lambda token: f"non-finite JSON number: {token}"
+                ),
             )
         except json.JSONDecodeError as exc:
             raise FullFlowW4RetrievalRuntimeError(
@@ -168,51 +166,36 @@ def _read_jsonl(path: Path, label: str) -> tuple[bytes, list[dict[str, Any]]]:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return pretty_json_bytes(value)
 
 
 def _canonical(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
+    return canonical_json_bytes(value)
 
 
 def _jsonl_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
-    return b"".join(_canonical(row) + b"\n" for row in rows)
+    return canonical_json_lines_bytes(rows)
 
 
 def _sha256(value: bytes) -> str:
-    return sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _digest(value: Any, label: str) -> str:
-    _require(
-        isinstance(value, str) and _SHA256.fullmatch(value) is not None,
-        f"{label} is not a lowercase SHA-256 digest",
+    return checked_lower_sha256(
+        value,
+        label,
+        error_type=FullFlowW4RetrievalRuntimeError,
+        message=f"{label} is not a lowercase SHA-256 digest",
     )
-    return value
 
 
 def _identifier(value: Any, label: str) -> str:
-    _require(
-        isinstance(value, str)
-        and _IDENTIFIER.fullmatch(value) is not None,
-        f"{label} is invalid",
+    return checked_identifier(
+        value,
+        label,
+        error_type=FullFlowW4RetrievalRuntimeError,
     )
-    return value
 
 
 def _strict_fields(

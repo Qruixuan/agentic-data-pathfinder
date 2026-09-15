@@ -15,16 +15,24 @@ relevance labels are never read or copied.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from ._full_flow_primitives import (
+    W4_IDENTIFIER_PATTERN as _IDENTIFIER,
+    canonical_json_bytes,
+    canonical_json_lines_bytes,
+    checked_identifier,
+    checked_lower_sha256,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .full_flow_exact_range_catalog import (
     CATALOG_NAME as RANGE_CATALOG_NAME,
     verify_full_flow_exact_range_catalog,
@@ -72,8 +80,6 @@ _FILES = frozenset({
     ARTIFACT_CATALOG_NAME,
     TASK_NAME,
 })
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._|:+-]{0,255}\Z")
 _DESIGNS = {f"D{index}" for index in range(8)}
 _RAW_DESIGNS = {"D0", "D4"}
 _INDEXED_RAW_DESIGNS = {"D1", "D5"}
@@ -105,55 +111,47 @@ def _require(condition: object, message: str) -> None:
 
 
 def _canonical(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowW4CandidateRouteError(
-            "candidate route value is not canonical JSON"
-        ) from exc
+    return canonical_json_bytes(
+        value,
+        error_type=FullFlowW4CandidateRouteError,
+        error_message="candidate route value is not canonical JSON",
+    )
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return pretty_json_bytes(value)
 
 
 def _jsonl_bytes(values: Sequence[Mapping[str, Any]]) -> bytes:
-    return b"".join(_canonical(value) + b"\n" for value in values)
+    return canonical_json_lines_bytes(
+        values,
+        error_type=FullFlowW4CandidateRouteError,
+        error_message="candidate route value is not canonical JSON",
+    )
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _identifier(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None,
-        f"{name} is invalid",
+    return str(
+        checked_identifier(
+            value,
+            name,
+            error_type=FullFlowW4CandidateRouteError,
+        )
     )
-    return str(value)
 
 
 def _digest(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _SHA256.fullmatch(value) is not None,
-        f"{name} is not lowercase SHA-256",
+    return str(
+        checked_lower_sha256(
+            value,
+            name,
+            error_type=FullFlowW4CandidateRouteError,
+        )
     )
-    return str(value)
 
 
 def _positive(value: Any, name: str) -> int:
@@ -164,21 +162,13 @@ def _positive(value: Any, name: str) -> int:
 def _strict_json(path: Path, name: str) -> dict[str, Any]:
     _require(path.is_file() and not path.is_symlink(), f"{name} is missing")
 
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, child in pairs:
-            _require(key not in result, f"{name} repeats key {key}")
-            result[key] = child
-        return result
-
     try:
-        value = json.loads(
+        value = strict_json_loads(
             path.read_text(encoding="utf-8"),
-            object_pairs_hook=unique,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                FullFlowW4CandidateRouteError(
-                    f"{name} contains non-finite number {token}"
-                )
+            error_type=FullFlowW4CandidateRouteError,
+            duplicate_key_message=lambda key: f"{name} repeats key {key}",
+            nonfinite_number_message=(
+                lambda token: f"{name} contains non-finite number {token}"
             ),
         )
     except FullFlowW4CandidateRouteError:

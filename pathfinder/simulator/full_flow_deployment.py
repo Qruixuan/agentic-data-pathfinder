@@ -10,7 +10,6 @@ route plan is implemented.
 
 from __future__ import annotations
 
-import hashlib
 import ipaddress
 import json
 import math
@@ -24,6 +23,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from ._full_flow_primitives import (
+    canonical_json_bytes,
+    checked_identifier,
+    checked_lower_sha256,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .full_flow_logical_routes import verify_full_flow_logical_routes
 
 
@@ -159,64 +166,46 @@ def _require(condition: object, message: str) -> None:
 
 
 def _identifier(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None,
-        f"{name} is invalid",
+    return str(
+        checked_identifier(
+            value,
+            name,
+            error_type=FullFlowDeploymentError,
+            pattern=_IDENTIFIER,
+        )
     )
-    return str(value)
 
 
 def _digest(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _SHA256.fullmatch(value) is not None,
-        f"{name} is not lowercase SHA-256",
+    return str(
+        checked_lower_sha256(
+            value,
+            name,
+            error_type=FullFlowDeploymentError,
+            pattern=_SHA256,
+        )
     )
-    return str(value)
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-            indent=2,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return pretty_json_bytes(value)
 
 
 def _canonical_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    return canonical_json_bytes(value)
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _strict_json(path: Path, name: str) -> dict[str, Any]:
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            _require(key not in result, f"{name} repeats key {key}")
-            result[key] = value
-        return result
-
-    def invalid(value: str) -> None:
-        raise FullFlowDeploymentError(f"{name} contains {value}")
-
     try:
-        value = json.loads(
+        value = strict_json_loads(
             path.read_text(encoding="utf-8"),
-            object_pairs_hook=unique,
-            parse_constant=invalid,
+            error_type=FullFlowDeploymentError,
+            duplicate_key_message=lambda key: f"{name} repeats key {key}",
+            nonfinite_number_message=lambda token: f"{name} contains {token}",
         )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FullFlowDeploymentError(f"cannot read {name}") from exc

@@ -13,7 +13,6 @@ and orchestration conformance, not cloud performance or monetary evidence.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import os
@@ -33,6 +32,12 @@ from ..integrations.flowmesh.w4_candidate_matrix import (
     build_flowmesh_w4_trial_request,
     validate_flowmesh_w4_trial_request,
     validate_flowmesh_w4_trial_response,
+)
+from ._full_flow_primitives import (
+    LOWER_SHA256_PATTERN as _SHA256,
+    canonical_json_bytes,
+    sha256_hex,
+    strict_json_loads,
 )
 from .container_node import (
     FULL_FLOW_INGRESS_SIGNATURE_HEADER,
@@ -58,9 +63,6 @@ W4_FLOWMESH_COORDINATOR_HEALTH_SCHEMA_VERSION = (
 )
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-
-
 class FullFlowW4FlowMeshServiceError(RuntimeError):
     """Raised when the route service cannot preserve its frozen contract."""
 
@@ -79,22 +81,15 @@ def _require(condition: object, message: str) -> None:
 
 
 def _canonical(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowW4FlowMeshServiceError(
-            "W4 coordinator value is not canonical JSON"
-        ) from exc
+    return canonical_json_bytes(
+        value,
+        error_type=FullFlowW4FlowMeshServiceError,
+        error_message="W4 coordinator value is not canonical JSON",
+    )
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _strict_json(
@@ -104,21 +99,13 @@ def _strict_json(
 ) -> dict[str, Any]:
     _require(len(raw) <= maximum_bytes, "W4 JSON exceeds its byte limit")
 
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            _require(key not in result, "W4 request repeats a JSON key")
-            result[key] = value
-        return result
-
     try:
-        value = json.loads(
+        value = strict_json_loads(
             raw,
-            object_pairs_hook=unique,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                FullFlowW4FlowMeshServiceError(
-                    f"W4 request contains non-finite number {token}"
-                )
+            error_type=FullFlowW4FlowMeshServiceError,
+            duplicate_key_message=lambda _key: "W4 request repeats a JSON key",
+            nonfinite_number_message=(
+                lambda token: f"W4 request contains non-finite number {token}"
             ),
         )
     except FullFlowW4FlowMeshServiceError:

@@ -16,7 +16,6 @@ reported as gaps instead of being represented by a fictional service.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -27,6 +26,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ._full_flow_primitives import (
+    canonical_json_bytes,
+    canonical_json_lines_bytes,
+    checked_identifier,
+    checksum_manifest_bytes,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .full_flow_logical_routes import (
     SERVICE_CATALOG_NAME,
     verify_full_flow_logical_routes,
@@ -59,68 +67,35 @@ def _require(condition: object, message: str) -> None:
 
 
 def _json_bytes(value: Any) -> bytes:
-    try:
-        return (
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
-                allow_nan=False,
-            )
-            + "\n"
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowServiceBootstrapError(
-            "service bootstrap contains invalid JSON"
-        ) from exc
+    return pretty_json_bytes(
+        value,
+        error_type=FullFlowServiceBootstrapError,
+        error_message="service bootstrap contains invalid JSON",
+    )
 
 
 def _jsonl_bytes(rows: Iterable[Mapping[str, Any]]) -> bytes:
-    try:
-        return b"".join(
-            (
-                json.dumps(
-                    row,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
-                + "\n"
-            ).encode("utf-8")
-            for row in rows
-        )
-    except (TypeError, ValueError) as exc:
-        raise FullFlowServiceBootstrapError(
-            "service launcher contains invalid JSON"
-        ) from exc
+    return canonical_json_lines_bytes(
+        rows,
+        error_type=FullFlowServiceBootstrapError,
+        error_message="service launcher contains invalid JSON",
+    )
 
 
 def _canonical_bytes(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowServiceBootstrapError(
-            "service bootstrap is not canonical JSON"
-        ) from exc
+    return canonical_json_bytes(
+        value,
+        error_type=FullFlowServiceBootstrapError,
+        error_message="service bootstrap is not canonical JSON",
+    )
 
 
 def _sha256(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
+    return sha256_hex(payload)
 
 
 def _checksums(documents: Mapping[str, bytes]) -> bytes:
-    return b"".join(
-        f"{_sha256(documents[name])}  {name}\n".encode("utf-8")
-        for name in sorted(documents)
-    )
+    return checksum_manifest_bytes(documents)
 
 
 def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -133,13 +108,12 @@ def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _parse_json(payload: bytes, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(
+        value = strict_json_loads(
             payload.decode("utf-8"),
-            object_pairs_hook=_unique_pairs,
-            parse_constant=lambda item: (_ for _ in ()).throw(
-                FullFlowServiceBootstrapError(
-                    f"{label} contains non-finite number {item}"
-                )
+            error_type=FullFlowServiceBootstrapError,
+            duplicate_key_message=lambda key: f"duplicate JSON key: {key}",
+            nonfinite_number_message=(
+                lambda item: f"{label} contains non-finite number {item}"
             ),
         )
     except FullFlowServiceBootstrapError:
@@ -184,11 +158,12 @@ def _read_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
 
 
 def _identifier(value: Any, label: str) -> str:
-    _require(
-        isinstance(value, str) and _SAFE_ID.fullmatch(value) is not None,
-        f"{label} is invalid",
+    return checked_identifier(
+        value,
+        label,
+        error_type=FullFlowServiceBootstrapError,
+        pattern=_SAFE_ID,
     )
-    return value
 
 
 def _strings(value: Any, label: str) -> list[str]:

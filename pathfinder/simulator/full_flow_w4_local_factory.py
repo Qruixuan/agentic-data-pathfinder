@@ -15,7 +15,6 @@ cloud performance evidence, or monetary-cost evidence.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import math
 import re
@@ -38,6 +37,12 @@ from ..frame_bundle_ingest import (
     FRAME_BUNDLE_MEDIA_TYPE,
     FrameBundleLimits,
     validate_frame_bundle_bytes,
+)
+from ._full_flow_primitives import (
+    canonical_json_bytes,
+    checked_identifier,
+    checked_lower_sha256,
+    sha256_hex,
 )
 from .container_node import (
     CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
@@ -68,8 +73,6 @@ from .full_flow_w4_live_executor import (
 from .index_service import N2IndexHTTPClient, verify_n2_index_package
 
 
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._|:+-]{0,255}\Z")
 _RUNTIME_EPOCH = re.compile(r"[0-9a-f]{32}\Z")
 _INDEX_NODES = frozenset({"N2", "N7", "N8"})
 _DATA_NODES = frozenset({"N3", "N4"})
@@ -90,38 +93,35 @@ def _require(condition: object, message: str) -> None:
 
 
 def _canonical(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowW4LocalFactoryError(
-            "local W4 value is not canonical JSON"
-        ) from exc
+    return canonical_json_bytes(
+        value,
+        error_type=FullFlowW4LocalFactoryError,
+        error_message="local W4 value is not canonical JSON",
+    )
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _identifier(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None,
-        f"{name} is invalid",
+    return str(
+        checked_identifier(
+            value,
+            name,
+            error_type=FullFlowW4LocalFactoryError,
+        )
     )
-    return str(value)
 
 
 def _digest(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _SHA256.fullmatch(value) is not None,
-        f"{name} is not lowercase SHA-256",
+    return str(
+        checked_lower_sha256(
+            value,
+            name,
+            error_type=FullFlowW4LocalFactoryError,
+        )
     )
-    return str(value)
 
 
 def _positive_number(value: Any, name: str) -> float:

@@ -15,16 +15,24 @@ artifact payloads, or model reasoning.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from ...simulator._full_flow_primitives import (
+    LOWER_SHA256_PATTERN as _SHA256,
+    canonical_json_bytes,
+    canonical_json_lines_bytes,
+    checked_identifier,
+    checked_lower_sha256,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from ...simulator.full_flow_w4_candidate_coordinator import (
     OBSERVATIONS_NAME,
     OPERATION_EVIDENCE_NAME,
@@ -95,8 +103,6 @@ _RUN_FILES = frozenset({
     RESPONSES_NAME,
     FLOWMESH_COMPONENT_EVENTS_NAME,
 })
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._|:+-]{0,255}\Z")
 _PRIVATE_KEYS = frozenset({
     "api_key",
     "authorization",
@@ -122,55 +128,47 @@ def _require(condition: object, message: str) -> None:
 
 
 def _canonical(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FlowMeshW4CandidateMatrixError(
-            "W4 FlowMesh value is not canonical JSON"
-        ) from exc
+    return canonical_json_bytes(
+        value,
+        error_type=FlowMeshW4CandidateMatrixError,
+        error_message="W4 FlowMesh value is not canonical JSON",
+    )
 
 
 def _json_bytes(value: Any) -> bytes:
-    return (
-        json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8")
+    return pretty_json_bytes(value)
 
 
 def _jsonl_bytes(rows: Sequence[Mapping[str, Any]]) -> bytes:
-    return b"".join(_canonical(row) + b"\n" for row in rows)
+    return canonical_json_lines_bytes(
+        rows,
+        error_type=FlowMeshW4CandidateMatrixError,
+        error_message="W4 FlowMesh value is not canonical JSON",
+    )
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _digest(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _SHA256.fullmatch(value) is not None,
-        f"{name} is not lowercase SHA-256",
+    return str(
+        checked_lower_sha256(
+            value,
+            name,
+            error_type=FlowMeshW4CandidateMatrixError,
+        )
     )
-    return str(value)
 
 
 def _identifier(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _IDENTIFIER.fullmatch(value) is not None,
-        f"{name} is invalid",
+    return str(
+        checked_identifier(
+            value,
+            name,
+            error_type=FlowMeshW4CandidateMatrixError,
+        )
     )
-    return str(value)
 
 
 def _strict_fields(value: Mapping[str, Any], expected: set[str], name: str) -> None:
@@ -209,21 +207,13 @@ def _assert_public(value: Any, path: str = "$") -> None:
 
 
 def _strict_json_bytes(raw: bytes, name: str) -> dict[str, Any]:
-    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, child in pairs:
-            _require(key not in result, f"{name} repeats key {key}")
-            result[key] = child
-        return result
-
     try:
-        value = json.loads(
+        value = strict_json_loads(
             raw,
-            object_pairs_hook=unique,
-            parse_constant=lambda token: (_ for _ in ()).throw(
-                FlowMeshW4CandidateMatrixError(
-                    f"{name} contains non-finite number {token}"
-                )
+            error_type=FlowMeshW4CandidateMatrixError,
+            duplicate_key_message=lambda key: f"{name} repeats key {key}",
+            nonfinite_number_message=(
+                lambda token: f"{name} contains non-finite number {token}"
             ),
         )
     except FlowMeshW4CandidateMatrixError:

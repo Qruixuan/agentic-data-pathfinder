@@ -14,7 +14,6 @@ Completed sources are checked here and then passed through the production
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -25,6 +24,14 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from ._full_flow_primitives import (
+    canonical_json_bytes,
+    checked_identifier,
+    checksum_manifest_bytes,
+    pretty_json_bytes,
+    sha256_hex,
+    strict_json_loads,
+)
 from .full_flow_deployment import (
     DEPLOYMENT_SOURCE_SCHEMA_VERSION_V1ALPHA2,
     FullFlowDeploymentError,
@@ -89,48 +96,32 @@ def _require(condition: object, message: str) -> None:
 
 
 def _canonical_bytes(value: Any) -> bytes:
-    try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowDeploymentTemplateError(
-            "deployment template contains non-canonical JSON"
-        ) from exc
+    return canonical_json_bytes(
+        value,
+        error_type=FullFlowDeploymentTemplateError,
+        error_message="deployment template contains non-canonical JSON",
+    )
 
 
 def _json_bytes(value: Any) -> bytes:
-    try:
-        return (
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                indent=2,
-                allow_nan=False,
-            )
-            + "\n"
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise FullFlowDeploymentTemplateError(
-            "deployment template contains invalid JSON"
-        ) from exc
+    return pretty_json_bytes(
+        value,
+        error_type=FullFlowDeploymentTemplateError,
+        error_message="deployment template contains invalid JSON",
+    )
 
 
 def _sha256(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
+    return sha256_hex(value)
 
 
 def _identifier(value: Any, name: str) -> str:
-    _require(
-        isinstance(value, str) and _SAFE_ID.fullmatch(value) is not None,
-        f"{name} is invalid",
+    return checked_identifier(
+        value,
+        name,
+        error_type=FullFlowDeploymentTemplateError,
+        pattern=_SAFE_ID,
     )
-    return value
 
 
 def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -143,12 +134,11 @@ def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _parse_json(payload: bytes, name: str) -> dict[str, Any]:
     try:
-        value = json.loads(
+        value = strict_json_loads(
             payload.decode("utf-8"),
-            object_pairs_hook=_unique_pairs,
-            parse_constant=lambda item: (_ for _ in ()).throw(
-                FullFlowDeploymentTemplateError(f"{name} contains {item}")
-            ),
+            error_type=FullFlowDeploymentTemplateError,
+            duplicate_key_message=lambda key: f"duplicate JSON key: {key}",
+            nonfinite_number_message=lambda item: f"{name} contains {item}",
         )
     except FullFlowDeploymentTemplateError:
         raise
@@ -491,10 +481,7 @@ def _template_documents(
 
 
 def _checksums(documents: Mapping[str, bytes]) -> bytes:
-    return b"".join(
-        f"{_sha256(documents[name])}  {name}\n".encode("utf-8")
-        for name in sorted(documents)
-    )
+    return checksum_manifest_bytes(documents)
 
 
 def _verify_files(root: Path) -> None:
