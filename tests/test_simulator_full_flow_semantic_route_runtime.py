@@ -944,3 +944,58 @@ class D0ReturnAnswerTransportTest(unittest.TestCase):
         forwarded = transferred.value
         self.assertIsInstance(forwarded, SemanticInferenceResult)
         self.assertEqual("B", forwarded.final_answer)
+
+
+class D1IndexedRawTransportTest(unittest.TestCase):
+    """The D1 indexed-raw route must advance past the N2 -> N3 transfer.
+
+    D0 has no index stage, so its success never exercised this handoff; the
+    indexed-raw route failed the moment the selection crossed it.
+    """
+
+    def test_d1_selection_advances_beyond_the_n2_to_n3_transfer(self) -> None:
+        from pathfinder.simulator.full_flow_route_adapters import (
+            InProcessByteTransferAdapter,
+        )
+        from pathfinder.simulator.full_flow_semantic_route_runtime import (
+            ExactContentRange,
+            IndexSelection,
+            _value_commitment,
+        )
+
+        payload = b"indexed-raw-video-bytes"
+        segment = ExactContentRange(
+            object_id="nextqa-val-0000000001",
+            representation_id="raw_video",
+            object_catalog_version="catalog-v1",
+            full_artifact_size_bytes=len(payload),
+            full_artifact_sha256=_sha(payload),
+            range_start=0,
+            range_end=len(payload) - 1,
+            range_sha256=_sha(payload),
+        )
+        selection = IndexSelection(
+            selected_object_id="nextqa-val-0000000001",
+            index_result_sha256=_sha(b"index-result"),
+            segment=segment,
+        )
+        trial = {"trial_key": "scenario|smoke-retrieval|D1|r0000"}
+        before = _value_commitment(selection)
+        transferred = InProcessByteTransferAdapter().transfer(
+            run_id="run-v1",
+            trial=trial,
+            stage={"stage_key": trial["trial_key"] + "|transfer-scan"},
+            value=selection,
+        )
+        # The route runtime compares the commitment across the handoff and
+        # then hands the forwarded selection to the N3 access stage.
+        self.assertEqual(before, _value_commitment(transferred.value))
+        forwarded = transferred.value
+        self.assertIsInstance(forwarded, IndexSelection)
+        # N3 must still see the exact range, unchanged.
+        self.assertIs(segment, forwarded.segment)
+        self.assertEqual(0, forwarded.segment.range_start)
+        self.assertEqual(len(payload) - 1, forwarded.segment.range_end)
+        self.assertEqual(_sha(payload), forwarded.segment.range_sha256)
+        # bytes_sent describes the selection metadata, not the video.
+        self.assertNotEqual(len(payload), transferred.telemetry.bytes_sent)

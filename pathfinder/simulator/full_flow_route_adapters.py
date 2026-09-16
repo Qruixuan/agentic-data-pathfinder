@@ -784,6 +784,24 @@ def _value_payload(value: Any) -> tuple[str, int]:
         return value.payload_sha256, len(value.payload)
     if isinstance(value, PreparedSemanticInput):
         return value.payload_sha256, len(value.payload)
+    if isinstance(value, IndexSelection):
+        # The N2 -> N3 handoff carries the selection decision, not the
+        # selected video. Bind every field that makes the selection
+        # meaningful -- including range_descriptor_sha256 as an explicit
+        # null when the selection is whole-object -- and report the size of
+        # that canonical metadata rather than any artifact or estimated
+        # network payload. This mirrors _value_commitment()'s index-selection
+        # shape so both sides of the transfer agree.
+        selection = _canonical({
+            "domain": "pathfinder.index-selection-handoff/v1",
+            "selected_object_id": value.selected_object_id,
+            "index_result_sha256": value.index_result_sha256,
+            "range_descriptor_sha256": (
+                None if value.segment is None
+                else value.segment.descriptor_sha256
+            ),
+        })
+        return _sha256(selection), len(selection)
     if isinstance(value, SemanticInferenceResult):
         # The N6 -> N1 return-answer stage transports the inference result.
         # result_sha256 is its existing commitment, and the bytes actually

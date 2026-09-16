@@ -36,6 +36,7 @@ from pathfinder.simulator.full_flow_semantic_route_runtime import (
     ArtifactAccess,
     ArtifactIdentity,
     ExactContentRange,
+    IndexSelection,
     ProvisioningReference,
     SemanticInferenceResult,
 )
@@ -817,3 +818,117 @@ class SemanticAnswerTransportTest(unittest.TestCase):
                         run_id="run-v1", trial=self.TRIAL, stage=self.STAGE,
                         value=value,
                     )
+
+
+class IndexSelectionTransportTest(unittest.TestCase):
+    """The N2 -> N3 handoff transports the selection decision itself.
+
+    The transport bound only artifacts, prepared inputs and inference
+    results, so the indexed-raw route failed at the N2-to-N3 transfer with
+    "transport cannot bind IndexSelection" even though the selection was
+    valid. The payload here is the selection metadata, never the video.
+    """
+
+    TRIAL = {"trial_key": "scenario|smoke-retrieval|D1|r0000"}
+    STAGE = {"stage_key": "scenario|smoke-retrieval|D1|r0000|transfer-scan"}
+    OBJ = "nextqa-val-0000000001"
+
+    def _range(self, range_sha: str | None = None) -> ExactContentRange:
+        return ExactContentRange(
+            object_id=self.OBJ,
+            representation_id="raw_video",
+            object_catalog_version="catalog-v1",
+            full_artifact_size_bytes=len(RAW),
+            full_artifact_sha256=_sha(RAW),
+            range_start=0,
+            range_end=len(RAW) - 1,
+            range_sha256=range_sha or _sha(RAW),
+        )
+
+    def _selection(self, *, object_id=None, index_sha=None, segment=...):
+        return IndexSelection(
+            selected_object_id=object_id or self.OBJ,
+            index_result_sha256=index_sha or _sha(b"index-result"),
+            segment=self._range() if segment is ... else segment,
+        )
+
+    def _transfer(self, selection):
+        return InProcessByteTransferAdapter().transfer(
+            run_id="run-v1", trial=self.TRIAL, stage=self.STAGE,
+            value=selection,
+        )
+
+    def _expected_payload(self, selection) -> bytes:
+        return json.dumps(
+            {
+                "domain": "pathfinder.index-selection-handoff/v1",
+                "selected_object_id": selection.selected_object_id,
+                "index_result_sha256": selection.index_result_sha256,
+                "range_descriptor_sha256": (
+                    None if selection.segment is None
+                    else selection.segment.descriptor_sha256
+                ),
+            },
+            sort_keys=True, ensure_ascii=False, allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def test_exact_range_selection_crosses_the_transfer_adapter(self) -> None:
+        transferred = self._transfer(self._selection())
+        self.assertRegex(transferred.transfer_sha256, r"^[0-9a-f]{64}$")
+
+    def test_commitment_changes_with_selected_object_id(self) -> None:
+        a = self._transfer(self._selection()).transfer_sha256
+        b = self._transfer(
+            self._selection(object_id="nextqa-val-0000000002")
+        ).transfer_sha256
+        self.assertNotEqual(a, b)
+
+    def test_commitment_changes_with_index_result_sha256(self) -> None:
+        a = self._transfer(self._selection()).transfer_sha256
+        b = self._transfer(
+            self._selection(index_sha=_sha(b"other-index-result"))
+        ).transfer_sha256
+        self.assertNotEqual(a, b)
+
+    def test_commitment_changes_with_range_descriptor_sha256(self) -> None:
+        a = self._transfer(self._selection()).transfer_sha256
+        b = self._transfer(
+            self._selection(segment=self._range(_sha(b"other-range")))
+        ).transfer_sha256
+        self.assertNotEqual(a, b)
+        # the explicit null case must differ from any concrete range
+        whole = self._transfer(self._selection(segment=None)).transfer_sha256
+        self.assertNotIn(whole, {a, b})
+
+    def test_bytes_sent_is_the_canonical_metadata_size(self) -> None:
+        for segment in (..., None):
+            with self.subTest(whole_object=segment is None):
+                selection = self._selection(segment=segment)
+                transferred = self._transfer(selection)
+                self.assertEqual(
+                    len(self._expected_payload(selection)),
+                    transferred.telemetry.bytes_sent,
+                )
+                # never the artifact itself
+                self.assertNotEqual(
+                    len(RAW), transferred.telemetry.bytes_sent
+                )
+
+    def test_transfer_preserves_the_original_selection(self) -> None:
+        selection = self._selection()
+        transferred = self._transfer(selection)
+        self.assertIs(selection, transferred.value)
+        self.assertIs(selection.segment, transferred.value.segment)
+        self.assertEqual(
+            selection.segment.range_sha256,
+            transferred.value.segment.range_sha256,
+        )
+
+    def test_unsupported_types_still_fail_closed(self) -> None:
+        for value in ({"selected_object_id": "x"}, ["x"], "x", 7, None):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaisesRegex(
+                    FullFlowRouteAdapterError, "transport cannot bind"
+                ):
+                    self._transfer(value)
