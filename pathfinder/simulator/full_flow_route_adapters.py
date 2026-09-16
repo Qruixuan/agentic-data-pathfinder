@@ -60,6 +60,7 @@ from .full_flow_semantic_route_runtime import (
     IndexSelection,
     PreparedSemanticInput,
     ProvisioningReference,
+    SemanticInferenceResult,
     SemanticRouteAdapters,
     TransferResult,
 )
@@ -783,6 +784,15 @@ def _value_payload(value: Any) -> tuple[str, int]:
         return value.payload_sha256, len(value.payload)
     if isinstance(value, PreparedSemanticInput):
         return value.payload_sha256, len(value.payload)
+    if isinstance(value, SemanticInferenceResult):
+        # The N6 -> N1 return-answer stage transports the inference result.
+        # result_sha256 is its existing commitment, and the bytes actually
+        # carried are the UTF-8 final answer, so bytes_sent must match that
+        # length rather than the size of any container object.
+        return (
+            value.result_sha256,
+            len(value.final_answer.encode("utf-8")),
+        )
     raise FullFlowRouteAdapterError(
         f"transport cannot bind {type(value).__name__}"
     )

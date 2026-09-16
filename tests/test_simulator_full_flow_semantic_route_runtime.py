@@ -899,3 +899,48 @@ class D0CrossStageRouteRuntimeBindingTest(unittest.TestCase):
         )
         self.assertEqual(MODEL, result.model)
         self.assertEqual(1, len(executor.calls))
+
+
+class D0ReturnAnswerTransportTest(unittest.TestCase):
+    """The real transfer adapter must carry the answer past return-answer.
+
+    Complements the D0 cross-stage binding case: that one proves N6 inference
+    succeeds across separate stages, this one proves the resulting answer can
+    still be handed from N6 to N1 so hidden scoring is reachable.
+    """
+
+    def test_real_transfer_adapter_carries_the_answer_to_n1(self) -> None:
+        from pathfinder.simulator.full_flow_route_adapters import (
+            InProcessByteTransferAdapter,
+        )
+        from pathfinder.simulator.full_flow_semantic_route_runtime import (
+            SemanticInferenceResult,
+            _value_commitment,
+        )
+
+        trial = {"trial_key": "scenario|smoke-retrieval|D0|r0000"}
+        result = SemanticInferenceResult(
+            final_answer="B",
+            model="qwen3.8-27b",
+            input_sha256=_sha(b"input"),
+            request_sha256=_sha(b"request"),
+            result_sha256=_sha(b"result"),
+        )
+        before = _value_commitment(result)
+        transferred = InProcessByteTransferAdapter().transfer(
+            run_id="run-v1",
+            trial=trial,
+            stage={"stage_key": trial["trial_key"] + "|return-answer"},
+            value=result,
+        )
+        # The route runtime compares the commitment across the handoff and
+        # then hands the forwarded value to the hidden-scoring stage.
+        self.assertEqual(before, _value_commitment(transferred.value))
+        self.assertIs(result, transferred.value)
+        self.assertEqual(
+            len("B".encode("utf-8")), transferred.telemetry.bytes_sent
+        )
+        # Hidden scoring consumes the unwrapped answer.
+        forwarded = transferred.value
+        self.assertIsInstance(forwarded, SemanticInferenceResult)
+        self.assertEqual("B", forwarded.final_answer)

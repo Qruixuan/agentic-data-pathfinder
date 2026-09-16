@@ -15,6 +15,7 @@ from pathfinder.data_agent_client import (
 )
 from pathfinder.simulator.full_flow_cache import CachedArtifact
 from pathfinder.simulator.full_flow_route_adapters import (
+    FullFlowRouteAdapterError,
     BoundDataAgentAccessRequestFactory,
     BoundIndexQueryAdapter,
     DataAgentArtifactSourceAdapter,
@@ -36,6 +37,7 @@ from pathfinder.simulator.full_flow_semantic_route_runtime import (
     ArtifactIdentity,
     ExactContentRange,
     ProvisioningReference,
+    SemanticInferenceResult,
 )
 
 
@@ -728,3 +730,90 @@ class HttpContainerNodeSemanticClientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SemanticAnswerTransportTest(unittest.TestCase):
+    """The N6 -> N1 return-answer stage transports a SemanticInferenceResult.
+
+    The transport adapter previously bound only artifacts and prepared
+    inputs, so the D0 route failed at return-answer with
+    "transport cannot bind SemanticInferenceResult" after N6 had already
+    produced an answer.
+    """
+
+    ANSWER = "B"
+    TRIAL = {"trial_key": "scenario|smoke-retrieval|D0|r0000"}
+    STAGE = {"stage_key": "scenario|smoke-retrieval|D0|r0000|return-answer"}
+
+    def _result(self, answer: str = ANSWER) -> SemanticInferenceResult:
+        return SemanticInferenceResult(
+            final_answer=answer,
+            model="qwen3.8-27b",
+            input_sha256=_sha(b"input"),
+            request_sha256=_sha(b"request"),
+            result_sha256=_sha(b"result"),
+        )
+
+    def test_transfer_accepts_a_semantic_inference_result(self) -> None:
+        result = self._result()
+        transferred = InProcessByteTransferAdapter().transfer(
+            run_id="run-v1", trial=self.TRIAL, stage=self.STAGE, value=result,
+        )
+        self.assertRegex(transferred.transfer_sha256, r"^[0-9a-f]{64}$")
+
+    def test_transfer_preserves_the_original_result_object(self) -> None:
+        result = self._result()
+        transferred = InProcessByteTransferAdapter().transfer(
+            run_id="run-v1", trial=self.TRIAL, stage=self.STAGE, value=result,
+        )
+        self.assertIs(result, transferred.value)
+
+    def test_transfer_commitment_uses_result_sha256(self) -> None:
+        result = self._result()
+        transferred = InProcessByteTransferAdapter().transfer(
+            run_id="run-v1", trial=self.TRIAL, stage=self.STAGE, value=result,
+        )
+        expected = _sha(
+            json.dumps(
+                {
+                    "domain": "pathfinder.in-process-byte-handoff/v1",
+                    "run_id": "run-v1",
+                    "trial_key": self.TRIAL["trial_key"],
+                    "stage_key": self.STAGE["stage_key"],
+                    "payload_sha256": result.result_sha256,
+                    "payload_size_bytes": len(
+                        result.final_answer.encode("utf-8")
+                    ),
+                    "network_measurement_claimed": False,
+                },
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        self.assertEqual(expected, transferred.transfer_sha256)
+
+    def test_bytes_sent_is_the_utf8_answer_length(self) -> None:
+        for answer in ("B", "a longer answer", "答案"):
+            with self.subTest(answer=answer):
+                result = self._result(answer)
+                transferred = InProcessByteTransferAdapter().transfer(
+                    run_id="run-v1", trial=self.TRIAL, stage=self.STAGE,
+                    value=result,
+                )
+                self.assertEqual(
+                    len(answer.encode("utf-8")),
+                    transferred.telemetry.bytes_sent,
+                )
+
+    def test_unsupported_types_still_fail_closed(self) -> None:
+        for value in ({"answer": "B"}, ["B"], "B", b"B", 7, None):
+            with self.subTest(value=type(value).__name__):
+                with self.assertRaisesRegex(
+                    FullFlowRouteAdapterError, "transport cannot bind"
+                ):
+                    InProcessByteTransferAdapter().transfer(
+                        run_id="run-v1", trial=self.TRIAL, stage=self.STAGE,
+                        value=value,
+                    )

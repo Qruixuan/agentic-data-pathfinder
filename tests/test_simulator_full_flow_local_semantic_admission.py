@@ -482,7 +482,7 @@ class FullFlowLocalSemanticAdmissionTest(unittest.TestCase):
             FullFlowArtifactPreflightError,
         )
         self.assertIn(
-            "package verification failed",
+            "artifact observation no longer matches its N3/N4 package",
             str(caught.exception.__cause__),
         )
         self.assertFalse(output.exists())
