@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from hashlib import sha256
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -327,6 +328,118 @@ class DataAgentServerTest(unittest.TestCase):
             result.timings_ms["controlled_delay"],
             40.0,
         )
+
+    def test_strict_client_accepts_a_full_span_exact_range(self) -> None:
+        """The strict client must accept a range covering the whole artifact.
+
+        This is the production path that failed: the client requires 206 for
+        every range it issues, so a full-span range answered with 200 raised
+        DataAgentProtocolError instead of returning the bytes.
+        """
+        size = len(self.artifact_bytes)
+        full_digest = sha256(self.artifact_bytes).hexdigest()
+        artifact = self.client.fetch_binary_artifact_range(
+            self.request("compressed_video", access_id="client-full-span"),
+            range_start=0,
+            range_end=size - 1,
+            expected_range_sha256=full_digest,
+            allowed_media_types=frozenset({"application/octet-stream"}),
+        )
+        self.assertEqual(self.artifact_bytes, artifact.data)
+        self.assertEqual(0, artifact.range_start)
+        self.assertEqual(size - 1, artifact.range_end)
+        self.assertEqual(size, artifact.range_size_bytes)
+        self.assertEqual(full_digest, artifact.range_sha256)
+        self.assertEqual(size, artifact.full_artifact_size_bytes)
+        self.assertEqual(full_digest, artifact.full_artifact_sha256)
+
+        subset = self.client.fetch_binary_artifact_range(
+            self.request("compressed_video", access_id="client-subset"),
+            range_start=2,
+            range_end=5,
+            expected_range_sha256=sha256(b"2345").hexdigest(),
+            allowed_media_types=frozenset({"application/octet-stream"}),
+        )
+        self.assertEqual(b"2345", subset.data)
+        self.assertEqual(size, subset.full_artifact_size_bytes)
+
+    def test_full_span_range_returns_206_with_exact_content_range(self) -> None:
+        """A Range covering the whole artifact is still a range request.
+
+        RFC 9110 requires 206 with an exact Content-Range, and the strict
+        client refuses anything else. Deriving the status from the interval
+        instead of the request made this answer 200 with no Content-Range.
+        """
+        size = len(self.artifact_bytes)
+        result = self.client.access(
+            self.request("compressed_video", access_id="full-span-access")
+        )
+        artifact_url = result.payload.value
+
+        # 1. no Range header -> 200, no Content-Range
+        with urlopen(artifact_url, timeout=FUNCTIONAL_TIMEOUT_SECONDS) as r:
+            self.assertEqual(200, r.status)
+            self.assertIsNone(r.headers.get("Content-Range"))
+            self.assertEqual(self.artifact_bytes, r.read())
+            self.assertEqual(str(size), r.headers.get("Content-Length"))
+
+        # 2. subset Range -> 206 with exact Content-Range
+        subset = Request(artifact_url, headers={"Range": "bytes=2-5"})
+        with urlopen(subset, timeout=FUNCTIONAL_TIMEOUT_SECONDS) as r:
+            self.assertEqual(206, r.status)
+            self.assertEqual(f"bytes 2-5/{size}", r.headers.get("Content-Range"))
+            self.assertEqual(b"2345", r.read())
+
+        # 3. full-span Range -> 206 with exact Content-Range, full body
+        full = Request(
+            artifact_url, headers={"Range": f"bytes=0-{size - 1}"}
+        )
+        with urlopen(full, timeout=FUNCTIONAL_TIMEOUT_SECONDS) as r:
+            self.assertEqual(206, r.status)
+            self.assertEqual(
+                f"bytes 0-{size - 1}/{size}", r.headers.get("Content-Range")
+            )
+            self.assertEqual(str(size), r.headers.get("Content-Length"))
+            self.assertEqual("bytes", r.headers.get("Accept-Ranges"))
+            self.assertEqual(self.artifact_bytes, r.read())
+            etag = r.headers.get("ETag")
+        # ETag stays the artifact digest regardless of framing
+        with urlopen(artifact_url, timeout=FUNCTIONAL_TIMEOUT_SECONDS) as r:
+            self.assertEqual(etag, r.headers.get("ETag"))
+
+        # telemetry: a full-span range still counts as a full artifact
+        telemetry = self.client.get_access_telemetry(
+            "full-span-access", wait_for_quiescence=True,
+        )
+        self.assertEqual(0, telemetry.in_flight_request_count)
+        self.assertEqual(4, telemetry.download_request_count)
+        self.assertEqual(4, telemetry.completed_request_count)
+        self.assertEqual(3, telemetry.full_download_count)
+        self.assertEqual(size * 3 + 4, telemetry.bytes_sent)
+
+    def test_malformed_and_unsatisfiable_ranges_stay_rejected(self) -> None:
+        size = len(self.artifact_bytes)
+        result = self.client.access(
+            self.request("compressed_video", access_id="bad-range-access")
+        )
+        artifact_url = result.payload.value
+        for header in (
+            "items=0-1",
+            "bytes=0-1,3-4",
+            "bytes=abc-def",
+            "bytes=5",
+            f"bytes={size}-{size + 5}",
+            "bytes=-0",
+        ):
+            with self.subTest(range_header=header):
+                request = Request(artifact_url, headers={"Range": header})
+                with self.assertRaises(HTTPError) as caught:
+                    urlopen(request, timeout=FUNCTIONAL_TIMEOUT_SECONDS)
+                self.assertEqual(416, caught.exception.code)
+                self.assertEqual(
+                    f"bytes */{size}",
+                    caught.exception.headers.get("Content-Range"),
+                )
 
     def test_artifact_uri_supports_signed_range_download(self) -> None:
         result = self.client.access(

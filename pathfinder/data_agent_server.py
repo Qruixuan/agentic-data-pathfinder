@@ -967,8 +967,12 @@ class DataAgentHTTPRequestHandler(BaseHTTPRequestHandler):
         return value
 
     def _write_artifact(self, artifact: DataAgentArtifact) -> None:
-        start, end = self._parse_range(artifact.size_bytes)
-        partial = start != 0 or end != artifact.size_bytes - 1
+        start, end, ranged = self._parse_range(artifact.size_bytes)
+        # A Range request always answers 206 with an exact Content-Range,
+        # even when the interval covers the complete artifact. Deriving this
+        # from the interval instead made a full-span range answer 200 with no
+        # Content-Range, which the strict client correctly refuses.
+        partial = ranged
         content_length = max(0, end - start + 1)
         started_at = time.time()
         started = time.perf_counter()
@@ -1034,12 +1038,19 @@ class DataAgentHTTPRequestHandler(BaseHTTPRequestHandler):
                     artifact.access_id,
                 )
 
-    def _parse_range(self, size: int) -> tuple[int, int]:
+    def _parse_range(self, size: int) -> tuple[int, int, bool]:
+        """Return the byte interval and whether a Range header requested it.
+
+        The third element matters because a syntactically valid Range that
+        happens to span the whole artifact is still a range request: RFC 9110
+        requires 206 with an exact Content-Range, and the strict client
+        refuses anything else.
+        """
         if size == 0:
-            return 0, -1
+            return 0, -1, False
         raw = self.headers.get("Range")
         if raw is None:
-            return 0, size - 1
+            return 0, size - 1, False
         if not raw.startswith("bytes=") or "," in raw:
             raise DataAgentRangeNotSatisfiable
         value = raw[6:]
@@ -1060,7 +1071,7 @@ class DataAgentHTTPRequestHandler(BaseHTTPRequestHandler):
             raise DataAgentRangeNotSatisfiable
         if start < 0 or end < start or start >= size:
             raise DataAgentRangeNotSatisfiable
-        return start, min(end, size - 1)
+        return start, min(end, size - 1), True
 
     def _write_error(
         self,
