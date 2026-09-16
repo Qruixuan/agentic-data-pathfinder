@@ -393,7 +393,7 @@ def _request_id(
     *,
     run_id: str,
     trial: Mapping[str, Any],
-    stage: Mapping[str, Any],
+    request_binding_stage_key: str,
     public_task: Mapping[str, Any],
     mode: str,
     identities: Sequence[ArtifactIdentity],
@@ -406,7 +406,7 @@ def _request_id(
             trial.get("trial_key"), "trial_key", max_bytes=2048
         ),
         "stage_key": _text(
-            stage.get("stage_key"), "stage_key", max_bytes=2048
+            request_binding_stage_key, "stage_key", max_bytes=2048
         ),
         "task_binding_sha256": _digest(
             public_task.get("task_binding_sha256"),
@@ -426,6 +426,7 @@ def _prepared(
     *,
     bytes_read: int,
     service_time_ms: float,
+    request_binding_stage_key: str,
 ) -> PreparedSemanticInput:
     payload = _canonical(request)
     preparation = _sha256(_canonical({
@@ -433,12 +434,14 @@ def _prepared(
         "payload_sha256": _sha256(payload),
         "payload_size_bytes": len(payload),
         "component_identity_sha256": [value.commitment for value in identities],
+        "request_binding_stage_key": request_binding_stage_key,
     }))
     return PreparedSemanticInput(
         mode=mode,
         payload=payload,
         component_identities=identities,
         preparation_sha256=preparation,
+        request_binding_stage_key=request_binding_stage_key,
         telemetry=AdapterTelemetry(
             service_time_ms=service_time_ms,
             bytes_read=bytes_read,
@@ -502,6 +505,11 @@ class N6ModelInputAdapter:
         question = _render_public_question(
             public_task, self._limits.max_question_bytes
         )
+        # Captured once here so the request ID and the value stored on the
+        # prepared input are derived from exactly the same stage key.
+        binding_stage_key = _text(
+            stage.get("stage_key"), "stage_key", max_bytes=2048
+        )
 
         if mode == "digest":
             request = self._digest_request(
@@ -527,6 +535,7 @@ class N6ModelInputAdapter:
             identities,
             bytes_read=sum(len(value.payload) for value in artifacts),
             service_time_ms=(finished - started) / 1_000_000.0,
+            request_binding_stage_key=binding_stage_key,
         )
 
     def _digest_request(
@@ -569,7 +578,9 @@ class N6ModelInputAdapter:
         request_id = _request_id(
             run_id=run_id,
             trial=trial,
-            stage=stage,
+            request_binding_stage_key=_text(
+                stage.get("stage_key"), "stage_key", max_bytes=2048
+            ),
             public_task=public_task,
             mode="digest",
             identities=identities,
@@ -701,7 +712,9 @@ class N6ModelInputAdapter:
         request_id = _request_id(
             run_id=run_id,
             trial=trial,
-            stage=stage,
+            request_binding_stage_key=_text(
+                stage.get("stage_key"), "stage_key", max_bytes=2048
+            ),
             public_task=public_task,
             mode=mode,
             identities=identities,
@@ -792,7 +805,9 @@ class N6ModelInputAdapter:
         request_id = _request_id(
             run_id=run_id,
             trial=trial,
-            stage=stage,
+            request_binding_stage_key=_text(
+                stage.get("stage_key"), "stage_key", max_bytes=2048
+            ),
             public_task=public_task,
             mode="digest+frames-fusion",
             identities=identities,
@@ -826,6 +841,7 @@ def decode_prepared_semantic_request(
         "component_identity_sha256": [
             value.commitment for value in model_input.component_identities
         ],
+        "request_binding_stage_key": model_input.request_binding_stage_key,
     }))
     _require(
         model_input.preparation_sha256 == expected,
@@ -871,12 +887,16 @@ def _validate_prepared_request_binding(
     )
     without_id = dict(request)
     del without_id["semantic_request_id"]
+    # The ID was derived during preparation, so it must be revalidated
+    # against the stage key recorded at that time. ``stage`` remains the
+    # currently executing (infer) stage and is deliberately not substituted
+    # here; using it would break every legitimate two-stage route.
     _require(
         request_id
         == _request_id(
             run_id=run_id,
             trial=trial,
-            stage=stage,
+            request_binding_stage_key=model_input.request_binding_stage_key,
             public_task=public_task,
             mode=mode,
             identities=identities,

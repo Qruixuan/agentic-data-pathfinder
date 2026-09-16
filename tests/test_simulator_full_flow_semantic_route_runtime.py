@@ -346,8 +346,9 @@ class FakeAdapters:
         mode: str,
         artifacts: Sequence[ArtifactAccess],
     ) -> PreparedSemanticInput:
-        del run_id, trial, stage, public_task
+        del run_id, trial, public_task
         self.calls[f"prepare-{mode}"] += 1
+        binding_stage_key = str(stage.get("stage_key"))
         payload = _canonical({
             "mode": mode,
             "artifact_payload_sha256": [value.payload_sha256 for value in artifacts],
@@ -358,12 +359,14 @@ class FakeAdapters:
             "payload_sha256": _sha(payload),
             "payload_size_bytes": len(payload),
             "component_identity_sha256": [value.commitment for value in identities],
+            "request_binding_stage_key": binding_stage_key,
         }))
         return PreparedSemanticInput(
             mode=mode,
             payload=payload,
             component_identities=identities,
             preparation_sha256=commitment,
+            request_binding_stage_key=binding_stage_key,
             telemetry=self._metric(read=sum(len(value.payload) for value in artifacts)),
         )
 
@@ -824,3 +827,75 @@ class FullFlowSemanticRouteRuntimeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class D0CrossStageRouteRuntimeBindingTest(unittest.TestCase):
+    """D0-shaped route-runtime regression with real N6 adapters.
+
+    Exercises the genuine two-stage shape -- prepare on
+    ``prepare-model-input``, infer on ``infer`` -- through the same
+    ``_validate_prepared`` commitment check the route runtime applies, using
+    the real adapters rather than a same-stage fake.
+    """
+
+    def test_real_adapters_bind_across_separate_d0_stages(self) -> None:
+        from pathfinder.simulator.full_flow_n6_adapters import (
+            BoundN6SemanticInferenceAdapter,
+            N6ModelInputAdapter,
+            N6PreparationLimits,
+        )
+        from pathfinder.simulator.full_flow_semantic_route_runtime import (
+            _validate_prepared,
+        )
+        from tests.test_simulator_full_flow_n6_adapters import (
+            FakeExecutor,
+            MODEL,
+            RecordingSampler,
+            _access,
+            _health,
+            _public_task,
+        )
+
+        prepare_stage = {
+            "stage_key": "flowmesh-infra-4x8-local-smoke-v1|smoke-retrieval"
+            "|D0|r0000|prepare-model-input",
+            "logical_node_ids": ["N7"],
+        }
+        infer_stage = {
+            "stage_key": "flowmesh-infra-4x8-local-smoke-v1|smoke-retrieval"
+            "|D0|r0000|infer",
+            "logical_node_ids": ["N6"],
+        }
+        self.assertNotEqual(
+            prepare_stage["stage_key"], infer_stage["stage_key"]
+        )
+        artifacts = [_access("multimodal_digest", b"digest")]
+        prepared = N6ModelInputAdapter(
+            raw_sampler=RecordingSampler(),
+            limits=N6PreparationLimits(raw_frame_count=2),
+            clock_ns=lambda: 1,
+        ).prepare(
+            run_id="run",
+            trial={"trial_key": "trial"},
+            stage=prepare_stage,
+            public_task=_public_task(),
+            mode="digest",
+            artifacts=artifacts,
+        )
+        # The route runtime's own commitment check must accept it.
+        _validate_prepared(prepared, artifacts, "digest")
+        self.assertEqual(
+            prepare_stage["stage_key"], prepared.request_binding_stage_key
+        )
+        executor = FakeExecutor()
+        result = BoundN6SemanticInferenceAdapter(
+            executor=executor, health_probe=_health, expected_model=MODEL,
+        ).infer(
+            run_id="run",
+            trial={"trial_key": "trial"},
+            stage=infer_stage,
+            public_task=_public_task(),
+            model_input=prepared,
+        )
+        self.assertEqual(MODEL, result.model)
+        self.assertEqual(1, len(executor.calls))

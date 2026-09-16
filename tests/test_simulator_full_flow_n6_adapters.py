@@ -527,6 +527,101 @@ def _health(epoch: str = "a" * 32) -> dict[str, Any]:
     }
 
 
+class N6CrossStageRequestBindingTest(unittest.TestCase):
+    """A real route prepares on one stage and infers on another.
+
+    The semantic request ID is derived during ``prepare-model-input`` but was
+    previously revalidated against whichever stage was executing, so the
+    genuine two-stage D0 route failed its own binding check before N6 was
+    ever contacted. Every prior test prepared and inferred with the same
+    stage key, which is why none of them caught it.
+    """
+
+    PREPARE_STAGE = {"stage_key": "scenario|W1|D0|r0000|prepare-model-input"}
+    INFER_STAGE = {"stage_key": "scenario|W1|D0|r0000|infer"}
+
+    def _prepare(self, stage=None):
+        adapter = N6ModelInputAdapter(
+            raw_sampler=RecordingSampler(),
+            limits=N6PreparationLimits(raw_frame_count=2),
+            clock_ns=lambda: 1,
+        )
+        return adapter.prepare(
+            run_id="run",
+            trial={"trial_key": "trial"},
+            stage=stage or self.PREPARE_STAGE,
+            public_task=_public_task(),
+            mode="digest",
+            artifacts=[_access("multimodal_digest", b"digest")],
+        )
+
+    def _infer(self, prepared, executor, stage=None):
+        return BoundN6SemanticInferenceAdapter(
+            executor=executor, health_probe=_health, expected_model=MODEL,
+        ).infer(
+            run_id="run",
+            trial={"trial_key": "trial"},
+            stage=stage or self.INFER_STAGE,
+            public_task=_public_task(),
+            model_input=prepared,
+        )
+
+    def test_distinct_prepare_and_infer_stages_succeed_once(self) -> None:
+        prepared = self._prepare()
+        self.assertEqual(
+            self.PREPARE_STAGE["stage_key"], prepared.request_binding_stage_key
+        )
+        executor = FakeExecutor()
+        result = self._infer(prepared, executor)
+        self.assertEqual(MODEL, result.model)
+        self.assertEqual(1, len(executor.calls))
+
+    def test_tampered_binding_stage_key_fails_before_execution(self) -> None:
+        prepared = self._prepare()
+        forged = PreparedSemanticInput(
+            mode=prepared.mode,
+            payload=prepared.payload,
+            component_identities=prepared.component_identities,
+            preparation_sha256=prepared.preparation_sha256,
+            request_binding_stage_key=self.INFER_STAGE["stage_key"],
+        )
+        executor = FakeExecutor()
+        with self.assertRaises(N6AdapterError):
+            self._infer(forged, executor)
+        self.assertEqual(0, len(executor.calls))
+
+    def test_id_derived_from_infer_stage_still_fails(self) -> None:
+        # Outer commitment recomputed so only the request-ID binding can
+        # reject this: the ID was derived from the infer stage key.
+        wrong = self._prepare(stage=self.INFER_STAGE)
+        forged = PreparedSemanticInput(
+            mode=wrong.mode,
+            payload=wrong.payload,
+            component_identities=wrong.component_identities,
+            preparation_sha256=_sha(_canonical({
+                "mode": wrong.mode,
+                "payload_sha256": wrong.payload_sha256,
+                "payload_size_bytes": len(wrong.payload),
+                "component_identity_sha256": [
+                    v.commitment for v in wrong.component_identities
+                ],
+                "request_binding_stage_key": self.PREPARE_STAGE["stage_key"],
+            })),
+            request_binding_stage_key=self.PREPARE_STAGE["stage_key"],
+        )
+        executor = FakeExecutor()
+        with self.assertRaisesRegex(N6AdapterError, "request ID binding"):
+            self._infer(forged, executor)
+        self.assertEqual(0, len(executor.calls))
+
+    def test_same_stage_inline_inference_still_works(self) -> None:
+        prepared = self._prepare(stage=self.INFER_STAGE)
+        executor = FakeExecutor()
+        result = self._infer(prepared, executor, stage=self.INFER_STAGE)
+        self.assertEqual(MODEL, result.model)
+        self.assertEqual(1, len(executor.calls))
+
+
 class N6InferenceTest(unittest.TestCase):
     def _prepared(self, mode: str) -> PreparedSemanticInput:
         adapter = N6ModelInputAdapter(
@@ -634,6 +729,7 @@ class N6InferenceTest(unittest.TestCase):
             payload=prepared.payload + b" ",
             component_identities=prepared.component_identities,
             preparation_sha256=prepared.preparation_sha256,
+            request_binding_stage_key=prepared.request_binding_stage_key,
         )
         executor = FakeExecutor()
         with self.assertRaisesRegex(N6AdapterError, "JSON|canonical|commitment"):

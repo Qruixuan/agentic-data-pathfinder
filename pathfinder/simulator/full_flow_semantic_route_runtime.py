@@ -386,6 +386,7 @@ class PreparedSemanticInput:
     payload: bytes
     component_identities: tuple[ArtifactIdentity, ...]
     preparation_sha256: str
+    request_binding_stage_key: str
     telemetry: AdapterTelemetry = field(default_factory=AdapterTelemetry)
 
     def __post_init__(self) -> None:
@@ -393,6 +394,15 @@ class PreparedSemanticInput:
         _require(isinstance(self.payload, bytes) and self.payload, "model input is empty")
         _require(bool(self.component_identities), "model input has no components")
         _digest(self.preparation_sha256, "preparation_sha256")
+        # The stage key the semantic request ID was derived from. A later
+        # stage (``infer``) must revalidate that ID against *this* key, not
+        # against whichever stage happens to be executing, or a legitimate
+        # two-stage route fails its own binding check.
+        _text(
+            self.request_binding_stage_key,
+            "request_binding_stage_key",
+            maximum=2048,
+        )
 
     @property
     def payload_sha256(self) -> str:
@@ -1175,6 +1185,7 @@ def _validate_prepared(
         "payload_sha256": prepared.payload_sha256,
         "payload_size_bytes": len(prepared.payload),
         "component_identity_sha256": [value.commitment for value in expected],
+        "request_binding_stage_key": prepared.request_binding_stage_key,
     }))
     _require(
         prepared.preparation_sha256 == expected_preparation,
