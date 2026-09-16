@@ -17,7 +17,8 @@ from ._common import (
     PayloadPrinter,
     add_compact as _add_compact,
     add_required_path as _add_required_path,
-    resolve_full_flow_credentials as _resolve_full_flow_credentials,
+    resolve_credentials as _resolve_credentials,
+    semantic_route_credential_contract as _semantic_route_credential_contract,
 )
 
 
@@ -884,22 +885,9 @@ def dispatch_full_flow_semantic_command(
             assemble_full_flow_semantic_route_service,
         )
 
-        credential_names = (
-            "N2 index",
-            "N7 index",
-            "N8 index",
-            "N3 Data Agent",
-            "N4 Data Agent",
-            "N7 cache",
-            "N8 cache",
-            "N6 semantic",
-            "N1 score",
-            "N1 verifier",
-            "route ingress",
-        )
-        credentials, missing = _resolve_full_flow_credentials(
+        credentials, missing = _resolve_credentials(
             os.environ,
-            credential_names,
+            _semantic_route_credential_contract(),
         )
         if missing:
             raise ConfigError(

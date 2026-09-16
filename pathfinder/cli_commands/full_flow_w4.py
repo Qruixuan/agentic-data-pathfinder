@@ -13,6 +13,8 @@ from typing import Callable
 
 from ..config import ConfigError
 from ._common import (
+    resolve_credentials as _resolve_credentials,
+    w4_credential_contract as _w4_credential_contract,
     PayloadPrinter,
     add_compact as _add_compact,
     add_required_path as _add_required_path,
@@ -686,55 +688,15 @@ def dispatch_full_flow_w4_command(
             run_full_flow_w4_local_component_execution,
         )
 
-        credential_environment = {
-            "N2 index": ("PATHFINDER_N2_INDEX_TOKEN",),
-            "N7 index": (
-                "PATHFINDER_N7_INDEX_TOKEN",
-                "PATHFINDER_N2_INDEX_TOKEN",
-            ),
-            "N8 index": (
-                "PATHFINDER_N8_INDEX_TOKEN",
-                "PATHFINDER_N2_INDEX_TOKEN",
-            ),
-            "N3 Data Agent": (
-                "PATHFINDER_N3_DATA_AGENT_TOKEN",
-                "PATHFINDER_DATA_AGENT_TOKEN",
-            ),
-            "N4 Data Agent": (
-                "PATHFINDER_N4_DATA_AGENT_TOKEN",
-                "PATHFINDER_DATA_AGENT_TOKEN",
-            ),
-            "N7 cache": (
-                "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN",
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
-            ),
-            "N8 cache": (
-                "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN",
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
-            ),
-            "N6 semantic": ("PATHFINDER_CONTAINER_NODE_TOKEN",),
-        }
-        credentials = {
-            name: next(
-                (
-                    os.environ[environment_name]
-                    for environment_name in environment_names
-                    if os.environ.get(environment_name)
-                ),
-                None,
-            )
-            for name, environment_names in credential_environment.items()
-        }
-        missing = [
-            "/".join(credential_environment[name])
-            for name, value in credentials.items()
-            if not value
-        ]
+        credentials, missing = _resolve_credentials(
+            os.environ,
+            _w4_credential_contract(dedicated_cache=False),
+        )
         if missing:
             raise ConfigError(
                 "local W4 component execution requires runtime "
                 "credential environment variables: "
-                + ", ".join(sorted(missing))
+                + ", ".join(missing)
             )
         private_hosts = tuple(
             value.strip()
@@ -838,59 +800,15 @@ def dispatch_full_flow_w4_command(
             W4LocalRuntimeInputs,
         )
 
-        credential_environment = {
-            "N2 index": ("PATHFINDER_N2_INDEX_TOKEN",),
-            "N7 index": (
-                "PATHFINDER_N7_INDEX_TOKEN",
-                "PATHFINDER_N2_INDEX_TOKEN",
-            ),
-            "N8 index": (
-                "PATHFINDER_N8_INDEX_TOKEN",
-                "PATHFINDER_N2_INDEX_TOKEN",
-            ),
-            "N3 Data Agent": (
-                "PATHFINDER_N3_DATA_AGENT_TOKEN",
-                "PATHFINDER_DATA_AGENT_TOKEN",
-            ),
-            "N4 Data Agent": (
-                "PATHFINDER_N4_DATA_AGENT_TOKEN",
-                "PATHFINDER_DATA_AGENT_TOKEN",
-            ),
-            "N7 cache": (
-                "PATHFINDER_N7_W4_CACHE_TOKEN",
-                "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN",
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
-            ),
-            "N8 cache": (
-                "PATHFINDER_N8_W4_CACHE_TOKEN",
-                "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN",
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
-            ),
-            "N6 semantic": ("PATHFINDER_CONTAINER_NODE_TOKEN",),
-            "W4 ingress": (
-                "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET",
-            ),
-        }
-        credentials = {
-            name: next(
-                (
-                    os.environ[environment_name]
-                    for environment_name in environment_names
-                    if os.environ.get(environment_name)
-                ),
-                None,
-            )
-            for name, environment_names in credential_environment.items()
-        }
-        missing = [
-            "/".join(credential_environment[name])
-            for name, value in credentials.items()
-            if not value
-        ]
+        credentials, missing = _resolve_credentials(
+            os.environ,
+            _w4_credential_contract(dedicated_cache=True),
+        )
         if missing:
             raise ConfigError(
                 "W4 FlowMesh coordinator requires runtime credential "
-                "environment variables: " + ", ".join(sorted(missing))
+                "environment variables: "
+                + ", ".join(missing)
             )
         private_hosts = tuple(
             value.strip()

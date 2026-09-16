@@ -15,8 +15,12 @@ from pathfinder.cli import (
     main as cli_main,
 )
 from pathfinder.cli_commands._common import (
-    FULL_FLOW_CREDENTIAL_PRECEDENCE,
-    resolve_full_flow_credentials,
+    DATA_AGENT_CREDENTIALS,
+    INDEX_CREDENTIALS,
+    PERSISTENT_CACHE_CREDENTIALS,
+    resolve_credentials,
+    semantic_route_credential_contract,
+    w4_credential_contract,
 )
 from pathfinder.config import ConfigError
 
@@ -479,140 +483,191 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class FullFlowCredentialPrecedenceTest(unittest.TestCase):
-    """Node-specific credentials must override shared fallbacks.
+class FullFlowCredentialContractTest(unittest.TestCase):
+    """Each service family carries its own credential contract.
 
-    A shared value listed first silently shadows a node's own token. That is
-    how the N4 Data Agent came to be addressed with the N3 token and answered
-    HTTP 401 while N3 kept working by coincidence.
+    One shared precedence table cannot serve them: the Data Agents
+    authenticate per node, while the regular index and cache services
+    authenticate with a single shared credential. Applying the Data Agent rule
+    to the indexes selected a token the local index servers reject with 401.
     """
 
-    def test_node_specific_overrides_shared(self) -> None:
+    def test_data_agent_credentials_are_node_specific_first(self) -> None:
         environment = {
             "PATHFINDER_DATA_AGENT_TOKEN": "shared-token",
             "PATHFINDER_N3_DATA_AGENT_TOKEN": "n3-token",
             "PATHFINDER_N4_DATA_AGENT_TOKEN": "n4-token",
         }
-        resolved, missing = resolve_full_flow_credentials(
+        resolved, missing = resolve_credentials(
             environment,
-            ("N3 Data Agent", "N4 Data Agent"),
+            {
+                "N3 Data Agent": DATA_AGENT_CREDENTIALS["N3"],
+                "N4 Data Agent": DATA_AGENT_CREDENTIALS["N4"],
+            },
         )
         self.assertEqual([], missing)
         self.assertEqual("n3-token", resolved["N3 Data Agent"])
         self.assertEqual("n4-token", resolved["N4 Data Agent"])
-
-    def test_distinct_n3_and_n4_tokens_stay_distinct(self) -> None:
-        # The deployed shape: the shared value happens to equal the N3 token,
-        # so only ordering keeps N4 from being addressed with N3's token.
-        environment = {
-            "PATHFINDER_DATA_AGENT_TOKEN": "n3-token",
-            "PATHFINDER_N3_DATA_AGENT_TOKEN": "n3-token",
-            "PATHFINDER_N4_DATA_AGENT_TOKEN": "n4-token",
-        }
-        resolved, _ = resolve_full_flow_credentials(
-            environment,
-            ("N3 Data Agent", "N4 Data Agent"),
-        )
         self.assertNotEqual(
             resolved["N3 Data Agent"],
             resolved["N4 Data Agent"],
         )
-        self.assertEqual("n4-token", resolved["N4 Data Agent"])
 
-    def test_shared_fallback_when_node_specific_absent(self) -> None:
-        environment = {"PATHFINDER_DATA_AGENT_TOKEN": "shared-token"}
-        resolved, missing = resolve_full_flow_credentials(
-            environment,
-            ("N3 Data Agent", "N4 Data Agent"),
-        )
-        self.assertEqual([], missing)
-        self.assertEqual("shared-token", resolved["N3 Data Agent"])
-        self.assertEqual("shared-token", resolved["N4 Data Agent"])
-
-    def test_index_and_cache_precedence(self) -> None:
+    def test_regular_index_clients_keep_the_n2_token(self) -> None:
+        # The deployed N7/N8 local index servers authenticate with
+        # PATHFINDER_N2_INDEX_TOKEN, so a node-specific variable must not win.
         environment = {
             "PATHFINDER_N2_INDEX_TOKEN": "n2-index",
             "PATHFINDER_N7_INDEX_TOKEN": "n7-index",
             "PATHFINDER_N8_INDEX_TOKEN": "n8-index",
+        }
+        contract = semantic_route_credential_contract()
+        resolved, missing = resolve_credentials(environment, contract)
+        self.assertEqual("n2-index", resolved["N2 index"])
+        self.assertEqual("n2-index", resolved["N7 index"])
+        self.assertEqual("n2-index", resolved["N8 index"])
+        self.assertNotIn("N7 index", missing)
+
+    def test_regular_cache_clients_keep_the_shared_cache_token(self) -> None:
+        environment = {
             "PATHFINDER_FULL_FLOW_CACHE_TOKEN": "shared-cache",
             "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN": "n7-cache",
             "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN": "n8-cache",
         }
-        resolved, missing = resolve_full_flow_credentials(
+        resolved, _ = resolve_credentials(
             environment,
-            ("N2 index", "N7 index", "N8 index", "N7 cache", "N8 cache"),
+            {
+                "N7 cache": PERSISTENT_CACHE_CREDENTIALS["N7"],
+                "N8 cache": PERSISTENT_CACHE_CREDENTIALS["N8"],
+            },
         )
-        self.assertEqual([], missing)
-        self.assertEqual("n2-index", resolved["N2 index"])
-        self.assertEqual("n7-index", resolved["N7 index"])
-        self.assertEqual("n8-index", resolved["N8 index"])
-        self.assertEqual("n7-cache", resolved["N7 cache"])
-        self.assertEqual("n8-cache", resolved["N8 cache"])
-        # N2 keeps its own credential and never falls back to a node token.
-        self.assertEqual(
-            ("PATHFINDER_N2_INDEX_TOKEN",),
-            FULL_FLOW_CREDENTIAL_PRECEDENCE["N2 index"],
-        )
+        self.assertEqual("shared-cache", resolved["N7 cache"])
+        self.assertEqual("shared-cache", resolved["N8 cache"])
 
-    def test_index_falls_back_to_n2_when_node_specific_absent(self) -> None:
-        resolved, missing = resolve_full_flow_credentials(
-            {"PATHFINDER_N2_INDEX_TOKEN": "n2-index"},
-            ("N7 index", "N8 index"),
+    def test_node_specific_values_still_serve_as_a_fallback(self) -> None:
+        resolved, missing = resolve_credentials(
+            {
+                "PATHFINDER_N7_INDEX_TOKEN": "n7-index",
+                "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN": "n7-cache",
+            },
+            {
+                "N7 index": INDEX_CREDENTIALS["N7"],
+                "N7 cache": PERSISTENT_CACHE_CREDENTIALS["N7"],
+            },
         )
         self.assertEqual([], missing)
-        self.assertEqual("n2-index", resolved["N7 index"])
-        self.assertEqual("n2-index", resolved["N8 index"])
+        self.assertEqual("n7-index", resolved["N7 index"])
+        self.assertEqual("n7-cache", resolved["N7 cache"])
+
+    def test_shared_only_deployment_still_resolves(self) -> None:
+        environment = {
+            "PATHFINDER_N2_INDEX_TOKEN": "n2-index",
+            "PATHFINDER_DATA_AGENT_TOKEN": "shared-data",
+            "PATHFINDER_FULL_FLOW_CACHE_TOKEN": "shared-cache",
+            "PATHFINDER_CONTAINER_NODE_TOKEN": "node",
+            "PATHFINDER_N1_ORACLE_TOKEN": "oracle",
+            "PATHFINDER_N1_VERIFICATION_TOKEN": "verify",
+            "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET": "ingress",
+        }
+        resolved, missing = resolve_credentials(
+            environment,
+            semantic_route_credential_contract(),
+        )
+        self.assertEqual([], missing)
+        self.assertEqual("shared-data", resolved["N3 Data Agent"])
+        self.assertEqual("shared-data", resolved["N4 Data Agent"])
+        self.assertEqual("shared-cache", resolved["N7 cache"])
+
+    def test_w4_dedicated_cache_contract_is_unchanged(self) -> None:
+        environment = {
+            "PATHFINDER_N7_W4_CACHE_TOKEN": "n7-w4-cache",
+            "PATHFINDER_N8_W4_CACHE_TOKEN": "n8-w4-cache",
+            "PATHFINDER_FULL_FLOW_CACHE_TOKEN": "shared-cache",
+        }
+        dedicated = w4_credential_contract(dedicated_cache=True)
+        resolved, _ = resolve_credentials(environment, dedicated)
+        self.assertEqual("n7-w4-cache", resolved["N7 cache"])
+        self.assertEqual("n8-w4-cache", resolved["N8 cache"])
+        self.assertEqual(
+            "PATHFINDER_N7_W4_CACHE_TOKEN",
+            dedicated["N7 cache"][0],
+        )
+        # the regular W4 path must not pick up the dedicated token
+        regular = w4_credential_contract(dedicated_cache=False)
+        self.assertEqual(
+            PERSISTENT_CACHE_CREDENTIALS["N7"],
+            regular["N7 cache"],
+        )
+        resolved, _ = resolve_credentials(environment, regular)
+        self.assertEqual("shared-cache", resolved["N7 cache"])
+
+    def test_contracts_agree_with_the_frozen_service_bootstrap(self) -> None:
+        """Each client selects what the frozen service contract declares."""
+
+        declared = {
+            "N2 index": "PATHFINDER_N2_INDEX_TOKEN",
+            "N7 index": "PATHFINDER_N2_INDEX_TOKEN",
+            "N8 index": "PATHFINDER_N2_INDEX_TOKEN",
+            "N7 cache": "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+            "N8 cache": "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+            "N6 semantic": "PATHFINDER_CONTAINER_NODE_TOKEN",
+            "N1 score": "PATHFINDER_N1_ORACLE_TOKEN",
+            "N1 verifier": "PATHFINDER_N1_VERIFICATION_TOKEN",
+            "route ingress": "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET",
+        }
+        contract = semantic_route_credential_contract()
+        for service, variable in declared.items():
+            with self.subTest(service=service):
+                self.assertEqual(variable, contract[service][0])
+        # the Data Agents are the one family that resolves per node first
+        self.assertEqual(
+            "PATHFINDER_N3_DATA_AGENT_TOKEN",
+            contract["N3 Data Agent"][0],
+        )
+        self.assertEqual(
+            "PATHFINDER_N4_DATA_AGENT_TOKEN",
+            contract["N4 Data Agent"][0],
+        )
+        for service, candidates in contract.items():
+            with self.subTest(service=service):
+                self.assertTrue(candidates)
+                self.assertTrue(all(
+                    isinstance(name, str)
+                    and name.startswith("PATHFINDER_")
+                    for name in candidates
+                ))
 
     def test_missing_credentials_fail_closed(self) -> None:
-        resolved, missing = resolve_full_flow_credentials(
+        resolved, missing = resolve_credentials(
             {},
-            ("N3 Data Agent", "N4 Data Agent"),
+            semantic_route_credential_contract(),
         )
-        self.assertIsNone(resolved["N3 Data Agent"])
-        self.assertIsNone(resolved["N4 Data Agent"])
-        self.assertEqual(
-            [
-                "PATHFINDER_N3_DATA_AGENT_TOKEN or "
-                "PATHFINDER_DATA_AGENT_TOKEN",
-                "PATHFINDER_N4_DATA_AGENT_TOKEN or "
-                "PATHFINDER_DATA_AGENT_TOKEN",
-            ],
-            missing,
+        self.assertTrue(all(value is None for value in resolved.values()))
+        self.assertTrue(missing)
+        self.assertIn(
+            "PATHFINDER_N2_INDEX_TOKEN",
+            " ".join(missing),
         )
-
-    def test_empty_value_is_not_selected(self) -> None:
-        resolved, missing = resolve_full_flow_credentials(
-            {
-                "PATHFINDER_N4_DATA_AGENT_TOKEN": "",
-                "PATHFINDER_DATA_AGENT_TOKEN": "shared-token",
-            },
-            ("N4 Data Agent",),
-        )
-        self.assertEqual("shared-token", resolved["N4 Data Agent"])
-        self.assertEqual([], missing)
 
     def test_missing_report_names_variables_never_values(self) -> None:
-        _, missing = resolve_full_flow_credentials(
+        _, missing = resolve_credentials(
             {"PATHFINDER_N3_DATA_AGENT_TOKEN": "n3-secret-value"},
-            ("N3 Data Agent", "N4 Data Agent"),
+            {
+                "N3 Data Agent": DATA_AGENT_CREDENTIALS["N3"],
+                "N4 Data Agent": DATA_AGENT_CREDENTIALS["N4"],
+            },
         )
         rendered = " ".join(missing)
         self.assertNotIn("n3-secret-value", rendered)
         self.assertIn("PATHFINDER_N4_DATA_AGENT_TOKEN", rendered)
 
-    def test_every_multi_candidate_entry_is_node_specific_first(self) -> None:
-        shared = {
-            "PATHFINDER_DATA_AGENT_TOKEN",
-            "PATHFINDER_N2_INDEX_TOKEN",
-            "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
-        }
-        for name, candidates in FULL_FLOW_CREDENTIAL_PRECEDENCE.items():
-            if len(candidates) < 2:
-                continue
-            with self.subTest(credential=name):
-                self.assertNotIn(
-                    candidates[0],
-                    shared,
-                    f"{name} resolves a shared credential before its own",
-                )
-                self.assertIn(candidates[-1], shared)
+    def test_empty_value_is_not_selected(self) -> None:
+        resolved, missing = resolve_credentials(
+            {
+                "PATHFINDER_N4_DATA_AGENT_TOKEN": "",
+                "PATHFINDER_DATA_AGENT_TOKEN": "shared-token",
+            },
+            {"N4 Data Agent": DATA_AGENT_CREDENTIALS["N4"]},
+        )
+        self.assertEqual("shared-token", resolved["N4 Data Agent"])
+        self.assertEqual([], missing)

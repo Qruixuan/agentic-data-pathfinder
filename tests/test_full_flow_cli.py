@@ -1356,9 +1356,10 @@ class FullFlowCliTest(unittest.TestCase):
         self.assertEqual("N8", runtime["logical_node_id"])
         self.assertEqual(
             {
+                # every regular index authenticates with the N2 token
                 "N2": environment["PATHFINDER_N2_INDEX_TOKEN"],
-                "N7": environment["PATHFINDER_N7_INDEX_TOKEN"],
-                "N8": environment["PATHFINDER_N8_INDEX_TOKEN"],
+                "N7": environment["PATHFINDER_N2_INDEX_TOKEN"],
+                "N8": environment["PATHFINDER_N2_INDEX_TOKEN"],
             },
             runtime["index_bearer_tokens"],
         )
@@ -1376,8 +1377,8 @@ class FullFlowCliTest(unittest.TestCase):
         )
         self.assertEqual(
             {
-                "N7": environment["PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN"],
-                "N8": environment["PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN"],
+                "N7": environment["PATHFINDER_FULL_FLOW_CACHE_TOKEN"],
+                "N8": environment["PATHFINDER_FULL_FLOW_CACHE_TOKEN"],
             },
             runtime["cache_bearer_tokens"],
         )
