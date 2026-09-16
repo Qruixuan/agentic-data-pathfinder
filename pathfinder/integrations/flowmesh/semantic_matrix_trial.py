@@ -485,6 +485,164 @@ class GenericSemanticRouteRequestHandler:
         )
 
 
+def _identity_core(
+    object_id: Any,
+    representation_id: Any,
+    binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the canonical identity core shared by trials and stages."""
+
+    return {
+        "object_id": object_id,
+        "representation_id": representation_id,
+        "artifact_sha256": binding.get("artifact_sha256"),
+        "artifact_size_bytes": binding.get("artifact_size_bytes"),
+        "object_catalog_version": binding.get("object_catalog_version"),
+    }
+
+
+def _bound_stage_identity(stage: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return a stage's fully bound artifact identity, or None.
+
+    A stage that carries no identity, or carries the unbound placeholder the
+    frozen DAG uses for control stages, returns None so the caller keeps
+    walking. A partially bound identity is never treated as absent: it raises,
+    because silently walking past it would widen the derived frontier.
+    """
+
+    identity = stage.get("object_representation_identity")
+    if identity is None:
+        return None
+    _require(
+        isinstance(identity, Mapping),
+        "frozen stage artifact identity is malformed",
+    )
+    representation_id = identity.get("representation_id")
+    binding = identity.get("representation_binding")
+    if representation_id is None and not binding:
+        return None
+    _require(
+        isinstance(representation_id, str)
+        and bool(representation_id)
+        and isinstance(binding, Mapping),
+        "frozen stage artifact identity is not fully bound",
+    )
+    core = _identity_core(
+        identity.get("artifact_object_id"),
+        representation_id,
+        binding,
+    )
+    _digest(core["artifact_sha256"], "frozen stage artifact SHA-256")
+    _number(core["artifact_size_bytes"], "frozen stage artifact size")
+    _require(
+        core["object_id"] is not None
+        and core["object_catalog_version"] is not None,
+        "frozen stage artifact identity is not fully bound",
+    )
+    return core
+
+
+def _model_input_frontier(
+    *,
+    bound_stages: Sequence[Mapping[str, Any]],
+    frozen_identity_digests: Mapping[str, dict[str, Any]],
+) -> set[str]:
+    """Derive the N6 model-input identities from the frozen stage DAG.
+
+    The model input is the frontier reached by walking back from the single
+    infer stage and stopping at the first fully bound artifact identity on each
+    branch. An artifact accessed further upstream -- a retrieval intermediate
+    such as the candidate digest -- is deliberately not on that frontier: it is
+    routed and must appear in the route's artifact identities, but it is never
+    sent to N6. Requiring the model input to name every routed artifact would
+    contradict the frozen workload.
+
+    Only checksum-bound stage metadata is consulted, never runtime evidence.
+    """
+
+    by_key: dict[str, Mapping[str, Any]] = {}
+    for stage in bound_stages:
+        _require(isinstance(stage, Mapping), "frozen stage is malformed")
+        key = stage.get("stage_key")
+        _require(
+            isinstance(key, str) and bool(key),
+            "frozen stage is missing its stage key",
+        )
+        previous = by_key.get(key)
+        _require(
+            previous is None or previous == stage,
+            "frozen stages bind the same stage key twice",
+        )
+        by_key[key] = stage
+
+    infer_stages = [
+        stage for stage in by_key.values() if stage.get("action") == "infer"
+    ]
+    _require(
+        len(infer_stages) == 1,
+        "frozen stages must contain exactly one infer stage",
+    )
+
+    frontier: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+
+    def walk(stage_key: Any, path: tuple[str, ...]) -> None:
+        _require(
+            isinstance(stage_key, str) and bool(stage_key),
+            "frozen stage dependency key is malformed",
+        )
+        _require(
+            stage_key not in path,
+            "frozen stage dependencies contain a cycle",
+        )
+        stage = by_key.get(stage_key)
+        _require(
+            stage is not None,
+            "frozen stage dependency is missing from the bound stages",
+        )
+        core = _bound_stage_identity(stage)
+        if core is not None:
+            digest = _sha256(_canonical(core))
+            _require(
+                digest in frozen_identity_digests,
+                "model input identity is absent from the frozen trial",
+            )
+            existing = frontier.get(core["representation_id"])
+            _require(
+                existing is None or existing == core,
+                "frozen stages bind one representation two different ways",
+            )
+            frontier[core["representation_id"]] = core
+            return
+        if stage_key in seen:
+            return
+        seen.add(stage_key)
+        dependencies = stage.get("dependency_stage_keys")
+        _require(
+            isinstance(dependencies, Sequence)
+            and not isinstance(dependencies, (str, bytes)),
+            "frozen stage dependencies are malformed",
+        )
+        for dependency in dependencies:
+            walk(dependency, (*path, stage_key))
+
+    infer_dependencies = infer_stages[0].get("dependency_stage_keys")
+    _require(
+        isinstance(infer_dependencies, Sequence)
+        and not isinstance(infer_dependencies, (str, bytes))
+        and len(infer_dependencies) > 0,
+        "the frozen infer stage declares no dependencies",
+    )
+    for dependency in infer_dependencies:
+        walk(dependency, (infer_stages[0]["stage_key"],))
+
+    _require(
+        len(frontier) > 0,
+        "no model input identity is reachable from the infer stage",
+    )
+    return {_sha256(_canonical(core)) for core in frontier.values()}
+
+
 def _verify_route_evidence(
     value: Mapping[str, Any],
     *,
@@ -565,22 +723,18 @@ def _verify_route_evidence(
                 "inactive route stage evidence is not neutral",
             )
     expected_artifacts: list[dict[str, Any]] = []
-    expected_identity_digests: list[str] = []
     for raw in bound_trial.get("representation_identities", []):
         _require(isinstance(raw, dict), "bound artifact identity is invalid")
         binding = raw.get("representation_binding")
         _require(isinstance(binding, dict), "representation binding is missing")
-        core = {
-            "object_id": raw.get("artifact_object_id"),
-            "representation_id": raw.get("representation_id"),
-            "artifact_sha256": binding.get("artifact_sha256"),
-            "artifact_size_bytes": binding.get("artifact_size_bytes"),
-            "object_catalog_version": binding.get("object_catalog_version"),
-        }
+        core = _identity_core(
+            raw.get("artifact_object_id"),
+            raw.get("representation_id"),
+            binding,
+        )
         _digest(core["artifact_sha256"], "artifact SHA-256")
         _number(core["artifact_size_bytes"], "artifact size")
         identity_digest = _sha256(_canonical(core))
-        expected_identity_digests.append(identity_digest)
         expected_artifacts.append({
             "logical_object_id": raw.get("logical_object_id"),
             **core,
@@ -624,12 +778,27 @@ def _verify_route_evidence(
     )
     _digest(scoring.get("result_content_sha256"), "N1 result content digest")
     _digest(scoring.get("score_evidence_hmac_sha256"), "N1 score HMAC digest")
+    # The model input binds the frozen N6 input frontier, not every artifact
+    # the route touched: a retrieval intermediate is routed but never sent to
+    # N6. The frontier is derived from the checksum-bound stage DAG alone.
+    expected_model_input = _model_input_frontier(
+        bound_stages=bound_stages,
+        frozen_identity_digests={
+            row["identity_sha256"]: row for row in expected_artifacts
+        },
+    )
     model_input = evidence.get("model_input")
+    _require(isinstance(model_input, dict), "N6 model input evidence is missing")
+    components = model_input.get("component_identity_sha256")
     _require(
-        isinstance(model_input, dict)
-        and sorted(model_input.get("component_identity_sha256", []))
-        == sorted(expected_identity_digests),
-        "N6 model input does not bind the routed artifacts",
+        isinstance(components, list)
+        and all(_SHA256.fullmatch(str(row)) for row in components)
+        and len(components) == len(set(components)),
+        "N6 model input component identities are malformed",
+    )
+    _require(
+        set(components) == expected_model_input,
+        "N6 model input does not bind the frozen model-input frontier",
     )
     observation = evidence.get("neutral_observation_candidate")
     _require(

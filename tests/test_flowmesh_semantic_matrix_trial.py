@@ -13,7 +13,10 @@ from pathfinder.integrations.flowmesh.contracts import (
     WorkflowValidation,
 )
 from pathfinder.integrations.flowmesh.semantic_matrix_trial import (
+    FlowMeshSemanticTrialError,
     FlowMeshSemanticTrialExecutor,
+    _model_input_frontier,
+    _verify_route_evidence,
     GenericSemanticRouteRequestHandler,
     SEMANTIC_ROUTE_ENDPOINT_PATH,
     build_semantic_route_request,
@@ -599,3 +602,405 @@ class FlowMeshSemanticTrialTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _identity(representation_id: str, size: int) -> dict:
+    return {
+        "logical_object_id": "logical-video",
+        "artifact_object_id": "real-video",
+        "representation_id": representation_id,
+        "representation_binding": {
+            "representation_id": representation_id,
+            "artifact_sha256": _sha(representation_id.encode()),
+            "artifact_size_bytes": size,
+            "object_catalog_version": "catalog-v1",
+        },
+    }
+
+
+def _core(identity: Mapping[str, Any]) -> dict:
+    binding = identity["representation_binding"]
+    return {
+        "object_id": identity["artifact_object_id"],
+        "representation_id": identity["representation_id"],
+        "artifact_sha256": binding["artifact_sha256"],
+        "artifact_size_bytes": binding["artifact_size_bytes"],
+        "object_catalog_version": binding["object_catalog_version"],
+    }
+
+
+def _identity_digest(identity: Mapping[str, Any]) -> str:
+    return _sha(_canonical(_core(identity)))
+
+
+#: Frozen DAG shapes as (suffix, action, dependency suffixes, representation).
+#: ``None`` marks a control stage carrying the unbound identity placeholder.
+_ROUTE_SHAPES: dict[str, tuple[tuple[str, str, tuple[str, ...], str | None], ...]] = {
+    # raw: the raw video itself is the N6 input
+    "raw": (
+        ("admit", "admit-trial", (), None),
+        ("scan-raw", "access-raw-artifact", ("admit",), "raw_video"),
+        ("send-model-input", "transfer-bytes", ("scan-raw",), "raw_video"),
+        ("infer", "infer", ("send-model-input",), None),
+    ),
+    # indexed raw: the selected exact range carries the raw source identity
+    "indexed-raw": (
+        ("admit", "admit-trial", (), None),
+        ("query-index", "query-index", ("admit",), None),
+        ("read-range", "access-raw-artifact", ("query-index",), "raw_video"),
+        ("send-model-input", "transfer-bytes", ("read-range",), "raw_video"),
+        ("infer", "infer", ("send-model-input",), None),
+    ),
+    # remote digest: the digest is the N6 input
+    "remote-digest": (
+        ("admit", "admit-trial", (), None),
+        ("read-digest", "access-derived-artifact", ("admit",), "multimodal_digest"),
+        ("send-model-input", "transfer-bytes", ("read-digest",), "multimodal_digest"),
+        ("infer", "infer", ("send-model-input",), None),
+    ),
+    # remote frames: the frame bundle is the N6 input
+    "remote-frames": (
+        ("admit", "admit-trial", (), None),
+        ("read-frames", "access-derived-artifact", ("admit",), "sampled_frame_bundle"),
+        ("send-model-input", "transfer-bytes", ("read-frames",), "sampled_frame_bundle"),
+        ("infer", "infer", ("send-model-input",), None),
+    ),
+    # remote combined: both representations are sent to N6 through a join
+    "remote-combined": (
+        ("admit", "admit-trial", (), None),
+        ("read-digest", "access-derived-artifact", ("admit",), "multimodal_digest"),
+        ("read-frames", "access-derived-artifact", ("admit",), "sampled_frame_bundle"),
+        ("join", "branch-join", ("read-digest", "read-frames"), None),
+        ("send-model-input", "transfer-bytes", ("join",), None),
+        ("infer", "infer", ("send-model-input",), None),
+    ),
+    # remote retrieval (the deployed D2): the digest selects candidates
+    # upstream, and only the frame bundle reaches N6.
+    "remote-retrieval": (
+        ("admit", "admit-trial", (), None),
+        ("query-index", "query-index", ("admit",), None),
+        ("read-digests", "access-derived-artifact", ("query-index",), "multimodal_digest"),
+        ("transfer-digests", "transfer-bytes", ("read-digests",), "multimodal_digest"),
+        ("read-frames", "access-derived-artifact", ("transfer-digests",), "sampled_frame_bundle"),
+        ("send-model-input", "transfer-bytes", ("read-frames",), "sampled_frame_bundle"),
+        ("infer", "infer", ("send-model-input",), None),
+    ),
+    # local cache: hit and miss branches join, and both reach the same
+    # artifact, so the frontier must not count it twice.
+    "local-cache": (
+        ("admit", "admit-trial", (), None),
+        ("cache-hit", "cache-lookup", ("admit",), "sampled_frame_bundle"),
+        ("cache-miss", "access-derived-artifact", ("admit",), "sampled_frame_bundle"),
+        ("join", "branch-join", ("cache-hit", "cache-miss"), None),
+        ("send-model-input", "transfer-bytes", ("join",), None),
+        ("infer", "infer", ("send-model-input",), None),
+    ),
+}
+
+_REPRESENTATION_SIZES = {
+    "raw_video": 481280,
+    "sampled_frame_bundle": 481280,
+    "multimodal_digest": 827,
+}
+
+
+class ModelInputFrontierTest(unittest.TestCase):
+    """The N6 model input binds the frozen input frontier, not every artifact.
+
+    A retrieval intermediate is routed and must appear in the route's artifact
+    identities, but it is never sent to N6. Requiring the model input to name
+    every routed artifact rejected the frozen remote-retrieval workload.
+    """
+
+    def _build(
+        self,
+        shape: str,
+        executor_node_id: str = "N8",
+    ) -> tuple[dict, list[dict], dict]:
+        _source, trial, base_stages = _fixtures(executor_node_id)
+        template = base_stages[0]
+        trial_key = trial["trial_key"]
+        rows = _ROUTE_SHAPES[shape]
+        used: dict[str, dict] = {}
+        stages: list[dict] = []
+        for index, (suffix, action, deps, representation) in enumerate(rows):
+            if representation is None:
+                identity = {
+                    "logical_object_id": "logical-video",
+                    "artifact_object_id": "real-video",
+                    "representation_id": None,
+                    "representation_binding": {},
+                }
+            else:
+                identity = _identity(
+                    representation,
+                    _REPRESENTATION_SIZES[representation],
+                )
+                used[representation] = identity
+            stage = dict(template)
+            stage.update({
+                "stage_key": f"{trial_key}|{suffix}",
+                "stage_index": index,
+                "action": action,
+                "condition": None,
+                "dependency_stage_keys": [
+                    f"{trial_key}|{name}" for name in deps
+                ],
+                "object_representation_identity": identity,
+                "source_semantic_stage_sha256": _sha(f"src-{index}".encode()),
+            })
+            stages.append(stage)
+        identities = [used[name] for name in sorted(used)]
+        trial = dict(trial)
+        trial["representation_identities"] = identities
+        trial["semantic_stage_keys"] = [row["stage_key"] for row in stages]
+        trial["bound_stage_sha256"] = [_sha(_canonical(row)) for row in stages]
+        evidence = _route_evidence("run-frontier", trial, stages)
+        evidence["artifact_identities"] = [
+            {
+                "logical_object_id": identity["logical_object_id"],
+                **_core(identity),
+                "identity_sha256": _identity_digest(identity),
+            }
+            for identity in identities
+        ]
+        evidence["trial_sha256"] = _sha(_canonical(trial))
+        evidence["stage_dag_sha256"] = _sha(_canonical(stages))
+        return trial, stages, evidence
+
+    def _seal(self, evidence: dict) -> dict:
+        """Recompute the evidence self-digest after a fixture mutation."""
+
+        core = dict(evidence)
+        core.pop("evidence_sha256", None)
+        evidence["evidence_sha256"] = _sha(_canonical(core))
+        return evidence
+
+    def _verify(self, trial: dict, stages: list[dict], evidence: dict) -> dict:
+        return _verify_route_evidence(
+            self._seal(evidence),
+            run_id="run-frontier",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+
+    def _set_model_input(self, evidence: dict, names: list[str]) -> None:
+        evidence["model_input"] = dict(evidence["model_input"])
+        evidence["model_input"]["component_identity_sha256"] = [
+            _identity_digest(_identity(name, _REPRESENTATION_SIZES[name]))
+            for name in names
+        ]
+
+    def test_remote_retrieval_binds_only_the_frame_bundle(self) -> None:
+        trial, stages, evidence = self._build("remote-retrieval")
+        self._set_model_input(evidence, ["sampled_frame_bundle"])
+        verified = self._verify(trial, stages, evidence)
+        self.assertEqual(trial["trial_key"], verified["trial_key"])
+        # the retrieval intermediate stays in the full route artifact set
+        self.assertEqual(
+            ["multimodal_digest", "sampled_frame_bundle"],
+            sorted(
+                row["representation_id"]
+                for row in evidence["artifact_identities"]
+            ),
+        )
+
+    def test_remote_retrieval_rejects_missing_frame_bundle(self) -> None:
+        trial, stages, evidence = self._build("remote-retrieval")
+        self._set_model_input(evidence, [])
+        with self.assertRaises(FlowMeshSemanticTrialError) as caught:
+            self._verify(trial, stages, evidence)
+        self.assertIn("model input", str(caught.exception).lower())
+
+    def test_remote_retrieval_rejects_added_retrieval_digest(self) -> None:
+        trial, stages, evidence = self._build("remote-retrieval")
+        self._set_model_input(
+            evidence,
+            ["multimodal_digest", "sampled_frame_bundle"],
+        )
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            self._verify(trial, stages, evidence)
+
+    def test_remote_combined_requires_both_identities(self) -> None:
+        trial, stages, evidence = self._build("remote-combined")
+        self._set_model_input(
+            evidence,
+            ["multimodal_digest", "sampled_frame_bundle"],
+        )
+        self._verify(trial, stages, evidence)
+        for partial in (["multimodal_digest"], ["sampled_frame_bundle"]):
+            with self.subTest(model_input=partial):
+                trial, stages, evidence = self._build("remote-combined")
+                self._set_model_input(evidence, partial)
+                with self.assertRaises(FlowMeshSemanticTrialError):
+                    self._verify(trial, stages, evidence)
+
+    def test_remote_digest_and_frames_shapes(self) -> None:
+        for shape, expected in (
+            ("remote-digest", "multimodal_digest"),
+            ("remote-frames", "sampled_frame_bundle"),
+        ):
+            with self.subTest(shape=shape):
+                trial, stages, evidence = self._build(shape)
+                self._set_model_input(evidence, [expected])
+                self._verify(trial, stages, evidence)
+
+    def test_raw_and_indexed_raw_require_the_raw_identity(self) -> None:
+        for shape in ("raw", "indexed-raw"):
+            with self.subTest(shape=shape):
+                trial, stages, evidence = self._build(shape)
+                self._set_model_input(evidence, ["raw_video"])
+                self._verify(trial, stages, evidence)
+                trial, stages, evidence = self._build(shape)
+                self._set_model_input(evidence, [])
+                with self.assertRaises(FlowMeshSemanticTrialError):
+                    self._verify(trial, stages, evidence)
+
+    def test_local_cache_join_counts_the_artifact_once(self) -> None:
+        trial, stages, evidence = self._build("local-cache")
+        self._set_model_input(evidence, ["sampled_frame_bundle"])
+        self._verify(trial, stages, evidence)
+        frontier = _model_input_frontier(
+            bound_stages=stages,
+            frozen_identity_digests={
+                _identity_digest(identity): _core(identity)
+                for identity in trial["representation_identities"]
+            },
+        )
+        self.assertEqual(1, len(frontier))
+
+    def test_identity_absent_from_the_frozen_trial_is_rejected(self) -> None:
+        trial, stages, evidence = self._build("remote-retrieval")
+        trial = dict(trial)
+        trial["representation_identities"] = [
+            identity
+            for identity in trial["representation_identities"]
+            if identity["representation_id"] != "sampled_frame_bundle"
+        ]
+        evidence["trial_sha256"] = _sha(_canonical(trial))
+        self._set_model_input(evidence, ["sampled_frame_bundle"])
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            self._verify(trial, stages, evidence)
+
+    def test_artifact_identities_must_list_every_frozen_artifact(self) -> None:
+        trial, stages, evidence = self._build("remote-retrieval")
+        self._set_model_input(evidence, ["sampled_frame_bundle"])
+        evidence["artifact_identities"] = [
+            row
+            for row in evidence["artifact_identities"]
+            if row["representation_id"] != "multimodal_digest"
+        ]
+        with self.assertRaises(FlowMeshSemanticTrialError) as caught:
+            self._verify(trial, stages, evidence)
+        self.assertIn("artifact identities", str(caught.exception))
+
+    def test_component_order_does_not_change_the_comparison(self) -> None:
+        trial, stages, evidence = self._build("remote-combined")
+        self._set_model_input(
+            evidence,
+            ["multimodal_digest", "sampled_frame_bundle"],
+        )
+        forward = list(evidence["model_input"]["component_identity_sha256"])
+        self._verify(trial, stages, evidence)
+        evidence["model_input"]["component_identity_sha256"] = forward[::-1]
+        self._verify(trial, stages, evidence)
+
+    def test_duplicate_component_identities_are_rejected(self) -> None:
+        trial, stages, evidence = self._build("remote-frames")
+        self._set_model_input(evidence, ["sampled_frame_bundle"])
+        components = evidence["model_input"]["component_identity_sha256"]
+        evidence["model_input"]["component_identity_sha256"] = components * 2
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            self._verify(trial, stages, evidence)
+
+    def test_missing_dependency_stage_fails_closed(self) -> None:
+        # remote-combined walks through the join, so a pruned branch stage is
+        # genuinely unreachable rather than simply never visited.
+        trial, stages, evidence = self._build("remote-combined")
+        pruned = [
+            stage
+            for stage in stages
+            if not stage["stage_key"].endswith("|read-frames")
+        ]
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            _model_input_frontier(
+                bound_stages=pruned,
+                frozen_identity_digests={
+                    _identity_digest(identity): _core(identity)
+                    for identity in trial["representation_identities"]
+                },
+            )
+
+    def test_dependency_cycle_fails_closed(self) -> None:
+        trial, stages, evidence = self._build("remote-combined")
+        trial_key = trial["trial_key"]
+        for stage in stages:
+            if stage["stage_key"].endswith("|join"):
+                stage["dependency_stage_keys"] = [f"{trial_key}|send-model-input"]
+        with self.assertRaises(FlowMeshSemanticTrialError) as caught:
+            _model_input_frontier(
+                bound_stages=stages,
+                frozen_identity_digests={
+                    _identity_digest(identity): _core(identity)
+                    for identity in trial["representation_identities"]
+                },
+            )
+        self.assertIn("cycle", str(caught.exception))
+
+    def test_empty_frontier_fails_closed(self) -> None:
+        trial, stages, evidence = self._build("remote-frames")
+        for stage in stages:
+            if stage["action"] != "infer":
+                stage["object_representation_identity"] = {
+                    "logical_object_id": "logical-video",
+                    "artifact_object_id": "real-video",
+                    "representation_id": None,
+                    "representation_binding": {},
+                }
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            _model_input_frontier(
+                bound_stages=stages,
+                frozen_identity_digests={
+                    _identity_digest(identity): _core(identity)
+                    for identity in trial["representation_identities"]
+                },
+            )
+
+    def test_malformed_identity_binding_fails_closed(self) -> None:
+        trial, stages, evidence = self._build("remote-frames")
+        for stage in stages:
+            if stage["stage_key"].endswith("|send-model-input"):
+                stage["object_representation_identity"] = {
+                    "logical_object_id": "logical-video",
+                    "artifact_object_id": "real-video",
+                    "representation_id": "sampled_frame_bundle",
+                    "representation_binding": {"artifact_sha256": "not-a-digest"},
+                }
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            _model_input_frontier(
+                bound_stages=stages,
+                frozen_identity_digests={
+                    _identity_digest(identity): _core(identity)
+                    for identity in trial["representation_identities"]
+                },
+            )
+
+    def test_exactly_one_infer_stage_is_required(self) -> None:
+        trial, stages, evidence = self._build("remote-frames")
+        frozen = {
+            _identity_digest(identity): _core(identity)
+            for identity in trial["representation_identities"]
+        }
+        without_infer = [row for row in stages if row["action"] != "infer"]
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            _model_input_frontier(
+                bound_stages=without_infer,
+                frozen_identity_digests=frozen,
+            )
+        extra = dict(stages[-1])
+        extra["stage_key"] = stages[-1]["stage_key"] + "-second"
+        with self.assertRaises(FlowMeshSemanticTrialError):
+            _model_input_frontier(
+                bound_stages=[*stages, extra],
+                frozen_identity_digests=frozen,
+            )
