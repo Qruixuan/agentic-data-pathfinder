@@ -689,28 +689,28 @@ def dispatch_full_flow_w4_command(
         credential_environment = {
             "N2 index": ("PATHFINDER_N2_INDEX_TOKEN",),
             "N7 index": (
-                "PATHFINDER_N2_INDEX_TOKEN",
                 "PATHFINDER_N7_INDEX_TOKEN",
+                "PATHFINDER_N2_INDEX_TOKEN",
             ),
             "N8 index": (
-                "PATHFINDER_N2_INDEX_TOKEN",
                 "PATHFINDER_N8_INDEX_TOKEN",
+                "PATHFINDER_N2_INDEX_TOKEN",
             ),
             "N3 Data Agent": (
-                "PATHFINDER_DATA_AGENT_TOKEN",
                 "PATHFINDER_N3_DATA_AGENT_TOKEN",
+                "PATHFINDER_DATA_AGENT_TOKEN",
             ),
             "N4 Data Agent": (
-                "PATHFINDER_DATA_AGENT_TOKEN",
                 "PATHFINDER_N4_DATA_AGENT_TOKEN",
+                "PATHFINDER_DATA_AGENT_TOKEN",
             ),
             "N7 cache": (
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
                 "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN",
+                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
             ),
             "N8 cache": (
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
                 "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN",
+                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
             ),
             "N6 semantic": ("PATHFINDER_CONTAINER_NODE_TOKEN",),
         }
@@ -841,30 +841,30 @@ def dispatch_full_flow_w4_command(
         credential_environment = {
             "N2 index": ("PATHFINDER_N2_INDEX_TOKEN",),
             "N7 index": (
-                "PATHFINDER_N2_INDEX_TOKEN",
                 "PATHFINDER_N7_INDEX_TOKEN",
+                "PATHFINDER_N2_INDEX_TOKEN",
             ),
             "N8 index": (
-                "PATHFINDER_N2_INDEX_TOKEN",
                 "PATHFINDER_N8_INDEX_TOKEN",
+                "PATHFINDER_N2_INDEX_TOKEN",
             ),
             "N3 Data Agent": (
-                "PATHFINDER_DATA_AGENT_TOKEN",
                 "PATHFINDER_N3_DATA_AGENT_TOKEN",
+                "PATHFINDER_DATA_AGENT_TOKEN",
             ),
             "N4 Data Agent": (
-                "PATHFINDER_DATA_AGENT_TOKEN",
                 "PATHFINDER_N4_DATA_AGENT_TOKEN",
+                "PATHFINDER_DATA_AGENT_TOKEN",
             ),
             "N7 cache": (
                 "PATHFINDER_N7_W4_CACHE_TOKEN",
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
                 "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN",
+                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
             ),
             "N8 cache": (
                 "PATHFINDER_N8_W4_CACHE_TOKEN",
-                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
                 "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN",
+                "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
             ),
             "N6 semantic": ("PATHFINDER_CONTAINER_NODE_TOKEN",),
             "W4 ingress": (

@@ -14,6 +14,10 @@ from pathfinder.cli import (
     _parser,
     main as cli_main,
 )
+from pathfinder.cli_commands._common import (
+    FULL_FLOW_CREDENTIAL_PRECEDENCE,
+    resolve_full_flow_credentials,
+)
 from pathfinder.config import ConfigError
 
 
@@ -473,3 +477,142 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FullFlowCredentialPrecedenceTest(unittest.TestCase):
+    """Node-specific credentials must override shared fallbacks.
+
+    A shared value listed first silently shadows a node's own token. That is
+    how the N4 Data Agent came to be addressed with the N3 token and answered
+    HTTP 401 while N3 kept working by coincidence.
+    """
+
+    def test_node_specific_overrides_shared(self) -> None:
+        environment = {
+            "PATHFINDER_DATA_AGENT_TOKEN": "shared-token",
+            "PATHFINDER_N3_DATA_AGENT_TOKEN": "n3-token",
+            "PATHFINDER_N4_DATA_AGENT_TOKEN": "n4-token",
+        }
+        resolved, missing = resolve_full_flow_credentials(
+            environment,
+            ("N3 Data Agent", "N4 Data Agent"),
+        )
+        self.assertEqual([], missing)
+        self.assertEqual("n3-token", resolved["N3 Data Agent"])
+        self.assertEqual("n4-token", resolved["N4 Data Agent"])
+
+    def test_distinct_n3_and_n4_tokens_stay_distinct(self) -> None:
+        # The deployed shape: the shared value happens to equal the N3 token,
+        # so only ordering keeps N4 from being addressed with N3's token.
+        environment = {
+            "PATHFINDER_DATA_AGENT_TOKEN": "n3-token",
+            "PATHFINDER_N3_DATA_AGENT_TOKEN": "n3-token",
+            "PATHFINDER_N4_DATA_AGENT_TOKEN": "n4-token",
+        }
+        resolved, _ = resolve_full_flow_credentials(
+            environment,
+            ("N3 Data Agent", "N4 Data Agent"),
+        )
+        self.assertNotEqual(
+            resolved["N3 Data Agent"],
+            resolved["N4 Data Agent"],
+        )
+        self.assertEqual("n4-token", resolved["N4 Data Agent"])
+
+    def test_shared_fallback_when_node_specific_absent(self) -> None:
+        environment = {"PATHFINDER_DATA_AGENT_TOKEN": "shared-token"}
+        resolved, missing = resolve_full_flow_credentials(
+            environment,
+            ("N3 Data Agent", "N4 Data Agent"),
+        )
+        self.assertEqual([], missing)
+        self.assertEqual("shared-token", resolved["N3 Data Agent"])
+        self.assertEqual("shared-token", resolved["N4 Data Agent"])
+
+    def test_index_and_cache_precedence(self) -> None:
+        environment = {
+            "PATHFINDER_N2_INDEX_TOKEN": "n2-index",
+            "PATHFINDER_N7_INDEX_TOKEN": "n7-index",
+            "PATHFINDER_N8_INDEX_TOKEN": "n8-index",
+            "PATHFINDER_FULL_FLOW_CACHE_TOKEN": "shared-cache",
+            "PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN": "n7-cache",
+            "PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN": "n8-cache",
+        }
+        resolved, missing = resolve_full_flow_credentials(
+            environment,
+            ("N2 index", "N7 index", "N8 index", "N7 cache", "N8 cache"),
+        )
+        self.assertEqual([], missing)
+        self.assertEqual("n2-index", resolved["N2 index"])
+        self.assertEqual("n7-index", resolved["N7 index"])
+        self.assertEqual("n8-index", resolved["N8 index"])
+        self.assertEqual("n7-cache", resolved["N7 cache"])
+        self.assertEqual("n8-cache", resolved["N8 cache"])
+        # N2 keeps its own credential and never falls back to a node token.
+        self.assertEqual(
+            ("PATHFINDER_N2_INDEX_TOKEN",),
+            FULL_FLOW_CREDENTIAL_PRECEDENCE["N2 index"],
+        )
+
+    def test_index_falls_back_to_n2_when_node_specific_absent(self) -> None:
+        resolved, missing = resolve_full_flow_credentials(
+            {"PATHFINDER_N2_INDEX_TOKEN": "n2-index"},
+            ("N7 index", "N8 index"),
+        )
+        self.assertEqual([], missing)
+        self.assertEqual("n2-index", resolved["N7 index"])
+        self.assertEqual("n2-index", resolved["N8 index"])
+
+    def test_missing_credentials_fail_closed(self) -> None:
+        resolved, missing = resolve_full_flow_credentials(
+            {},
+            ("N3 Data Agent", "N4 Data Agent"),
+        )
+        self.assertIsNone(resolved["N3 Data Agent"])
+        self.assertIsNone(resolved["N4 Data Agent"])
+        self.assertEqual(
+            [
+                "PATHFINDER_N3_DATA_AGENT_TOKEN or "
+                "PATHFINDER_DATA_AGENT_TOKEN",
+                "PATHFINDER_N4_DATA_AGENT_TOKEN or "
+                "PATHFINDER_DATA_AGENT_TOKEN",
+            ],
+            missing,
+        )
+
+    def test_empty_value_is_not_selected(self) -> None:
+        resolved, missing = resolve_full_flow_credentials(
+            {
+                "PATHFINDER_N4_DATA_AGENT_TOKEN": "",
+                "PATHFINDER_DATA_AGENT_TOKEN": "shared-token",
+            },
+            ("N4 Data Agent",),
+        )
+        self.assertEqual("shared-token", resolved["N4 Data Agent"])
+        self.assertEqual([], missing)
+
+    def test_missing_report_names_variables_never_values(self) -> None:
+        _, missing = resolve_full_flow_credentials(
+            {"PATHFINDER_N3_DATA_AGENT_TOKEN": "n3-secret-value"},
+            ("N3 Data Agent", "N4 Data Agent"),
+        )
+        rendered = " ".join(missing)
+        self.assertNotIn("n3-secret-value", rendered)
+        self.assertIn("PATHFINDER_N4_DATA_AGENT_TOKEN", rendered)
+
+    def test_every_multi_candidate_entry_is_node_specific_first(self) -> None:
+        shared = {
+            "PATHFINDER_DATA_AGENT_TOKEN",
+            "PATHFINDER_N2_INDEX_TOKEN",
+            "PATHFINDER_FULL_FLOW_CACHE_TOKEN",
+        }
+        for name, candidates in FULL_FLOW_CREDENTIAL_PRECEDENCE.items():
+            if len(candidates) < 2:
+                continue
+            with self.subTest(credential=name):
+                self.assertNotIn(
+                    candidates[0],
+                    shared,
+                    f"{name} resolves a shared credential before its own",
+                )
+                self.assertIn(candidates[-1], shared)

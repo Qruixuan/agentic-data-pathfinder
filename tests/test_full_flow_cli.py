@@ -1357,22 +1357,27 @@ class FullFlowCliTest(unittest.TestCase):
         self.assertEqual(
             {
                 "N2": environment["PATHFINDER_N2_INDEX_TOKEN"],
-                "N7": environment["PATHFINDER_N2_INDEX_TOKEN"],
-                "N8": environment["PATHFINDER_N2_INDEX_TOKEN"],
+                "N7": environment["PATHFINDER_N7_INDEX_TOKEN"],
+                "N8": environment["PATHFINDER_N8_INDEX_TOKEN"],
             },
             runtime["index_bearer_tokens"],
         )
         self.assertEqual(
             {
-                "N3": environment["PATHFINDER_DATA_AGENT_TOKEN"],
-                "N4": environment["PATHFINDER_DATA_AGENT_TOKEN"],
+                "N3": environment["PATHFINDER_N3_DATA_AGENT_TOKEN"],
+                "N4": environment["PATHFINDER_N4_DATA_AGENT_TOKEN"],
             },
             runtime["data_agent_bearer_tokens"],
         )
+        # A node-specific token must never be shadowed by the shared one.
+        self.assertNotEqual(
+            runtime["data_agent_bearer_tokens"]["N3"],
+            runtime["data_agent_bearer_tokens"]["N4"],
+        )
         self.assertEqual(
             {
-                "N7": environment["PATHFINDER_FULL_FLOW_CACHE_TOKEN"],
-                "N8": environment["PATHFINDER_FULL_FLOW_CACHE_TOKEN"],
+                "N7": environment["PATHFINDER_N7_FULL_FLOW_CACHE_TOKEN"],
+                "N8": environment["PATHFINDER_N8_FULL_FLOW_CACHE_TOKEN"],
             },
             runtime["cache_bearer_tokens"],
         )
