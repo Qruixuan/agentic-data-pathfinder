@@ -35,6 +35,7 @@ from pathfinder.integrations.flowmesh.adapter import (
     extract_agent_answer,
 )
 from pathfinder.integrations.flowmesh.client import (
+    FlowMeshDependencyError,
     SdkFlowMeshClient,
     TaskDetailUnavailableError,
     WorkerResolutionError,
@@ -75,7 +76,7 @@ from pathfinder.integrations.flowmesh.workflow import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "configs" / "minimal_system.json"
-DEFAULT_FLOWMESH_SOURCE = "/tmp/fm-v018rc1"
+DEFAULT_FLOWMESH_SOURCE = "/tmp/fm-v019"
 
 
 def agent_spec_of(workflow: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -368,6 +369,55 @@ class StubSdk:
         self.workers = RecordingWorkersApi(workers)
 
 
+class StubTypedResult:
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self.payload = payload
+        self.calls: list[dict[str, Any]] = []
+
+    def model_dump(self, **kwargs: Any) -> Mapping[str, Any]:
+        self.calls.append(dict(kwargs))
+        return self.payload
+
+
+class SdkResultNormalizationTest(unittest.TestCase):
+    def build(self, result: Any) -> SdkFlowMeshClient:
+        client = SdkFlowMeshClient.__new__(SdkFlowMeshClient)
+        client._client = types.SimpleNamespace(
+            results=types.SimpleNamespace(retrieve=lambda _task_id: result)
+        )
+        return client
+
+    def test_legacy_mapping_result_remains_supported(self) -> None:
+        original = {"executor": "api", "ok": True}
+        payload = self.build(original).retrieve_result("tsk-legacy")
+        self.assertEqual(original, payload)
+        self.assertIsNot(original, payload)
+
+    def test_typed_sdk_result_uses_json_mode_and_aliases(self) -> None:
+        typed = StubTypedResult(
+            {
+                "task_type": "api",
+                "executor": "api",
+                "ok": True,
+                "json": {"status": "ok"},
+            }
+        )
+        payload = self.build(typed).retrieve_result("tsk-typed")
+        self.assertEqual("api", payload["task_type"])
+        self.assertEqual({"status": "ok"}, payload["json"])
+        self.assertEqual(
+            [{"mode": "json", "by_alias": True}],
+            typed.calls,
+        )
+
+    def test_unknown_result_object_fails_explicitly(self) -> None:
+        with self.assertRaisesRegex(
+            FlowMeshDependencyError,
+            "unsupported result object",
+        ):
+            self.build(object()).retrieve_result("tsk-invalid")
+
+
 class SdkWorkerResolutionTest(unittest.TestCase):
     """Alias resolution must consider only workers FlowMesh calls current."""
 
@@ -513,7 +563,7 @@ class SdkWorkflowDispatchEvidenceTest(unittest.TestCase):
 
 
 class DeployedSdkCompatibilityTest(unittest.TestCase):
-    """Pin what this integration assumes about flowmesh-sdk 0.1.8rc1.
+    """Pin what this integration assumes about flowmesh-sdk 0.1.9.
 
     Skipped when the SDK is absent so the suite stays runnable without it.
     """
@@ -530,9 +580,31 @@ class DeployedSdkCompatibilityTest(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(
-            "0.1.8rc1",
+            "0.1.9",
             getattr(type(self).flowmesh, "__version__", None),
         )
+
+    def test_typed_api_result_normalizes_to_the_legacy_mapping(self) -> None:
+        from flowmesh.models.result import APIResult
+
+        result = APIResult(
+            executor="api",
+            method="GET",
+            url="https://example.invalid/healthz",
+            status_code=200,
+            text='{"status":"ok"}',
+        )
+        client = SdkFlowMeshClient.__new__(SdkFlowMeshClient)
+        client._client = types.SimpleNamespace(
+            results=types.SimpleNamespace(
+                retrieve=lambda _task_id: result
+            )
+        )
+        payload = client.retrieve_result("tsk-v019")
+        self.assertEqual("api", payload["task_type"])
+        self.assertEqual("api", payload["executor"])
+        self.assertEqual(200, payload["status_code"])
+        self.assertEqual('{"status":"ok"}', payload["text"])
 
     def test_workers_list_accepts_the_filters_this_client_sends(self) -> None:
         from flowmesh.resources.workers import Workers
@@ -1561,7 +1633,7 @@ class FlowMeshIntegrationTest(unittest.TestCase):
         self.assertEqual(1, len(nodes))
         self.assertEqual(PATHFINDER_GRAPH_NODE_NAME, nodes[0]["name"])
         # The bare single-task form is what silently drops schedule_hint on
-        # FlowMesh v0.1.8-rc.1, so it must not reappear at the top level.
+        # FlowMesh v0.1.9, so it must not reappear at the top level.
         self.assertNotIn("taskType", workflow["spec"])
 
     def test_workflow_nests_provenance_under_annotations_custom(self) -> None:
@@ -2211,7 +2283,7 @@ class DeployedParserCompatibilityTest(unittest.TestCase):
         src_root = Path(source) / "src"
         if not (src_root / "server" / "task" / "parser.py").exists():
             raise unittest.SkipTest(
-                f"FlowMesh v0.1.8-rc.1 source not found at {src_root}; set "
+                f"FlowMesh v0.1.9 source not found at {src_root}; set "
                 "PATHFINDER_FLOWMESH_SOURCE to enable deployed-parser checks"
             )
         sys.path.insert(0, str(src_root))
@@ -2266,7 +2338,7 @@ class DeployedParserCompatibilityTest(unittest.TestCase):
     def test_deployed_parser_reads_an_http_result_destination(self) -> None:
         """The deployed parser must accept http delivery with no url.
 
-        On v0.1.8-rc.1 the worker resolves an http destination whose url is
+        On v0.1.9 the worker resolves an http destination whose url is
         absent to FLOWMESH_BASE_URL + /api/v1/results and attaches its own
         auth headers, which is why Pathfinder omits both. A local destination
         instead keeps results.json on the worker, and results.retrieve()

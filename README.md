@@ -349,7 +349,7 @@ The coupling layer includes:
   plus compatibility tests run against a real FlowMesh source tree when one is
   available.
 
-The integration targets FlowMesh **v0.1.8-rc.1**. Two constraints of that
+The integration targets FlowMesh **v0.1.9**. Two constraints of that
 version shape the generated workflow: Pathfinder provenance must be nested
 under `metadata.annotations.custom`, and the Agent task must be wrapped in a
 one-node `spec.graph` for worker pinning to take effect at all.

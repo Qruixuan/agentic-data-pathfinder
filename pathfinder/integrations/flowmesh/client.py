@@ -16,6 +16,10 @@ from .task_recovery_evidence import (
 )
 
 
+class FlowMeshDependencyError(RuntimeError):
+    """Raised when the optional FlowMesh SDK is unavailable or incompatible."""
+
+
 def _optional_text(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
@@ -28,6 +32,24 @@ def _required_text(value: Any, name: str) -> str:
     if text is None:
         raise ValueError(f"FlowMesh {name} cannot be empty")
     return text
+
+
+def _normalize_result_payload(value: Any) -> dict[str, Any]:
+    """Normalize SDK result models while retaining legacy mapping support."""
+
+    if isinstance(value, Mapping):
+        return dict(value)
+    model_dump = getattr(value, "model_dump", None)
+    if not callable(model_dump):
+        raise FlowMeshDependencyError(
+            "FlowMesh SDK returned an unsupported result object"
+        )
+    payload = model_dump(mode="json", by_alias=True)
+    if not isinstance(payload, Mapping):
+        raise FlowMeshDependencyError(
+            "FlowMesh SDK result model did not serialize to an object"
+        )
+    return dict(payload)
 
 
 def _worker_identity(worker: Any) -> "FlowMeshWorkerIdentity | None":
@@ -43,10 +65,6 @@ def _worker_identity(worker: Any) -> "FlowMeshWorkerIdentity | None":
         cluster=_optional_text(getattr(worker, "cluster", None)),
         node_alias=_optional_text(getattr(worker, "node_alias", None)),
     )
-
-
-class FlowMeshDependencyError(RuntimeError):
-    """Raised when the optional FlowMesh SDK is unavailable."""
 
 
 class WorkerResolutionError(RuntimeError):
@@ -144,7 +162,9 @@ class SdkFlowMeshClient:
         )
 
     def retrieve_result(self, task_id: str) -> dict[str, Any]:
-        return self._client.results.retrieve(task_id)
+        return _normalize_result_payload(
+            self._client.results.retrieve(task_id)
+        )
 
     def _read_task_detail(
         self,
@@ -190,7 +210,7 @@ class SdkFlowMeshClient:
         """Return read-only terminal task metadata and redacted detail.
 
         Uses the public ``tasks.retrieve`` resource, which on flowmesh-sdk
-        0.1.8rc1 is a plain ``GET /tasks/{id}``: it never stops, retries, or
+        0.1.9 is a plain ``GET /tasks/{id}``: it never stops, retries, or
         otherwise mutates the task. If an SDK does not expose that public
         method this raises rather than reaching for a private path; the caller
         turns that into "no additional detail available". Everything echoed
@@ -263,7 +283,7 @@ class SdkFlowMeshClient:
     ) -> list[Any]:
         """List current workers, narrowing server side when the SDK allows.
 
-        ``workers.list`` on the pinned flowmesh-sdk 0.1.8rc1 accepts both
+        ``workers.list`` on the pinned flowmesh-sdk 0.1.9 accepts both
         ``worker_id`` and ``alias`` (they become the ``id`` and ``alias``
         query parameters). An SDK that does not is not a reason to fail: fall
         back to the unnarrowed current-worker list, since the caller filters

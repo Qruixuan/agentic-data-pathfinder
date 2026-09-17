@@ -1,7 +1,7 @@
 ARG FLOWMESH_WORKER_IMAGE
 FROM ${FLOWMESH_WORKER_IMAGE}
 
-# FlowMesh v0.1.8-rc.1 builds worker container environments from a fixed,
+# FlowMesh v0.1.9 builds worker container environments from a fixed,
 # closed set of DockerWorkerConfig fields (see
 # src/server/supervisor/adapters/base.py::_base_environment). There is no
 # arbitrary-environment passthrough, so PATHFINDER_MCP_URL cannot be injected

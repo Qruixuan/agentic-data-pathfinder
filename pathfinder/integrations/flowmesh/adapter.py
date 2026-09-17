@@ -391,12 +391,11 @@ def extract_agent_answer(payload: dict[str, Any]) -> str:
 def extract_api_executor_result(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Return a successful FlowMesh API-executor response.
 
-    FlowMesh's result endpoint returns the Agent executor under a ``result``
-    envelope, but v0.1.8-rc.1 returns an API-executor response directly.  The
-    latter is still a complete task result; assuming the Agent envelope turns
-    a completed API operation into a local ``KeyError``.  Accept both shapes
-    deliberately, then validate the API-specific success contract before a
-    caller acts on its response body.
+    FlowMesh 0.1.9 validates results as task-specific SDK models, which the
+    client adapter serializes to a direct mapping.  Older recorded responses
+    may still carry a ``result`` envelope.  Accept both shapes deliberately,
+    then validate the API-specific success contract before a caller acts on
+    its response body.
     """
     result = payload.get("result", payload)
     if not isinstance(result, Mapping):

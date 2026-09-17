@@ -10,7 +10,7 @@ from .contracts import (
 PATHFINDER_GRAPH_NODE_NAME = "pathfinder-agent"
 """Name of the single graph node carrying the Pathfinder Agent task.
 
-FlowMesh v0.1.8-rc.1 only reads ``metadata.annotations.schedule_hint`` while
+FlowMesh v0.1.9 only reads ``metadata.annotations.schedule_hint`` while
 expanding ``spec.graph`` or ``spec.stages``. A bare single-task spec parses
 successfully but silently discards the hint, so every Pathfinder workflow is
 emitted as a one-node graph whether or not it is pinned. Keeping one shape for
@@ -57,7 +57,7 @@ def build_agent_workflow(
     if selected_worker_id is not None and not selected_worker_id.strip():
         raise ValueError("selected_worker_id cannot be blank")
 
-    # FlowMesh v0.1.8-rc.1 validates metadata.annotations with extra="forbid"
+    # FlowMesh v0.1.9 validates metadata.annotations with extra="forbid"
     # and permits only schedule_hint, description, and custom. Pathfinder
     # provenance therefore lives under custom; anything else is rejected at
     # submission with extra_forbidden errors.
@@ -80,7 +80,7 @@ def build_agent_workflow(
         "taskType": "agent",
         "configName": settings.agent_config_name,
         "task": build_agent_task_prompt(session_id, request),
-        # On FlowMesh v0.1.8-rc.1 these are scheduling requests used for
+        # On FlowMesh v0.1.9 these are scheduling requests used for
         # placement, not Docker worker-container limits: the supervisor does
         # not turn them into --cpus/--memory or cgroup constraints. They do
         # not confine the worker to one core or 2 GiB.
@@ -98,7 +98,7 @@ def build_agent_workflow(
         # POST the result to the server Pathfinder then reads it from.
         #
         # url, method, and headers are deliberately omitted. On FlowMesh
-        # v0.1.8-rc.1 an http destination with no url resolves to
+        # v0.1.9 an http destination with no url resolves to
         # FLOWMESH_BASE_URL + /api/v1/results inside the worker, and the
         # worker attaches its own bearer token because that URL matches its
         # configured FlowMesh origin. Setting url here would hard-code a

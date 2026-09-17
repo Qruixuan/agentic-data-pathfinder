@@ -125,7 +125,7 @@ docker build `
 
 ### `PATHFINDER_MCP_URL` cannot be passed through the worker config
 
-On FlowMesh v0.1.8-rc.1 the supervisor builds each worker container's
+On FlowMesh v0.1.9 the supervisor builds each worker container's
 environment from a fixed, closed dictionary of `DockerWorkerConfig` fields
 (`src/server/supervisor/adapters/base.py::_base_environment`). There is no
 arbitrary-environment or passthrough field, so **`PATHFINDER_MCP_URL` cannot be
@@ -244,7 +244,7 @@ Data Agent failure.
 
 ### Why every workflow is a one-node graph
 
-FlowMesh v0.1.8-rc.1 only reads `metadata.annotations.schedule_hint` while
+FlowMesh v0.1.9 only reads `metadata.annotations.schedule_hint` while
 expanding `spec.graph` or `spec.stages`
 (`src/server/task/parser.py::_parse_schedule_hint`). A bare single-task spec
 **parses successfully but silently discards the hint**, producing
@@ -277,13 +277,13 @@ and scheduling path.
 The generated Agent task declares `cpu: 1` and `memory: 2Gi` under
 `spec.resources.hardware`
 ([`workflow.py`](../../pathfinder/integrations/flowmesh/workflow.py)). On
-FlowMesh v0.1.8-rc.1 these are **task scheduling requests used for placement**.
+FlowMesh v0.1.9 these are **task scheduling requests used for placement**.
 They are not translated into Docker worker-container limits: the supervisor
 does not set `--cpus`, `--memory`, or equivalent cgroup constraints from them.
 
 Do not read them as a guarantee that the worker is confined to one core or
 2 GiB. Nothing stops the task from using more, and nothing stops a co-scheduled
-task from consuming the same worker's resources — v0.1.8-rc.1 has no
+task from consuming the same worker's resources — v0.1.9 has no
 worker-tenant isolation.
 
 Expected usage is nonetheless low, because model inference happens in an
@@ -426,11 +426,11 @@ Rotate through the secret manager, not by editing files in this repository.
 - `fetch_artifact` intentionally returns only bounded JSON or UTF-8 text.
   Video, image, and other binary media require a future representation-aware
   consumer rather than embedding binary bytes in an MCP tool response.
-- The integration is pinned to FlowMesh `v0.1.8-rc.1` (`flowmesh-sdk==0.1.8rc1`).
+- The integration is pinned to FlowMesh `v0.1.9` (`flowmesh-sdk==0.1.9`).
   The `annotations.custom` nesting, the one-node graph requirement, and the
   absence of worker-environment passthrough were all verified against that
   exact revision and may change in later versions.
-- Worker pinning constrains scheduling only. FlowMesh v0.1.8-rc.1 has no
+- Worker pinning constrains scheduling only. FlowMesh v0.1.9 has no
   worker-tenant isolation, so pinning a Pathfinder task to a worker does not
   stop unrelated tasks being dispatched to that same worker. Monitor the
   worker during a run rather than assuming exclusivity.
@@ -440,7 +440,7 @@ Rotate through the secret manager, not by editing files in this repository.
   passing preflight is a necessary, not sufficient, condition for a healthy
   run. See [Preflight the control plane before a run](#preflight-the-control-plane-before-a-run).
 - The task's declared `cpu` and `memory` are scheduling requests, not enforced
-  container limits on v0.1.8-rc.1. See
+  container limits on v0.1.9. See
   [Declared resources are scheduling requests, not enforced limits](#declared-resources-are-scheduling-requests-not-enforced-limits).
 - SQLite is appropriate for the single-machine MVP. A multi-worker experiment
   should move session state and atomic budget accounting to a service such as

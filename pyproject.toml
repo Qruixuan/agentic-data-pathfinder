@@ -20,8 +20,8 @@ semantic-runtime = [
     "Pillow==12.3.0",
 ]
 flowmesh = [
-    # Must match the deployed FlowMesh control plane (v0.1.8-rc.1).
-    "flowmesh-sdk==0.1.8rc1",
+    # Must match the deployed FlowMesh control plane (v0.1.9).
+    "flowmesh-sdk==0.1.9",
     # Match the package baked into the deployed FlowMesh worker overlay.
     "mcp==1.28.1",
 ]

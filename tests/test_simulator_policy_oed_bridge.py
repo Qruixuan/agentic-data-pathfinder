@@ -153,6 +153,7 @@ def _generic_runtime_inputs(
         for index, stage_key in enumerate(stage_keys):
             condition = None
             action = f"stage-{index:02d}"
+            stage_suffix = stage_key.rsplit("|", 1)[-1]
             if route["route_family"] == "local-cache-derived":
                 if index == 0:
                     action = "lookup"
@@ -162,11 +163,45 @@ def _generic_runtime_inputs(
                         "cache_operation_key": stage_keys[0],
                         "equals": "miss" if route["repetition"] == 0 else "hit",
                     }
+            if stage_suffix == "infer":
+                action = "infer"
+            representation_identity = None
+            representation_id = None
+            if stage_suffix == "send-model-input":
+                representation_id = route["representation_ids"][-1]
+            elif stage_suffix == "send-digest":
+                representation_id = "multimodal_digest"
+            elif stage_suffix == "send-frames":
+                representation_id = "sampled_frame_bundle"
+            if representation_id is not None:
+                representation_index = route["representation_ids"].index(
+                    representation_id
+                )
+                representation_identity = {
+                    "logical_object_id": route["object_id"],
+                    "artifact_object_id": f"artifact-{route['object_id']}",
+                    "representation_id": representation_id,
+                    "representation_binding": {
+                        "artifact_sha256": f"{representation_index + 1:064x}",
+                        "artifact_size_bytes": 100 + representation_index,
+                        "object_catalog_version": "test-catalog-v1",
+                    },
+                }
+            dependencies = [] if index == 0 else [stage_keys[index - 1]]
+            if stage_suffix == "infer":
+                dependencies = [
+                    key
+                    for key in stage_keys[:index]
+                    if key.rsplit("|", 1)[-1]
+                    in {"send-model-input", "send-digest", "send-frames"}
+                ]
             stage = {
                 "stage_key": stage_key,
                 "stage_index": index,
                 "action": action,
                 "condition": condition,
+                "dependency_stage_keys": dependencies,
+                "object_representation_identity": representation_identity,
             }
             stages.append(stage)
             all_stages.append(stage)
@@ -285,7 +320,6 @@ def _generic_route_evidence(
         bytes_read += read
         bytes_sent += sent
     artifacts = []
-    identity_digests = []
     for item in bound["representation_identities"]:
         binding = item["representation_binding"]
         core = {
@@ -296,12 +330,24 @@ def _generic_route_evidence(
             "object_catalog_version": binding["object_catalog_version"],
         }
         identity = _sha256(_canonical(core))
-        identity_digests.append(identity)
         artifacts.append({
             "logical_object_id": item["logical_object_id"],
             **core,
             "identity_sha256": identity,
         })
+    infer_stage = next(stage for stage in stages if stage["action"] == "infer")
+    stages_by_key = {stage["stage_key"]: stage for stage in stages}
+    input_representation_ids = {
+        stages_by_key[key]["object_representation_identity"][
+            "representation_id"
+        ]
+        for key in infer_stage["dependency_stage_keys"]
+    }
+    model_input_identity_digests = [
+        artifact["identity_sha256"]
+        for artifact in artifacts
+        if artifact["representation_id"] in input_representation_ids
+    ]
     model_input_bytes = 321
     score = 1.0
     predicted_answer = "A"
@@ -434,7 +480,7 @@ def _generic_route_evidence(
             "mode": "digest",
             "payload_sha256": _sha256(b"model-input"),
             "payload_size_bytes": model_input_bytes,
-            "component_identity_sha256": identity_digests,
+            "component_identity_sha256": model_input_identity_digests,
             "preparation_sha256": _sha256(b"preparation"),
         },
         "semantic": {
