@@ -78,6 +78,27 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
         ]
 
     @staticmethod
+    def _multi_host_smoke_sources(live_sources: Path) -> list[str]:
+        return [
+            "--local-semantic-admission-dir",
+            "local-admission",
+            "--n4-serve-gate-dir",
+            "n4-live-gate",
+            "--deployment-binding-dir",
+            "multi-host-deployment",
+            "--logical-plan-dir",
+            "logical-routes",
+            "--scenario",
+            "scenario.json",
+            "--container-plan-dir",
+            "container-plan",
+            "--artifact-binding-dir",
+            "artifact-binding-package",
+            "--n4-live-gate-sources",
+            str(live_sources),
+        ]
+
+    @staticmethod
     def _write_live_gate_sources(root: Path, payload: dict | None = None) -> Path:
         document = payload or {
             "live_receipt_bindings": [{
@@ -103,9 +124,72 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
         self.assertTrue({
             "run-simulator-full-flow-local-semantic-smokes",
             "verify-simulator-full-flow-local-semantic-smokes",
+            "run-simulator-full-flow-semantic-smokes",
+            "verify-simulator-full-flow-semantic-smokes",
             "run-simulator-full-flow-local-semantic-matrix",
             "verify-simulator-full-flow-local-semantic-matrix",
         }.issubset(commands))
+
+    def test_multi_host_smoke_commands_forward_only_runtime_sources(self) -> None:
+        with TemporaryDirectory() as raw:
+            descriptor = self._write_live_gate_sources(Path(raw))
+            sources = self._multi_host_smoke_sources(descriptor)
+            executor = object()
+            context = mock.MagicMock()
+            context.__enter__.return_value = executor
+            context.__exit__.return_value = False
+            with (
+                mock.patch(
+                    "pathfinder.cli._local_semantic_flowmesh_executor",
+                    return_value=context,
+                ) as executor_context,
+                mock.patch(
+                    "pathfinder.simulator.full_flow_local_semantic_smoke."
+                    "run_full_flow_semantic_smokes",
+                    return_value={"status": "VERIFIED"},
+                ) as run,
+            ):
+                status, payload = self._invoke([
+                    "run-simulator-full-flow-semantic-smokes",
+                    *sources,
+                    "--run-id",
+                    "multi-host-smoke-v1",
+                    "--output-dir",
+                    "smokes",
+                    "--flowmesh-base-url",
+                    "https://root.test",
+                ])
+            self.assertEqual(0, status)
+            self.assertEqual("VERIFIED", payload["status"])
+            executor_context.assert_called_once_with(
+                Path("local-admission"),
+                run_id="multi-host-smoke-v1",
+                flowmesh_base_url="https://root.test",
+                task_timeout_seconds=900,
+                poll_interval_seconds=2.0,
+            )
+            self.assertIs(executor, run.call_args.kwargs["executor"])
+            self.assertEqual(
+                Path("multi-host-deployment"), run.call_args.args[2]
+            )
+            self.assertNotIn("compose_overlay_dir", run.call_args.kwargs)
+
+            with mock.patch(
+                "pathfinder.simulator.full_flow_local_semantic_smoke."
+                "verify_full_flow_semantic_smokes",
+                return_value={"status": "VERIFIED"},
+            ) as verify:
+                status, _ = self._invoke([
+                    "verify-simulator-full-flow-semantic-smokes",
+                    "--smoke-dir",
+                    "smokes",
+                    *sources,
+                ])
+            self.assertEqual(0, status)
+            self.assertEqual(
+                Path("multi-host-deployment"),
+                verify.call_args.kwargs["deployment_binding_dir"],
+            )
 
     def test_live_smoke_refuses_a_bare_boolean_instead_of_n4_gate_sources(
         self,

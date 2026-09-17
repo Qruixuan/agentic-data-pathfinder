@@ -21,6 +21,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
+from urllib.parse import urlsplit
 
 from .full_flow_local_semantic_admission import (
     ADMISSION_NAME as SOURCE_ADMISSION_NAME,
@@ -34,6 +35,7 @@ from .full_flow_matrix_runner import (
     SemanticTrialExecutor,
     validate_semantic_trial_result,
 )
+from .full_flow_deployment import verify_full_flow_deployment_binding
 from .full_flow_n4_serve_gate import (
     CHECKSUMS_NAME as N4_GATE_CHECKSUMS_NAME,
     GATE_NAME as N4_GATE_NAME,
@@ -881,6 +883,189 @@ def verify_full_flow_local_semantic_smokes(
     }
 
 
+def _verify_multi_host_smoke_sources(
+    *,
+    local_semantic_admission_dir: str | Path,
+    deployment_binding_dir: str | Path,
+    logical_route_dir: str | Path,
+    scenario_path: str | Path,
+    container_plan_dir: str | Path,
+) -> dict[str, Any]:
+    """Verify that every promoted trial uses its frozen multi-host origin."""
+
+    deployment_root = Path(deployment_binding_dir).resolve()
+    report = verify_full_flow_deployment_binding(
+        deployment_root,
+        logical_plan_dir=logical_route_dir,
+        scenario_path=scenario_path,
+        container_plan_dir=container_plan_dir,
+    )
+    binding = _strict_json(
+        deployment_root / "full-flow-deployment-binding.json",
+        "deployment binding",
+    )
+    _require(
+        report.get("status") == "VERIFIED"
+        and report.get("backend") == "multi-host-private-network"
+        and binding.get("network_binding", {}).get("mode")
+        == "physical-private-network",
+        "semantic smoke requires a verified multi-host private-network binding",
+    )
+    service_origins = {
+        row.get("service_contract_id"): row.get("base_url")
+        for row in binding.get("service_bindings", [])
+        if isinstance(row, Mapping)
+        and row.get("service_contract_id")
+        in {"N7.execution-compute", "N8.execution-compute"}
+    }
+    _require(
+        set(service_origins)
+        == {"N7.execution-compute", "N8.execution-compute"},
+        "multi-host binding omits an execution coordinator",
+    )
+    inputs = load_full_flow_local_semantic_execution_inputs(
+        Path(local_semantic_admission_dir).resolve()
+    )
+    _require(
+        inputs.admission.get("deployment_id")
+        == binding.get("deployment_id"),
+        "semantic admission binds another deployment",
+    )
+    source_commitments = inputs.admission.get("source_commitments")
+    original_bindings = (
+        source_commitments.get("legacy_original_source_bindings")
+        if isinstance(source_commitments, Mapping)
+        else None
+    )
+    _require(
+        isinstance(original_bindings, Mapping)
+        and original_bindings.get("deployment_binding_sha256")
+        == report.get("binding_sha256"),
+        "semantic admission binds another deployment digest",
+    )
+    observed_contracts: set[str] = set()
+    for trial in inputs.bound_trials:
+        coordinator = trial.get("route_coordinator_binding")
+        _require(
+            isinstance(coordinator, Mapping),
+            "semantic trial omits its route coordinator",
+        )
+        contract = coordinator.get("service_contract_id")
+        base_url = coordinator.get("base_url")
+        _require(
+            contract in service_origins
+            and base_url == service_origins[contract],
+            "semantic trial coordinator differs from the deployment binding",
+        )
+        parsed = urlsplit(str(base_url))
+        _require(
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname not in {None, "localhost", "127.0.0.1", "::1"},
+            "multi-host semantic trial uses a loopback coordinator",
+        )
+        observed_contracts.add(str(contract))
+    _require(
+        observed_contracts == set(service_origins),
+        "semantic admission does not cover both multi-host coordinators",
+    )
+    return {
+        "runtime_environment": "multi-host-private-network",
+        "deployment_id": report["deployment_id"],
+        "deployment_binding_sha256": report["binding_sha256"],
+        "coordinator_origins_verified": True,
+    }
+
+
+def run_full_flow_semantic_smokes(
+    local_semantic_admission_dir: str | Path,
+    n4_serve_gate_dir: str | Path,
+    deployment_binding_dir: str | Path,
+    logical_route_dir: str | Path,
+    scenario_path: str | Path,
+    container_plan_dir: str | Path,
+    artifact_binding_dir: str | Path,
+    *,
+    run_id: str,
+    executor: SemanticTrialExecutor,
+    output_dir: str | Path,
+    n4_live_gate_sources: N4LiveServeGateSources,
+) -> dict[str, Any]:
+    """Run the same source-bound ten cases on a multi-host deployment."""
+
+    environment = _verify_multi_host_smoke_sources(
+        local_semantic_admission_dir=local_semantic_admission_dir,
+        deployment_binding_dir=deployment_binding_dir,
+        logical_route_dir=logical_route_dir,
+        scenario_path=scenario_path,
+        container_plan_dir=container_plan_dir,
+    )
+    _require(
+        n4_live_gate_sources is not None,
+        "multi-host semantic smoke requires a live N4 serve gate",
+    )
+    report = run_full_flow_local_semantic_smokes(
+        local_semantic_admission_dir,
+        n4_serve_gate_dir,
+        deployment_binding_dir,
+        deployment_binding_dir,
+        deployment_binding_dir,
+        logical_route_dir,
+        scenario_path,
+        container_plan_dir,
+        artifact_binding_dir,
+        artifact_binding_dir,
+        artifact_binding_dir,
+        run_id=run_id,
+        executor=executor,
+        output_dir=output_dir,
+        n4_live_gate_sources=n4_live_gate_sources,
+    )
+    return report | environment
+
+
+def verify_full_flow_semantic_smokes(
+    smoke_dir: str | Path,
+    *,
+    local_semantic_admission_dir: str | Path,
+    n4_serve_gate_dir: str | Path,
+    deployment_binding_dir: str | Path,
+    logical_route_dir: str | Path,
+    scenario_path: str | Path,
+    container_plan_dir: str | Path,
+    artifact_binding_dir: str | Path,
+    n4_live_gate_sources: N4LiveServeGateSources,
+) -> dict[str, Any]:
+    """Verify a ten-case receipt against its multi-host deployment."""
+
+    environment = _verify_multi_host_smoke_sources(
+        local_semantic_admission_dir=local_semantic_admission_dir,
+        deployment_binding_dir=deployment_binding_dir,
+        logical_route_dir=logical_route_dir,
+        scenario_path=scenario_path,
+        container_plan_dir=container_plan_dir,
+    )
+    _require(
+        n4_live_gate_sources is not None,
+        "multi-host semantic smoke requires a live N4 serve gate",
+    )
+    report = verify_full_flow_local_semantic_smokes(
+        smoke_dir,
+        local_semantic_admission_dir=local_semantic_admission_dir,
+        n4_serve_gate_dir=n4_serve_gate_dir,
+        compose_overlay_dir=deployment_binding_dir,
+        service_bootstrap_dir=deployment_binding_dir,
+        deployment_binding_dir=deployment_binding_dir,
+        logical_route_dir=logical_route_dir,
+        scenario_path=scenario_path,
+        container_plan_dir=container_plan_dir,
+        provisioning_catalog_dir=artifact_binding_dir,
+        artifact_binding_dir=artifact_binding_dir,
+        n4_package_dir=artifact_binding_dir,
+        n4_live_gate_sources=n4_live_gate_sources,
+    )
+    return report | environment
+
+
 __all__ = [
     "CHECKSUMS_NAME",
     "FullFlowLocalSemanticSmokeError",
@@ -891,5 +1076,7 @@ __all__ = [
     "SMOKE_RECEIPT_SCHEMA_VERSION",
     "SMOKE_RESULT_SCHEMA_VERSION",
     "run_full_flow_local_semantic_smokes",
+    "run_full_flow_semantic_smokes",
     "verify_full_flow_local_semantic_smokes",
+    "verify_full_flow_semantic_smokes",
 ]

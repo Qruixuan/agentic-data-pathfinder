@@ -17,7 +17,9 @@ from pathfinder.simulator.full_flow_local_semantic_smoke import (
     RECEIPT_NAME,
     RESULTS_NAME,
     run_full_flow_local_semantic_smokes,
+    run_full_flow_semantic_smokes,
     verify_full_flow_local_semantic_smokes,
+    verify_full_flow_semantic_smokes,
 )
 from pathfinder.simulator.full_flow_n4_serve_gate import (
     CHECKSUMS_NAME as N4_GATE_CHECKSUMS_NAME,
@@ -179,6 +181,16 @@ class LocalSemanticSmokeTest(unittest.TestCase):
             "trial_key": f"trial-{case_id}",
             "order_index": index,
             "executor_node_id": case_id[:2].upper(),
+            "route_coordinator_binding": {
+                "service_contract_id": (
+                    f"{case_id[:2].upper()}.execution-compute"
+                ),
+                "base_url": (
+                    "http://10.70.0.17:8780"
+                    if case_id.startswith("n7-")
+                    else "http://10.70.0.18:8780"
+                ),
+            },
         } for index, case_id in enumerate(CASES))
         smokes = []
         for case_id in CASES:
@@ -203,6 +215,12 @@ class LocalSemanticSmokeTest(unittest.TestCase):
             admission={
                 "promotion_id": "promotion-v1",
                 "admission_sha256": "a" * 64,
+                "deployment_id": "multi-host-v1",
+                "source_commitments": {
+                    "legacy_original_source_bindings": {
+                        "deployment_binding_sha256": "8" * 64,
+                    },
+                },
             },
             bound_trials=trials,
             bound_stages=(),
@@ -351,6 +369,135 @@ class LocalSemanticSmokeTest(unittest.TestCase):
         self.assertEqual(report["receipt_sha256"], verified["receipt_sha256"])
         self.assertGreaterEqual(verifier.call_count, 3)
         self.n4_verifier_mock.assert_not_called()
+
+    def test_multi_host_wrapper_reuses_the_ten_case_runner(self) -> None:
+        deployment = self.root / "multi-host-deployment"
+        deployment.mkdir()
+        (deployment / "full-flow-deployment-binding.json").write_text(
+            json.dumps({
+                "deployment_id": "multi-host-v1",
+                "network_binding": {"mode": "physical-private-network"},
+                "service_bindings": [
+                    {
+                        "service_contract_id": "N7.execution-compute",
+                        "base_url": "http://10.70.0.17:8780",
+                    },
+                    {
+                        "service_contract_id": "N8.execution-compute",
+                        "base_url": "http://10.70.0.18:8780",
+                    },
+                ],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        live_report = {
+            "status": "VERIFIED",
+            "gate_id": "live-n4-gate-v1",
+            "gate_sha256": "7" * 64,
+            "authorized_compose_profile": "serve-frozen",
+            "live_n5_materialization_executed": True,
+            "publication_companion_excluded": True,
+            "n4_data_agent_rebind_inputs_verified": True,
+            "n4_data_agent_runtime_rebind_executed": False,
+            "source_binding_checked": True,
+        }
+        output = self.root / "multi-host-smoke"
+        executor = RecordingExecutor()
+        with (
+            mock.patch(
+                "pathfinder.simulator.full_flow_local_semantic_smoke."
+                "verify_full_flow_deployment_binding",
+                return_value={
+                    "status": "VERIFIED",
+                    "backend": "multi-host-private-network",
+                    "deployment_id": "multi-host-v1",
+                    "binding_sha256": "8" * 64,
+                },
+            ),
+            mock.patch(
+                "pathfinder.simulator.full_flow_local_semantic_smoke."
+                "verify_full_flow_n4_live_serve_gate",
+                return_value=live_report,
+            ),
+        ):
+            report = run_full_flow_semantic_smokes(
+                self.source,
+                self.live_n4_gate,
+                deployment,
+                self.root / "logical",
+                self.root / "scenario.json",
+                self.root / "container-plan",
+                self.root / "artifact-bindings",
+                run_id="multi-host-smoke-v1",
+                executor=executor,
+                output_dir=output,
+                n4_live_gate_sources=self.live_gate_sources,
+            )
+            verified = verify_full_flow_semantic_smokes(
+                output,
+                local_semantic_admission_dir=self.source,
+                n4_serve_gate_dir=self.live_n4_gate,
+                deployment_binding_dir=deployment,
+                logical_route_dir=self.root / "logical",
+                scenario_path=self.root / "scenario.json",
+                container_plan_dir=self.root / "container-plan",
+                artifact_binding_dir=self.root / "artifact-bindings",
+                n4_live_gate_sources=self.live_gate_sources,
+            )
+
+        self.assertEqual(list(CASES), [case for case, _ in executor.calls])
+        self.assertEqual("multi-host-private-network", report[
+            "runtime_environment"
+        ])
+        self.assertTrue(report["coordinator_origins_verified"])
+        self.assertEqual(report["receipt_sha256"], verified["receipt_sha256"])
+
+    def test_multi_host_wrapper_rejects_coordinator_drift(self) -> None:
+        deployment = self.root / "drifted-deployment"
+        deployment.mkdir()
+        (deployment / "full-flow-deployment-binding.json").write_text(
+            json.dumps({
+                "deployment_id": "multi-host-v1",
+                "network_binding": {"mode": "physical-private-network"},
+                "service_bindings": [
+                    {
+                        "service_contract_id": "N7.execution-compute",
+                        "base_url": "http://10.70.0.99:8780",
+                    },
+                    {
+                        "service_contract_id": "N8.execution-compute",
+                        "base_url": "http://10.70.0.18:8780",
+                    },
+                ],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        executor = RecordingExecutor()
+        with mock.patch(
+            "pathfinder.simulator.full_flow_local_semantic_smoke."
+            "verify_full_flow_deployment_binding",
+            return_value={
+                "status": "VERIFIED",
+                "backend": "multi-host-private-network",
+                "deployment_id": "multi-host-v1",
+                "binding_sha256": "8" * 64,
+            },
+        ):
+            with self.assertRaises(FullFlowLocalSemanticSmokeError):
+                run_full_flow_semantic_smokes(
+                    self.source,
+                    self.live_n4_gate,
+                    deployment,
+                    self.root / "logical",
+                    self.root / "scenario.json",
+                    self.root / "container-plan",
+                    self.root / "artifact-bindings",
+                    run_id="drift-must-fail-v1",
+                    executor=executor,
+                    output_dir=self.root / "must-not-exist",
+                    n4_live_gate_sources=self.live_gate_sources,
+                )
+        self.assertEqual([], executor.calls)
 
     def test_live_gate_wrong_mode_claim_fails_before_execution(self) -> None:
         output = self.root / "wrong-live-mode"

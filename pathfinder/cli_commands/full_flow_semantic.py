@@ -38,6 +38,8 @@ COMMAND_NAMES = frozenset({
     "verify-simulator-full-flow-n4-live-serve-gate",
     "run-simulator-full-flow-local-semantic-smokes",
     "verify-simulator-full-flow-local-semantic-smokes",
+    "run-simulator-full-flow-semantic-smokes",
+    "verify-simulator-full-flow-semantic-smokes",
     "run-simulator-full-flow-local-semantic-matrix",
     "verify-simulator-full-flow-local-semantic-matrix",
     "serve-simulator-full-flow-semantic-route",
@@ -349,6 +351,45 @@ def register_full_flow_semantic_commands(
         include_shared_sources=True,
     )
     _add_compact(local_semantic_smoke_verify)
+
+    def add_multi_host_semantic_smoke_sources(
+        command: argparse.ArgumentParser,
+    ) -> None:
+        _add_required_path(command, "--local-semantic-admission-dir")
+        _add_required_path(command, "--n4-serve-gate-dir")
+        _add_required_path(command, "--deployment-binding-dir")
+        _add_required_path(command, "--logical-plan-dir")
+        _add_required_path(command, "--scenario")
+        _add_required_path(command, "--container-plan-dir")
+        _add_required_path(command, "--artifact-binding-dir")
+        _add_required_path(command, "--n4-live-gate-sources")
+
+    semantic_smoke_run = subcommands.add_parser(
+        "run-simulator-full-flow-semantic-smokes",
+        help=(
+            "run the same ten semantic interoperability smokes against a "
+            "verified multi-host private-network deployment"
+        ),
+    )
+    add_multi_host_semantic_smoke_sources(semantic_smoke_run)
+    semantic_smoke_run.add_argument("--run-id", required=True)
+    _add_required_path(semantic_smoke_run, "--output-dir")
+    semantic_smoke_run.add_argument("--flowmesh-base-url")
+    semantic_smoke_run.add_argument("--task-timeout", type=int, default=900)
+    semantic_smoke_run.add_argument(
+        "--poll-interval", type=positive_finite_float, default=2.0
+    )
+    _add_compact(semantic_smoke_run)
+
+    semantic_smoke_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-semantic-smokes",
+        help=(
+            "verify a ten-smoke receipt against its multi-host deployment"
+        ),
+    )
+    _add_required_path(semantic_smoke_verify, "--smoke-dir")
+    add_multi_host_semantic_smoke_sources(semantic_smoke_verify)
+    _add_compact(semantic_smoke_verify)
 
     def add_local_semantic_matrix_gate_sources(
         command: argparse.ArgumentParser,
@@ -806,6 +847,55 @@ def dispatch_full_flow_semantic_command(
             provisioning_catalog_dir=args.provisioning_catalog_dir,
             artifact_binding_dir=args.artifact_binding_dir,
             n4_package_dir=args.n4_package_dir,
+            n4_live_gate_sources=n4_live_gate_sources,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "run-simulator-full-flow-semantic-smokes":
+        from ..simulator.full_flow_local_semantic_smoke import (
+            run_full_flow_semantic_smokes,
+        )
+
+        n4_live_gate_sources = load_n4_live_gate_sources(
+            args.n4_live_gate_sources
+        )
+        with local_semantic_flowmesh_executor(
+            args.local_semantic_admission_dir,
+            run_id=args.run_id,
+            flowmesh_base_url=args.flowmesh_base_url,
+            task_timeout_seconds=args.task_timeout,
+            poll_interval_seconds=args.poll_interval,
+        ) as executor:
+            payload = run_full_flow_semantic_smokes(
+                args.local_semantic_admission_dir,
+                args.n4_serve_gate_dir,
+                args.deployment_binding_dir,
+                args.logical_plan_dir,
+                args.scenario,
+                args.container_plan_dir,
+                args.artifact_binding_dir,
+                run_id=args.run_id,
+                executor=executor,
+                output_dir=args.output_dir,
+                n4_live_gate_sources=n4_live_gate_sources,
+            )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "verify-simulator-full-flow-semantic-smokes":
+        from ..simulator.full_flow_local_semantic_smoke import (
+            verify_full_flow_semantic_smokes,
+        )
+
+        n4_live_gate_sources = load_n4_live_gate_sources(
+            args.n4_live_gate_sources
+        )
+        payload = verify_full_flow_semantic_smokes(
+            args.smoke_dir,
+            local_semantic_admission_dir=args.local_semantic_admission_dir,
+            n4_serve_gate_dir=args.n4_serve_gate_dir,
+            deployment_binding_dir=args.deployment_binding_dir,
+            logical_route_dir=args.logical_plan_dir,
+            scenario_path=args.scenario,
+            container_plan_dir=args.container_plan_dir,
+            artifact_binding_dir=args.artifact_binding_dir,
             n4_live_gate_sources=n4_live_gate_sources,
         )
         return print_payload(payload, compact=args.compact)
