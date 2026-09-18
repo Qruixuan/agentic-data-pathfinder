@@ -1678,7 +1678,12 @@ class ContainerNodeRuntime:
             request.get("representation_id"),
             "representation_id",
         )
-        digest_text = _text(request.get("digest_text"), "digest_text")
+        raw_digest_text = request.get("digest_text")
+        _require(
+            isinstance(raw_digest_text, str) and bool(raw_digest_text),
+            "digest_text must be a non-empty string",
+        )
+        digest_text = raw_digest_text
         digest_bytes = digest_text.encode("utf-8")
         _require(
             len(digest_bytes) <= _MAX_SEMANTIC_DIGEST_BYTES,

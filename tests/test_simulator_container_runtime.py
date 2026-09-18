@@ -1461,7 +1461,7 @@ class LocalSemanticExecutionTest(unittest.TestCase):
             _vision_frame(0, 0.5),
             _vision_frame(1, 1.5),
         ]
-        digest_text = "Two musicians perform while a woman approaches."
+        digest_text = "Two musicians perform while a woman approaches.\n"
         digest_sha256 = sha256(digest_text.encode("utf-8")).hexdigest()
         frame_sha256 = semantic_frame_sequence_sha256(frames)
         question = "Which option is correct? Return exactly one option ID."
