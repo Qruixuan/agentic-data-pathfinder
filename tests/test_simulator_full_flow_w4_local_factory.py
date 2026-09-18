@@ -101,6 +101,8 @@ class FakeSampler:
         source_payload_sha256,
         frame_count,
         jpeg_max_dimension,
+        temporal_start_fraction,
+        temporal_end_fraction,
     ):
         self.calls.append({
             "payload_sha256": _sha(payload),
@@ -108,6 +110,8 @@ class FakeSampler:
             "source_payload_sha256": source_payload_sha256,
             "frame_count": frame_count,
             "jpeg_max_dimension": jpeg_max_dimension,
+            "temporal_start_fraction": temporal_start_fraction,
+            "temporal_end_fraction": temporal_end_fraction,
         })
         return tuple(_frame(index) for index in range(frame_count))
 

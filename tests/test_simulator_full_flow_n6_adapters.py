@@ -37,10 +37,14 @@ from pathfinder.simulator.full_flow_n6_adapters import (
     decode_prepared_semantic_request,
     raw_prepared_representation_sha256,
 )
+from pathfinder.simulator.full_flow_semantic_input_profiles import (
+    build_semantic_input_profile,
+)
 from pathfinder.simulator.full_flow_semantic_route_runtime import (
     ArtifactAccess,
     ArtifactIdentity,
     ExactContentRange,
+    ExactTemporalFrameSelection,
     PreparedSemanticInput,
 )
 from pathfinder.simulator.hidden_oracle import build_n1_public_task_binding
@@ -128,8 +132,25 @@ def _frame(index: int) -> N6SampledFrame:
     )
 
 
-def _bundle_bytes() -> bytes:
-    frames = [_frame(0), _frame(1)]
+def _bundle_bytes(
+    frame_count: int = 2,
+    *,
+    source_payload: bytes | None = None,
+    sampling_method: str = "uniform-midpoint",
+    source_duration_seconds: float | None = None,
+    timestamp_start: float = 0.5,
+) -> bytes:
+    frames = [
+        N6SampledFrame(
+            frame_index=index,
+            timestamp_seconds=timestamp_start + index,
+            width=_frame(index).width,
+            height=_frame(index).height,
+            jpeg_bytes=_frame(index).jpeg_bytes,
+        )
+        for index in range(frame_count)
+    ]
+    source = source_payload if source_payload is not None else b"x" * 100
     rows = [
         {
             "frame_index": frame.frame_index,
@@ -148,12 +169,16 @@ def _bundle_bytes() -> bytes:
         "object_id": OBJECT_ID,
         "source_video_id": "0000000001",
         "source_video_filename": "0000000001.mp4",
-        "source_video_size_bytes": 100,
-        "source_video_sha256": "a" * 64,
-        "source_duration_seconds": 4.0,
+        "source_video_size_bytes": len(source),
+        "source_video_sha256": _sha(source),
+        "source_duration_seconds": (
+            max(4.0, float(frame_count) + 1.0)
+            if source_duration_seconds is None
+            else source_duration_seconds
+        ),
         "sampling": {
-            "method": "uniform-midpoint",
-            "frame_count": 2,
+            "method": sampling_method,
+            "frame_count": frame_count,
             "jpeg_max_dimension": 768,
             "jpeg_quality": 82,
             "jpeg_optimize": True,
@@ -165,7 +190,7 @@ def _bundle_bytes() -> bytes:
         },
         "generation_manifest_sha256": "c" * 64,
         "frames": rows,
-        "frame_count": 2,
+        "frame_count": frame_count,
         "total_jpeg_bytes": sum(len(frame.jpeg_bytes) for frame in frames),
         "software_versions": {"av": "17.0.1", "Pillow": "12.3.0"},
         "historical_visual_bytes_retained": False,
@@ -202,6 +227,8 @@ class RecordingSampler:
         source_payload_sha256: str,
         frame_count: int,
         jpeg_max_dimension: int,
+        temporal_start_fraction: float,
+        temporal_end_fraction: float,
     ) -> Sequence[N6SampledFrame]:
         self.calls.append({
             "payload": payload,
@@ -209,6 +236,8 @@ class RecordingSampler:
             "source_payload_sha256": source_payload_sha256,
             "frame_count": frame_count,
             "jpeg_max_dimension": jpeg_max_dimension,
+            "temporal_start_fraction": temporal_start_fraction,
+            "temporal_end_fraction": temporal_end_fraction,
         })
         return self.frames
 
@@ -236,6 +265,34 @@ class N6PreparationTest(unittest.TestCase):
             run_id="n6-offline-run-v1",
             trial={"trial_key": "scenario|W1|D0|r0000"},
             stage={"stage_key": "scenario|W1|D0|r0000|infer"},
+            public_task=_public_task(),
+            mode=mode,
+            artifacts=artifacts,
+        )
+
+    def _prepare_profiled(
+        self,
+        adapter: N6ModelInputAdapter,
+        *,
+        route_family: str,
+        mode: str,
+        artifacts: Sequence[ArtifactAccess],
+    ) -> PreparedSemanticInput:
+        profile = build_semantic_input_profile(
+            route_family=route_family,
+            model_input_representation_ids=[
+                value.source_identity.representation_id for value in artifacts
+            ],
+        )
+        return adapter.prepare(
+            run_id="n6-profile-run-v1",
+            trial={
+                "trial_key": f"scenario|W1|{route_family}|r0000",
+                "route_family": route_family,
+                "artifact_object_id": OBJECT_ID,
+                "semantic_input_profile": profile,
+            },
+            stage={"stage_key": f"scenario|W1|{route_family}|prepare"},
             public_task=_public_task(),
             mode=mode,
             artifacts=artifacts,
@@ -300,6 +357,71 @@ class N6PreparationTest(unittest.TestCase):
             ),
             request["representation_sha256"],
         )
+
+    def test_frozen_raw_and_indexed_profiles_use_distinct_sampling(self) -> None:
+        payload = b"real-routed-video" * 10_000
+        raw_sampler = RecordingSampler(tuple(_frame(index) for index in range(24)))
+        raw = self._prepare_profiled(
+            self._adapter(raw_sampler),
+            route_family="raw",
+            mode="raw-prepared-frames",
+            artifacts=[_access("raw_video", payload)],
+        )
+        selected = _bundle_bytes(
+            8,
+            source_payload=payload,
+            sampling_method="uniform-midpoint-temporal-window",
+            source_duration_seconds=40.0,
+            timestamp_start=10.0,
+        )
+        segment = ExactTemporalFrameSelection(
+            object_id=OBJECT_ID,
+            representation_id="raw_video",
+            object_catalog_version=CATALOG_VERSION,
+            full_artifact_size_bytes=len(payload),
+            full_artifact_sha256=_sha(payload),
+            selected_representation_id="indexed_temporal_frame_bundle",
+            selected_artifact_size_bytes=len(selected),
+            selected_artifact_sha256=_sha(selected),
+            frame_count=8,
+            temporal_start_fraction=0.25,
+            temporal_end_fraction=0.75,
+            selection_policy_sha256="e" * 64,
+        )
+        indexed_sampler = RecordingSampler()
+        indexed = self._prepare_profiled(
+            self._adapter(indexed_sampler),
+            route_family="indexed-raw",
+            mode="raw-prepared-frames",
+            artifacts=[ArtifactAccess(
+                _identity("raw_video", payload),
+                selected,
+                segment=segment,
+            )],
+        )
+        self.assertEqual(24, len(decode_prepared_semantic_request(raw)["frames"]))
+        self.assertEqual(8, len(decode_prepared_semantic_request(indexed)["frames"]))
+        self.assertEqual(
+            (24, 0.0, 1.0),
+            (
+                raw_sampler.calls[0]["frame_count"],
+                raw_sampler.calls[0]["temporal_start_fraction"],
+                raw_sampler.calls[0]["temporal_end_fraction"],
+            ),
+        )
+        self.assertEqual([], indexed_sampler.calls)
+        self.assertLess(len(selected), len(payload))
+        self.assertNotEqual(raw.payload_sha256, indexed.payload_sha256)
+
+    def test_indexed_profile_refuses_an_n6_only_crop(self) -> None:
+        payload = b"real-routed-video" * 10_000
+        with self.assertRaisesRegex(N6AdapterError, "real N3 projection"):
+            self._prepare_profiled(
+                self._adapter(RecordingSampler()),
+                route_family="indexed-raw",
+                mode="raw-prepared-frames",
+                artifacts=[_access("raw_video", payload)],
+            )
 
     def test_raw_range_binds_both_full_identity_and_exact_segment(self) -> None:
         full = b"0123456789abcdefghij"
@@ -388,6 +510,57 @@ class N6PreparationTest(unittest.TestCase):
             ),
             request["representation_sha256"],
         )
+
+    def test_derived_profiles_sparse_frames_and_preserve_digest_fusion(self) -> None:
+        bundle = _access("sampled_frame_bundle", _bundle_bytes(8))
+        frames = self._prepare_profiled(
+            self._adapter(),
+            route_family="remote-derived",
+            mode="frame-bundle",
+            artifacts=[bundle],
+        )
+        frame_request = decode_prepared_semantic_request(frames)
+        self.assertEqual(4, len(frame_request["frames"]))
+        self.assertEqual(
+            [1.5, 3.5, 5.5, 7.5],
+            [row["timestamp_seconds"] for row in frame_request["frames"]],
+        )
+
+        digest = _access("multimodal_digest", b"semantic digest")
+        fusion = self._prepare_profiled(
+            self._adapter(),
+            route_family="remote-derived",
+            mode="digest+frames-fusion",
+            artifacts=[digest, bundle],
+        )
+        fusion_request = decode_prepared_semantic_request(fusion)
+        self.assertEqual(4, len(fusion_request["frames"]))
+        self.assertEqual(digest.payload_sha256, fusion_request["digest_sha256"])
+        self.assertEqual("semantic digest", fusion_request["digest_text"])
+
+    def test_tampered_semantic_input_profile_fails_closed(self) -> None:
+        profile = build_semantic_input_profile(
+            route_family="raw",
+            model_input_representation_ids=["raw_video"],
+        )
+        profile["frame_selection"]["frame_count"] = 8
+        with self.assertRaisesRegex(
+            N6AdapterError,
+            "profile differs",
+        ):
+            self._adapter().prepare(
+                run_id="run",
+                trial={
+                    "trial_key": "trial",
+                    "route_family": "raw",
+                    "artifact_object_id": OBJECT_ID,
+                    "semantic_input_profile": profile,
+                },
+                stage={"stage_key": "stage"},
+                public_task=_public_task(),
+                mode="raw-prepared-frames",
+                artifacts=[_access("raw_video", b"raw")],
+            )
 
     def test_hidden_label_fields_are_rejected(self) -> None:
         task = _public_task()

@@ -39,6 +39,10 @@ from pathfinder.simulator.full_flow_semantic_execution_admission import (
 from pathfinder.simulator.full_flow_semantic_route_runtime import (
     SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
 )
+from pathfinder.simulator.full_flow_semantic_input_profiles import (
+    build_semantic_input_profile,
+    profile_sha256,
+)
 
 
 def _canonical(value: Any) -> bytes:
@@ -855,6 +859,43 @@ class ModelInputFrontierTest(unittest.TestCase):
                 self._set_model_input(evidence, [])
                 with self.assertRaises(FlowMeshSemanticTrialError):
                     self._verify(trial, stages, evidence)
+
+    def test_frozen_semantic_input_profile_is_verified(self) -> None:
+        trial, stages, evidence = self._build("raw")
+        trial["route_family"] = "raw"
+        profile = build_semantic_input_profile(
+            route_family="raw",
+            model_input_representation_ids=["raw_video"],
+        )
+        trial["semantic_input_profile"] = profile
+        evidence["route"]["route_family"] = "raw"
+        evidence["trial_sha256"] = _sha(_canonical(trial))
+        self._set_model_input(evidence, ["raw_video"])
+        evidence["semantic_input_profile_verified"] = True
+        evidence["model_input"].update({
+            "mode": "raw-prepared-frames",
+            "semantic_input_profile_id": profile["profile_id"],
+            "semantic_input_profile_sha256": profile_sha256(profile),
+            "semantic_input_profile_verified": True,
+            "semantic_content_sha256": _sha(b"semantic-content"),
+            "frame_count": 24,
+            "frame_timestamps_seconds": [float(index) for index in range(24)],
+            "frame_dimensions": [
+                {"width": 2, "height": 2} for _ in range(24)
+            ],
+            "frame_payload_bytes": 240,
+            "frame_sequence_sha256": _sha(b"frame-sequence"),
+            "digest_input_sha256": None,
+            "temporal_window_fraction": [0.0, 1.0],
+            "direct_video_input": False,
+        })
+        self._verify(trial, stages, evidence)
+        evidence["model_input"]["temporal_window_fraction"] = [0.1, 1.0]
+        with self.assertRaisesRegex(
+            FlowMeshSemanticTrialError,
+            "frozen profile",
+        ):
+            self._verify(trial, stages, evidence)
 
     def test_local_cache_join_counts_the_artifact_once(self) -> None:
         trial, stages, evidence = self._build("local-cache")

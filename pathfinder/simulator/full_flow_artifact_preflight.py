@@ -43,7 +43,10 @@ from .raw_cold_data_plane import (
     PACKAGE_MANIFEST_NAME as N3_PACKAGE_MANIFEST_NAME,
     SOURCE_LOCATION as N3_SOURCE_LOCATION,
     SOURCE_NODE_ID as N3_SOURCE_NODE_ID,
-    verify_raw_cold_data_plane_package,
+)
+from .n3_indexed_data_plane import (
+    INDEXED_REPRESENTATION_ID,
+    verify_n3_semantic_data_plane_package,
 )
 
 from .full_flow_semantic_execution_admission import (
@@ -392,7 +395,7 @@ def _package_bindings(
         "N4": Path(n4_package_dir).resolve(),
     }
     try:
-        verify_raw_cold_data_plane_package(roots["N3"])
+        verify_n3_semantic_data_plane_package(roots["N3"])
         verify_n4_derived_data_package(roots["N4"])
     except Exception as exc:
         raise FullFlowArtifactPreflightError(
@@ -462,6 +465,14 @@ def _package_bindings(
                 row.get("representation_id"),
                 f"{node} objects[{index}].representation_id",
             )
+            if (
+                node == "N3"
+                and representation_id == INDEXED_REPRESENTATION_ID
+            ):
+                # Internal N2-selected transport representation. Its source
+                # binding is verified by the exact-selection catalog rather
+                # than exposed as a semantic-matrix artifact identity.
+                continue
             expected_node = "N3" if representation_id == "raw_video" else "N4"
             _require(node == expected_node, "artifact package assigns wrong node")
             media_type = row.get(

@@ -14,9 +14,10 @@ Two boundaries are worth spelling out:
   in-process adapters measure only their own process work and never claim
   network, queue, or monetary measurements.
 
-Indexed raw access is fail-closed.  The N2 result is paired with an
-``ExactContentRange`` supplied by a verified catalog resolver.  There is no
-percentage, byte multiplier, or inferred range fallback in this module.
+Indexed raw access is fail-closed.  The N2 result is paired with an exact
+source selection supplied by a verified catalog resolver.  A legacy entry is
+an ``ExactContentRange``; the real-data profile uses a content-bound temporal
+frame bundle produced and served by N3.  Neither form accepts an estimate.
 """
 
 from __future__ import annotations
@@ -57,6 +58,8 @@ from .full_flow_semantic_route_runtime import (
     CacheLookupResult,
     ControlAdmission,
     ExactContentRange,
+    ExactSourceSelection,
+    ExactTemporalFrameSelection,
     IndexSelection,
     PreparedSemanticInput,
     ProvisioningReference,
@@ -230,7 +233,7 @@ class IndexQueryPlanResolver(Protocol):
 
 
 class ExactRangeResolver(Protocol):
-    def resolve(self, identity: ArtifactIdentity) -> ExactContentRange: ...
+    def resolve(self, identity: ArtifactIdentity) -> ExactSourceSelection: ...
 
 
 class LocalIndexService(Protocol):
@@ -414,9 +417,12 @@ class BoundIndexQueryAdapter:
             identity = _raw_identity(trial)
             segment = self._ranges.resolve(identity)
             _require(
-                isinstance(segment, ExactContentRange)
+                isinstance(
+                    segment,
+                    (ExactContentRange, ExactTemporalFrameSelection),
+                )
                 and segment.matches(identity),
-                "exact range resolver changed the raw artifact identity",
+                "exact selection resolver changed the raw artifact identity",
             )
         return IndexSelection(
             selected_object_id=selected,
@@ -645,6 +651,27 @@ class BoundDataAgentAccessRequestFactory:
             identity=identity,
         )
 
+    def build_selected_request(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        source_identity: ArtifactIdentity,
+        selection: ExactTemporalFrameSelection,
+    ) -> DataAgentAccessRequest:
+        _require(
+            selection.matches(source_identity),
+            "N3 projection request differs from its raw source identity",
+        )
+        return self.build_for_source(
+            source_node_id="N3",
+            run_id=run_id,
+            trial=trial,
+            stage=stage,
+            identity=selection.selected_identity,
+        )
+
 
 class DataAgentArtifactSourceAdapter:
     """Fetch exact N3/N4 identities through standard Data Agent clients."""
@@ -729,6 +756,54 @@ class DataAgentArtifactSourceAdapter:
             telemetry=AdapterTelemetry(
                 service_time_ms=_number(service_ms, "Data Agent service time"),
                 bytes_read=_integer(bytes_read, "Data Agent bytes read"),
+            ),
+        )
+
+    def fetch_selected(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        source_identity: ArtifactIdentity,
+        selection: ExactTemporalFrameSelection,
+    ) -> ArtifactAccess:
+        """Fetch a frozen source-side projection without downloading the MP4."""
+
+        selected = selection.selected_identity
+        request = self._requests.build_selected_request(
+            run_id=run_id,
+            trial=trial,
+            stage=stage,
+            source_identity=source_identity,
+            selection=selection,
+        )
+        allowed = self._media.get(selected.representation_id)
+        _require(
+            allowed is not None,
+            "selected N3 representation has no media allowlist",
+        )
+        artifact = self._clients["N3"].fetch_binary_artifact(
+            request,
+            allowed_media_types=allowed,
+        )
+        self._validate_binary(artifact, selected, request)
+        _require(
+            artifact.size_bytes == selection.selected_artifact_size_bytes
+            and artifact.sha256 == selection.selected_artifact_sha256,
+            "N3 projection bytes differ from the N2 descriptor",
+        )
+        return ArtifactAccess(
+            source_identity=source_identity,
+            payload=artifact.data,
+            segment=selection,
+            telemetry=AdapterTelemetry(
+                service_time_ms=(
+                    artifact.service_latency_ms
+                    if artifact.service_latency_ms is not None
+                    else 0.0
+                ),
+                bytes_read=artifact.size_bytes,
             ),
         )
 
@@ -850,7 +925,6 @@ class InProcessByteTransferAdapter:
                 bytes_sent=size,
             ),
         )
-
 
 class ApplicationShapedByteTransferAdapter:
     """Apply one explicit executor-link envelope to logical byte handoffs.

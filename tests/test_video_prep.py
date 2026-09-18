@@ -28,6 +28,7 @@ from pathfinder.video_prep import (
     audit_recovery_checkpoint,
     load_selection_video_ids,
     prepare_representations,
+    sample_video,
 )
 
 
@@ -57,6 +58,21 @@ class _ScriptedVisionClient:
 
 
 class VideoPreparationParsingTest(unittest.TestCase):
+    def test_temporal_sampling_window_fails_closed_before_video_io(self) -> None:
+        for start, end in ((-0.1, 1.0), (0.5, 0.5), (0.8, 0.2), (0.0, 1.1)):
+            with self.subTest(start=start, end=end):
+                with self.assertRaisesRegex(
+                    VideoPreparationError,
+                    "temporal sampling window",
+                ):
+                    sample_video(
+                        Path("not-opened.mp4"),
+                        frame_count=4,
+                        jpeg_max_dimension=64,
+                        temporal_start_fraction=start,
+                        temporal_end_fraction=end,
+                    )
+
     def test_protocol_retry_repairs_invalid_json_without_changing_seed(self) -> None:
         client = _ScriptedVisionClient(
             [

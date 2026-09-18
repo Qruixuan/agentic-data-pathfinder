@@ -17,6 +17,8 @@ fraction is not accepted as a range descriptor.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import math
@@ -33,6 +35,12 @@ from .full_flow_semantic_route_evidence import (
     SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
     verify_public_semantic_route_evidence,
 )
+from .full_flow_semantic_input_profiles import (
+    SemanticInputProfileError,
+    model_input_frontier_representation_ids,
+    profile_sha256,
+    validate_semantic_input_profile,
+)
 from .hidden_oracle import (
     N1_SCORE_REQUEST_SCHEMA_VERSION,
     N1_SCORE_RESULT_SCHEMA_VERSION,
@@ -46,6 +54,9 @@ NEUTRAL_OBSERVATION_CANDIDATE_SCHEMA_VERSION = (
 )
 EXACT_CONTENT_RANGE_SCHEMA_VERSION = (
     "pathfinder.exact-content-range/v1alpha1"
+)
+EXACT_TEMPORAL_FRAME_SELECTION_SCHEMA_VERSION = (
+    "pathfinder.exact-temporal-frame-selection/v1alpha1"
 )
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -266,6 +277,118 @@ class ExactContentRange:
 
 
 @dataclass(frozen=True)
+class ExactTemporalFrameSelection:
+    """A real N3-side temporal projection bound to its authoritative MP4."""
+
+    object_id: str
+    representation_id: str
+    object_catalog_version: str
+    full_artifact_size_bytes: int
+    full_artifact_sha256: str
+    selected_representation_id: str
+    selected_artifact_size_bytes: int
+    selected_artifact_sha256: str
+    frame_count: int
+    temporal_start_fraction: float
+    temporal_end_fraction: float
+    selection_policy_sha256: str
+
+    def __post_init__(self) -> None:
+        _identifier(self.object_id, "temporal selection object_id")
+        _require(
+            self.representation_id == "raw_video",
+            "a temporal selection must bind an authoritative raw_video",
+        )
+        _identifier(
+            self.object_catalog_version,
+            "temporal selection catalog version",
+        )
+        source_size = _integer(
+            self.full_artifact_size_bytes,
+            "full_artifact_size_bytes",
+            minimum=1,
+        )
+        _digest(self.full_artifact_sha256, "full_artifact_sha256")
+        _require(
+            self.selected_representation_id
+            == "indexed_temporal_frame_bundle",
+            "temporal selection has the wrong execution representation",
+        )
+        selected_size = _integer(
+            self.selected_artifact_size_bytes,
+            "selected_artifact_size_bytes",
+            minimum=1,
+        )
+        _require(
+            selected_size < source_size,
+            "temporal selection does not reduce source transfer bytes",
+        )
+        _digest(self.selected_artifact_sha256, "selected_artifact_sha256")
+        _integer(self.frame_count, "frame_count", minimum=1)
+        start = _number(
+            self.temporal_start_fraction,
+            "temporal_start_fraction",
+        )
+        end = _number(
+            self.temporal_end_fraction,
+            "temporal_end_fraction",
+        )
+        _require(
+            0.0 <= start < end <= 1.0,
+            "temporal selection window is invalid",
+        )
+        _digest(self.selection_policy_sha256, "selection_policy_sha256")
+
+    @property
+    def descriptor_sha256(self) -> str:
+        return _sha256(_canonical(self.to_dict()))
+
+    @property
+    def selected_identity(self) -> ArtifactIdentity:
+        return ArtifactIdentity(
+            object_id=self.object_id,
+            representation_id=self.selected_representation_id,
+            artifact_sha256=self.selected_artifact_sha256,
+            artifact_size_bytes=self.selected_artifact_size_bytes,
+            object_catalog_version=self.object_catalog_version,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": EXACT_TEMPORAL_FRAME_SELECTION_SCHEMA_VERSION,
+            "object_id": self.object_id,
+            "representation_id": self.representation_id,
+            "object_catalog_version": self.object_catalog_version,
+            "full_artifact_size_bytes": self.full_artifact_size_bytes,
+            "full_artifact_sha256": self.full_artifact_sha256,
+            "selected_representation_id": self.selected_representation_id,
+            "selected_artifact_size_bytes": self.selected_artifact_size_bytes,
+            "selected_artifact_sha256": self.selected_artifact_sha256,
+            "frame_count": self.frame_count,
+            "temporal_window_fraction": [
+                self.temporal_start_fraction,
+                self.temporal_end_fraction,
+            ],
+            "selection_policy_sha256": self.selection_policy_sha256,
+            "selection_semantics": "source-decoded-temporal-frame-bundle",
+            "partial_mp4_byte_range_claimed": False,
+            "source_side_projection_executed": True,
+        }
+
+    def matches(self, identity: ArtifactIdentity) -> bool:
+        return (
+            self.object_id == identity.object_id
+            and self.representation_id == identity.representation_id
+            and self.object_catalog_version == identity.object_catalog_version
+            and self.full_artifact_size_bytes == identity.artifact_size_bytes
+            and self.full_artifact_sha256 == identity.artifact_sha256
+        )
+
+
+ExactSourceSelection = ExactContentRange | ExactTemporalFrameSelection
+
+
+@dataclass(frozen=True)
 class AdapterTelemetry:
     service_time_ms: float = 0.0
     bytes_read: int = 0
@@ -290,7 +413,7 @@ class ControlAdmission:
 class IndexSelection:
     selected_object_id: str
     index_result_sha256: str
-    segment: ExactContentRange | None = None
+    segment: ExactSourceSelection | None = None
     telemetry: AdapterTelemetry = field(default_factory=AdapterTelemetry)
 
     def __post_init__(self) -> None:
@@ -302,7 +425,7 @@ class IndexSelection:
 class ArtifactAccess:
     source_identity: ArtifactIdentity
     payload: bytes
-    segment: ExactContentRange | None = None
+    segment: ExactSourceSelection | None = None
     telemetry: AdapterTelemetry = field(default_factory=AdapterTelemetry)
 
     def __post_init__(self) -> None:
@@ -508,6 +631,16 @@ class ArtifactSourceAdapter(Protocol):
         stage: Mapping[str, Any],
         identity: ArtifactIdentity,
         upstream_values: Sequence[Any],
+    ) -> ArtifactAccess: ...
+
+    def fetch_selected(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        source_identity: ArtifactIdentity,
+        selection: ExactTemporalFrameSelection,
     ) -> ArtifactAccess: ...
 
 
@@ -978,7 +1111,137 @@ def _validate_trial_and_stages(
             ),
             "non-cache route contains cache stages",
         )
+    profile = trial.get("semantic_input_profile")
+    if profile is not None:
+        frontier = model_input_frontier_representation_ids(stages)
+        try:
+            validate_semantic_input_profile(
+                profile,
+                route_family=str(route_family),
+                model_input_representation_ids=frontier,
+            )
+        except SemanticInputProfileError as exc:
+            raise SemanticRouteRuntimeError(str(exc)) from exc
     return trial, stages, identities, public_task
+
+
+def _prepared_request(value: PreparedSemanticInput) -> dict[str, Any]:
+    try:
+        request = json.loads(value.payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SemanticRouteRuntimeError(
+            "prepared N6 input is not UTF-8 JSON"
+        ) from exc
+    _require(isinstance(request, dict), "prepared N6 input must be an object")
+    _require(
+        _canonical(request) == value.payload,
+        "prepared N6 input is not canonical JSON",
+    )
+    return request
+
+
+def _semantic_input_evidence(
+    prepared: PreparedSemanticInput,
+    profile_value: Any,
+) -> dict[str, Any]:
+    request = _prepared_request(prepared)
+    content = dict(request)
+    request_id = content.pop("semantic_request_id", None)
+    if profile_value is not None:
+        _require(
+            isinstance(request_id, str),
+            "profiled N6 input has no request identity",
+        )
+    frames_value = request.get("frames", [])
+    _require(isinstance(frames_value, list), "prepared N6 frames are invalid")
+    frame_timestamps: list[float] = []
+    frame_dimensions: list[dict[str, int]] = []
+    frame_payload_bytes = 0
+    for frame in frames_value:
+        _require(isinstance(frame, Mapping), "prepared N6 frame is invalid")
+        timestamp = frame.get("timestamp_seconds")
+        width = frame.get("width")
+        height = frame.get("height")
+        encoded = frame.get("jpeg_base64")
+        _require(
+            not isinstance(timestamp, bool)
+            and isinstance(timestamp, (int, float))
+            and math.isfinite(float(timestamp))
+            and float(timestamp) >= 0.0,
+            "prepared N6 frame timestamp is invalid",
+        )
+        _require(
+            type(width) is int
+            and width > 0
+            and type(height) is int
+            and height > 0
+            and isinstance(encoded, str)
+            and bool(encoded),
+            "prepared N6 frame shape is invalid",
+        )
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise SemanticRouteRuntimeError(
+                "prepared N6 frame payload is invalid"
+            ) from exc
+        _require(bool(payload), "prepared N6 frame payload is empty")
+        frame_timestamps.append(float(timestamp))
+        frame_dimensions.append({"width": width, "height": height})
+        frame_payload_bytes += len(payload)
+
+    profile: Mapping[str, Any] | None = None
+    if profile_value is not None:
+        _require(
+            isinstance(profile_value, Mapping),
+            "semantic input profile is invalid",
+        )
+        profile = profile_value
+        selection = profile.get("frame_selection")
+        expected_count = 0 if selection is None else selection.get("frame_count")
+        _require(
+            expected_count == len(frames_value)
+            and profile.get("input_mode") == prepared.mode,
+            "prepared N6 input differs from its semantic profile",
+        )
+        temporal_window = (
+            None
+            if selection is None
+            else selection.get("temporal_window_fraction")
+        )
+        profile_id = profile.get("profile_id")
+        profile_digest = profile_sha256(profile)
+        profile_verified = True
+    else:
+        temporal_window = None
+        profile_id = None
+        profile_digest = None
+        profile_verified = False
+
+    frame_sequence = request.get("frame_sequence_sha256")
+    if frames_value:
+        _digest(frame_sequence, "frame_sequence_sha256")
+    else:
+        _require(frame_sequence is None, "digest input names a frame sequence")
+    digest_input = request.get("digest_sha256")
+    if prepared.mode == "digest":
+        digest_input = prepared.component_identities[0].artifact_sha256
+    if digest_input is not None:
+        _digest(digest_input, "digest_input_sha256")
+    return {
+        "semantic_input_profile_id": profile_id,
+        "semantic_input_profile_sha256": profile_digest,
+        "semantic_input_profile_verified": profile_verified,
+        "semantic_content_sha256": _sha256(_canonical(content)),
+        "frame_count": len(frames_value),
+        "frame_timestamps_seconds": frame_timestamps,
+        "frame_dimensions": frame_dimensions,
+        "frame_payload_bytes": frame_payload_bytes,
+        "frame_sequence_sha256": frame_sequence,
+        "digest_input_sha256": digest_input,
+        "temporal_window_fraction": temporal_window,
+        "direct_video_input": False,
+    }
 
 
 def _unwrap(value: Any) -> Any:
@@ -1096,7 +1359,7 @@ def _validate_artifact(
     artifact: ArtifactAccess,
     expected: ArtifactIdentity,
     *,
-    segment: ExactContentRange | None,
+    segment: ExactSourceSelection | None,
 ) -> None:
     _require(
         artifact.source_identity == expected,
@@ -1109,13 +1372,25 @@ def _validate_artifact(
             and artifact.payload_sha256 == expected.artifact_sha256,
             "N3/N4 full artifact bytes differ from frozen identity",
         )
-    else:
+    elif isinstance(segment, ExactContentRange):
         _require(segment.matches(expected), "N2 range does not bind the N3 artifact")
         _require(
             artifact.segment == segment
             and len(artifact.payload) == segment.range_size_bytes
             and artifact.payload_sha256 == segment.range_sha256,
             "N3 exact range differs from the N2 descriptor",
+        )
+    else:
+        _require(
+            isinstance(segment, ExactTemporalFrameSelection)
+            and segment.matches(expected),
+            "N2 temporal selection does not bind the N3 source artifact",
+        )
+        _require(
+            artifact.segment == segment
+            and len(artifact.payload) == segment.selected_artifact_size_bytes
+            and artifact.payload_sha256 == segment.selected_artifact_sha256,
+            "N3 temporal projection differs from the N2 descriptor",
         )
 
 
@@ -1595,25 +1870,51 @@ class GenericSemanticRouteCoordinator:
                     selection = selections[0]
                     segment = selection.segment
                     assert segment is not None
-                    request = self._adapters.range_request_factory.build_request(
-                        run_id=run_id,
-                        trial=trial,
-                        stage=stage,
-                        identity=identity,
-                        selection=selection,
-                    )
-                    raw = self._adapters.range_fetcher.fetch_binary_artifact_range(
-                        request,
-                        range_start=segment.range_start,
-                        range_end=segment.range_end,
-                        expected_range_sha256=segment.range_sha256,
-                        allowed_media_types=self._adapters.raw_range_allowed_media_types,
-                    )
-                    outcome = _range_artifact(
-                        raw,
-                        expected=identity,
-                        segment=segment,
-                    )
+                    if isinstance(segment, ExactContentRange):
+                        request = (
+                            self._adapters.range_request_factory.build_request(
+                                run_id=run_id,
+                                trial=trial,
+                                stage=stage,
+                                identity=identity,
+                                selection=selection,
+                            )
+                        )
+                        raw = (
+                            self._adapters.range_fetcher
+                            .fetch_binary_artifact_range(
+                                request,
+                                range_start=segment.range_start,
+                                range_end=segment.range_end,
+                                expected_range_sha256=segment.range_sha256,
+                                allowed_media_types=(
+                                    self._adapters
+                                    .raw_range_allowed_media_types
+                                ),
+                            )
+                        )
+                        outcome = _range_artifact(
+                            raw,
+                            expected=identity,
+                            segment=segment,
+                        )
+                    else:
+                        _require(
+                            isinstance(segment, ExactTemporalFrameSelection),
+                            "N2 returned an unsupported exact selection",
+                        )
+                        outcome = self._adapters.artifacts.fetch_selected(
+                            run_id=run_id,
+                            trial=trial,
+                            stage=stage,
+                            source_identity=identity,
+                            selection=segment,
+                        )
+                        _validate_artifact(
+                            outcome,
+                            identity,
+                            segment=segment,
+                        )
                 else:
                     outcome = self._adapters.artifacts.fetch_full(
                         run_id=run_id,
@@ -1960,6 +2261,10 @@ class GenericSemanticRouteCoordinator:
             "credentials_recorded": False,
             "eligible_for_scientific_claims": False,
         }
+        input_evidence = _semantic_input_evidence(
+            prepared_input,
+            trial.get("semantic_input_profile"),
+        )
         evidence: dict[str, Any] = {
             "schema_version": SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
             "status": "COMPLETE",
@@ -2005,6 +2310,7 @@ class GenericSemanticRouteCoordinator:
                     for value in prepared_input.component_identities
                 ],
                 "preparation_sha256": prepared_input.preparation_sha256,
+                **input_evidence,
             },
             "semantic": {
                 "model": semantic_result.model,
@@ -2045,6 +2351,9 @@ class GenericSemanticRouteCoordinator:
             "n3_n4_artifact_identity_verified": True,
             "n5_provisioning_references_verified": True,
             "n6_input_mode_verified": True,
+            "semantic_input_profile_verified": input_evidence[
+                "semantic_input_profile_verified"
+            ],
             "n1_exactly_once_authenticated_score_verified": True,
             "idempotent_replay": False,
             "endpoint_values_included": False,
@@ -2071,7 +2380,10 @@ __all__ = [
     "CacheLookupResult",
     "ControlAdmission",
     "EXACT_CONTENT_RANGE_SCHEMA_VERSION",
+    "EXACT_TEMPORAL_FRAME_SELECTION_SCHEMA_VERSION",
     "ExactContentRange",
+    "ExactSourceSelection",
+    "ExactTemporalFrameSelection",
     "GenericSemanticRouteCoordinator",
     "InMemoryRouteExecutionStore",
     "IndexQueryAdapter",

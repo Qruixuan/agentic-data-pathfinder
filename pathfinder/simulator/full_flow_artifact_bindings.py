@@ -44,7 +44,10 @@ from .n4_derived_data_plane import (
 from .raw_cold_data_plane import (
     CHECKSUMS_NAME as N3_CHECKSUMS_NAME,
     PACKAGE_MANIFEST_NAME as N3_MANIFEST_NAME,
-    verify_raw_cold_data_plane_package,
+)
+from .n3_indexed_data_plane import (
+    INDEXED_REPRESENTATION_ID,
+    verify_n3_semantic_data_plane_package,
 )
 
 
@@ -155,6 +158,14 @@ def _artifact_rows(
                 value.get("representation_id"),
                 "representation_id",
             )
+            if (
+                source_node == "N3"
+                and representation_id == INDEXED_REPRESENTATION_ID
+            ):
+                # This is a private execution projection selected by N2.  The
+                # logical semantic matrix remains bound to authoritative
+                # raw_video; the exact-selection catalog binds the projection.
+                continue
             digest = value.get("artifact_sha256")
             size = value.get("artifact_size_bytes")
             _require(
@@ -206,7 +217,7 @@ def _documents(
             container_plan_dir,
         )
         task_verified = verify_full_flow_task_plane(task_plane_dir)
-        n3_verified = verify_raw_cold_data_plane_package(n3_package_dir)
+        n3_verified = verify_n3_semantic_data_plane_package(n3_package_dir)
         n4_verified = verify_n4_derived_data_package(n4_package_dir)
     except (OSError, ValueError, RuntimeError) as exc:
         raise FullFlowArtifactBindingError(

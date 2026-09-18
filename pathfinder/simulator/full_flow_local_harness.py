@@ -67,8 +67,8 @@ from .raw_cold_data_plane import (
     DATA_AGENT_MANIFEST_PATH as N3_DATA_AGENT_MANIFEST_PATH,
     REPRESENTATION_ID as RAW_VIDEO_REPRESENTATION_ID,
     SOURCE_LOCATION as N3_SOURCE_LOCATION,
-    verify_raw_cold_data_plane_package,
 )
+from .n3_indexed_data_plane import verify_n3_semantic_data_plane_package
 
 
 LOCAL_FULL_FLOW_HARNESS_SCHEMA_VERSION = (
@@ -365,7 +365,7 @@ def run_local_full_flow_harness(
     n3_root = Path(n3_raw_package_dir).resolve()
     n1_package = verify_n1_oracle_package(n1_root)
     n2_package = verify_n2_index_package(n2_root)
-    n3_package = verify_raw_cold_data_plane_package(n3_root)
+    n3_package = verify_n3_semantic_data_plane_package(n3_root)
     n1_package_sha = _package_sha256(n1_root, "N1")
     n2_package_sha = _package_sha256(n2_root, "N2")
     n3_package_sha = _package_sha256(n3_root, "N3")

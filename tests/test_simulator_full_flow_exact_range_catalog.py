@@ -133,7 +133,7 @@ class FullFlowExactRangeCatalogTest(unittest.TestCase):
         artifact.write_bytes(bytes(changed))
         with self.assertRaisesRegex(
             FullFlowExactRangeCatalogError,
-            "N3 raw package verification failed",
+            "N3 semantic data-plane package verification failed",
         ):
             verify_full_flow_exact_range_catalog(output, self.n3)
 

@@ -2236,6 +2236,37 @@ def _parser() -> argparse.ArgumentParser:
     n3_raw_verify.add_argument("--output-dir", type=Path, required=True)
     n3_raw_verify.add_argument("--compact", action="store_true")
 
+    n3_indexed_build = subcommands.add_parser(
+        "build-simulator-n3-indexed-data-plane",
+        help=(
+            "add exact source-side temporal frame projections to a verified "
+            "N3 raw package"
+        ),
+    )
+    n3_indexed_build.add_argument(
+        "--source-raw-package-dir", type=Path, required=True
+    )
+    n3_indexed_build.add_argument("--package-id", required=True)
+    n3_indexed_build.add_argument("--frame-count", type=int, default=8)
+    n3_indexed_build.add_argument(
+        "--jpeg-max-dimension", type=int, default=768
+    )
+    n3_indexed_build.add_argument(
+        "--temporal-start-fraction", type=float, default=0.25
+    )
+    n3_indexed_build.add_argument(
+        "--temporal-end-fraction", type=float, default=0.75
+    )
+    n3_indexed_build.add_argument("--output-dir", type=Path, required=True)
+    n3_indexed_build.add_argument("--compact", action="store_true")
+
+    n3_indexed_verify = subcommands.add_parser(
+        "verify-simulator-n3-indexed-data-plane",
+        help="verify N3 raw objects and exact temporal projections offline",
+    )
+    n3_indexed_verify.add_argument("--output-dir", type=Path, required=True)
+    n3_indexed_verify.add_argument("--compact", action="store_true")
+
     n4_derived_build = subcommands.add_parser(
         "build-simulator-n4-derived-data-plane",
         help=(
@@ -4567,6 +4598,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
             payload = verify_raw_cold_data_plane_package(args.output_dir)
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "build-simulator-n3-indexed-data-plane":
+            from .simulator.n3_indexed_data_plane import (
+                N3TemporalSelectionPolicy,
+                build_n3_indexed_data_plane_package,
+            )
+
+            payload = build_n3_indexed_data_plane_package(
+                args.source_raw_package_dir,
+                output_dir=args.output_dir,
+                package_id=args.package_id,
+                policy=N3TemporalSelectionPolicy(
+                    frame_count=args.frame_count,
+                    jpeg_max_dimension=args.jpeg_max_dimension,
+                    temporal_start_fraction=args.temporal_start_fraction,
+                    temporal_end_fraction=args.temporal_end_fraction,
+                ),
+            )
+            return _print_payload(payload, compact=args.compact)
+        if args.command == "verify-simulator-n3-indexed-data-plane":
+            from .simulator.n3_indexed_data_plane import (
+                verify_n3_indexed_data_plane_package,
+            )
+
+            payload = verify_n3_indexed_data_plane_package(args.output_dir)
             return _print_payload(payload, compact=args.compact)
         if args.command == "build-simulator-n4-derived-data-plane":
             from .simulator.n4_derived_data_plane import (

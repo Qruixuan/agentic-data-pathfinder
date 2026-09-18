@@ -39,6 +39,12 @@ from ...simulator.full_flow_semantic_route_evidence import (
     SemanticRouteEvidenceValidationError,
     verify_public_semantic_route_evidence,
 )
+from ...simulator.full_flow_semantic_input_profiles import (
+    SemanticInputProfileError,
+    model_input_frontier_representation_ids,
+    profile_sha256,
+    validate_semantic_input_profile,
+)
 from ...simulator.full_flow_semantic_route_runtime import (
     GenericSemanticRouteCoordinator,
 )
@@ -800,6 +806,52 @@ def _verify_route_evidence(
         set(components) == expected_model_input,
         "N6 model input does not bind the frozen model-input frontier",
     )
+    semantic_profile = bound_trial.get("semantic_input_profile")
+    if semantic_profile is not None:
+        frontier_representations = model_input_frontier_representation_ids(
+            bound_stages
+        )
+        try:
+            expected_profile = validate_semantic_input_profile(
+                semantic_profile,
+                route_family=str(bound_trial.get("route_family")),
+                model_input_representation_ids=frontier_representations,
+            )
+        except SemanticInputProfileError as exc:
+            raise FlowMeshSemanticTrialError(str(exc)) from exc
+        selection = expected_profile.get("frame_selection")
+        expected_frame_count = (
+            0 if selection is None else selection.get("frame_count")
+        )
+        expected_window = (
+            None
+            if selection is None
+            else selection.get("temporal_window_fraction")
+        )
+        _require(
+            model_input.get("semantic_input_profile_id")
+            == expected_profile["profile_id"]
+            and model_input.get("semantic_input_profile_sha256")
+            == profile_sha256(expected_profile)
+            and model_input.get("semantic_input_profile_verified") is True
+            and evidence.get("semantic_input_profile_verified") is True
+            and model_input.get("mode") == expected_profile["input_mode"]
+            and model_input.get("frame_count") == expected_frame_count
+            and model_input.get("temporal_window_fraction")
+            == expected_window
+            and (
+                model_input.get("digest_input_sha256") is not None
+            ) is expected_profile["digest_included"]
+            and (
+                model_input.get("frame_sequence_sha256") is not None
+            ) is (expected_frame_count > 0)
+            and model_input.get("direct_video_input") is False,
+            "N6 semantic input differs from its frozen profile",
+        )
+        _digest(
+            model_input.get("semantic_content_sha256"),
+            "semantic content digest",
+        )
     observation = evidence.get("neutral_observation_candidate")
     _require(
         isinstance(observation, dict)

@@ -943,6 +943,8 @@ class N6ContainerW4SemanticRankingAdapter:
             source_payload_sha256=descriptor["content_sha256"],
             frame_count=frame_count,
             jpeg_max_dimension=self._jpeg_dimension,
+            temporal_start_fraction=0.0,
+            temporal_end_fraction=1.0,
         ))
         _require(
             len(values) == frame_count

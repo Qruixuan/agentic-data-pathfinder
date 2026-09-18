@@ -16,6 +16,7 @@ from pathfinder.simulator.full_flow_local_semantic_smoke import (
     FullFlowLocalSemanticSmokeExecutionError,
     RECEIPT_NAME,
     RESULTS_NAME,
+    _semantic_input_invariants,
     run_full_flow_local_semantic_smokes,
     run_full_flow_semantic_smokes,
     verify_full_flow_local_semantic_smokes,
@@ -287,6 +288,68 @@ class LocalSemanticSmokeTest(unittest.TestCase):
             **self.n4_source_keywords,
         )
         self.assertEqual(report["receipt_sha256"], verify["receipt_sha256"])
+
+    def test_profiled_smoke_enforces_content_invariance_and_separation(self) -> None:
+        profiled = FrozenLocalSemanticExecutionInputs(
+            admission=self.inputs.admission,
+            bound_trials=tuple({
+                **trial,
+                "semantic_input_profile": {"profile_id": "fixture"},
+            } for trial in self.inputs.bound_trials),
+            bound_stages=self.inputs.bound_stages,
+            representative_smokes=self.inputs.representative_smokes,
+            adapter_inventory=self.inputs.adapter_inventory,
+        )
+        content = {
+            "n7-raw": "1" * 64,
+            "n8-raw": "1" * 64,
+            "n7-indexed-raw": "2" * 64,
+            "n8-indexed-raw": "2" * 64,
+            "n7-remote-derived": "3" * 64,
+            "n8-remote-derived": "3" * 64,
+            "n7-cache-miss": "3" * 64,
+            "n7-cache-hit": "3" * 64,
+            "n8-cache-miss": "3" * 64,
+            "n8-cache-hit": "3" * 64,
+        }
+        profiles = {
+            case_id: (
+                "4" * 64 if case_id.endswith("raw")
+                and "indexed" not in case_id else
+                "5" * 64 if "indexed" in case_id else
+                "6" * 64
+            )
+            for case_id in CASES
+        }
+
+        def rows() -> list[dict]:
+            return [{
+                "case_id": case_id,
+                "result": {
+                    "semantic_route_evidence": {
+                        "semantic_input_profile_verified": True,
+                        "model_input": {
+                            "semantic_input_profile_verified": True,
+                            "semantic_content_sha256": content[case_id],
+                            "semantic_input_profile_sha256": profiles[case_id],
+                        },
+                    },
+                },
+            } for case_id in CASES]
+
+        report = _semantic_input_invariants(profiled, rows())
+        self.assertTrue(report["semantic_input_profiles_verified"])
+        self.assertTrue(
+            report["execution_location_semantic_invariance_verified"]
+        )
+        self.assertTrue(report["cache_state_semantic_invariance_verified"])
+        self.assertTrue(report["route_family_semantic_separation_verified"])
+        content["n8-raw"] = "7" * 64
+        with self.assertRaisesRegex(
+            FullFlowLocalSemanticSmokeError,
+            "N7 and N8 changed semantic input content",
+        ):
+            _semantic_input_invariants(profiled, rows())
 
     def test_runs_source_bound_one_case_without_authorizing_matrix(self) -> None:
         design_ids = (

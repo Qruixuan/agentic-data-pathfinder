@@ -62,6 +62,7 @@ _EVIDENCE_FIELDS = {
     "n3_n4_artifact_identity_verified",
     "n5_provisioning_references_verified",
     "n6_input_mode_verified",
+    "semantic_input_profile_verified",
     "n1_exactly_once_authenticated_score_verified",
     "idempotent_replay",
     "endpoint_values_included",
@@ -121,6 +122,28 @@ _CACHE_BRANCH_FIELDS = {
     "lookup_sha256",
 }
 _MODEL_INPUT_FIELDS = {
+    "mode",
+    "payload_sha256",
+    "payload_size_bytes",
+    "component_identity_sha256",
+    "preparation_sha256",
+    "semantic_input_profile_id",
+    "semantic_input_profile_sha256",
+    "semantic_input_profile_verified",
+    "semantic_content_sha256",
+    "frame_count",
+    "frame_timestamps_seconds",
+    "frame_dimensions",
+    "frame_payload_bytes",
+    "frame_sequence_sha256",
+    "digest_input_sha256",
+    "temporal_window_fraction",
+    "direct_video_input",
+}
+_LEGACY_EVIDENCE_FIELDS = _EVIDENCE_FIELDS - {
+    "semantic_input_profile_verified"
+}
+_LEGACY_MODEL_INPUT_FIELDS = {
     "mode",
     "payload_sha256",
     "payload_size_bytes",
@@ -319,7 +342,12 @@ def _assert_no_private_keys(value: Any, path: str = "evidence") -> None:
 
 
 def _validate_shape(evidence: Mapping[str, Any]) -> None:
-    _exact_fields(evidence, _EVIDENCE_FIELDS, "semantic route evidence")
+    is_legacy = "semantic_input_profile_verified" not in evidence
+    _exact_fields(
+        evidence,
+        _LEGACY_EVIDENCE_FIELDS if is_legacy else _EVIDENCE_FIELDS,
+        "semantic route evidence",
+    )
     _require(
         evidence.get("schema_version") == SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION
         and evidence.get("status") == "COMPLETE",
@@ -361,7 +389,107 @@ def _validate_shape(evidence: Mapping[str, Any]) -> None:
     for index, row in enumerate(cache):
         _exact_fields(row, _CACHE_BRANCH_FIELDS, f"cache branch {index}")
 
-    _exact_fields(evidence.get("model_input"), _MODEL_INPUT_FIELDS, "model_input")
+    model_input = _exact_fields(
+        evidence.get("model_input"),
+        _LEGACY_MODEL_INPUT_FIELDS if is_legacy else _MODEL_INPUT_FIELDS,
+        "model_input",
+    )
+    if not is_legacy:
+        _digest(
+            model_input.get("semantic_content_sha256"),
+            "semantic_content_sha256",
+        )
+        frame_count = model_input.get("frame_count")
+        frame_timestamps = model_input.get("frame_timestamps_seconds")
+        frame_dimensions = model_input.get("frame_dimensions")
+        _require(
+            type(frame_count) is int
+            and frame_count >= 0
+            and isinstance(frame_timestamps, list)
+            and len(frame_timestamps) == frame_count
+            and isinstance(frame_dimensions, list)
+            and len(frame_dimensions) == frame_count
+            and all(
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                and float(value) >= 0.0
+                for value in frame_timestamps
+            )
+            and all(
+                isinstance(value, Mapping)
+                and set(value) == {"width", "height"}
+                and type(value.get("width")) is int
+                and value["width"] > 0
+                and type(value.get("height")) is int
+                and value["height"] > 0
+                for value in frame_dimensions
+            )
+            and type(model_input.get("frame_payload_bytes")) is int
+            and model_input["frame_payload_bytes"] >= 0,
+            "semantic frame metadata is invalid",
+        )
+        for name in (
+            "frame_sequence_sha256",
+            "digest_input_sha256",
+            "semantic_input_profile_sha256",
+        ):
+            value = model_input.get(name)
+            if value is not None:
+                _digest(value, name)
+        _require(
+            (
+                frame_count == 0
+                and model_input.get("frame_sequence_sha256") is None
+                and model_input.get("frame_payload_bytes") == 0
+            )
+            or (
+                frame_count > 0
+                and model_input.get("frame_sequence_sha256") is not None
+                and model_input.get("frame_payload_bytes") > 0
+            ),
+            "semantic frame sequence evidence is inconsistent",
+        )
+        window = model_input.get("temporal_window_fraction")
+        _require(
+            window is None
+            or (
+                isinstance(window, list)
+                and len(window) == 2
+                and all(
+                    not isinstance(value, bool)
+                    and isinstance(value, (int, float))
+                    and math.isfinite(float(value))
+                    for value in window
+                )
+                and 0.0 <= float(window[0]) < float(window[1]) <= 1.0
+            ),
+            "semantic temporal window is invalid",
+        )
+        profile_id = model_input.get("semantic_input_profile_id")
+        profile_verified = model_input.get("semantic_input_profile_verified")
+        _require(
+            type(profile_verified) is bool
+            and evidence.get("semantic_input_profile_verified")
+            is profile_verified
+            and (
+                (
+                    profile_verified is True
+                    and isinstance(profile_id, str)
+                    and _IDENTIFIER.fullmatch(profile_id) is not None
+                    and model_input.get("semantic_input_profile_sha256")
+                    is not None
+                )
+                or (
+                    profile_verified is False
+                    and profile_id is None
+                    and model_input.get("semantic_input_profile_sha256")
+                    is None
+                )
+            )
+            and model_input.get("direct_video_input") is False,
+            "semantic input profile evidence is invalid",
+        )
     _exact_fields(evidence.get("semantic"), _SEMANTIC_FIELDS, "semantic")
     _exact_fields(evidence.get("scoring"), _SCORING_FIELDS, "scoring")
 

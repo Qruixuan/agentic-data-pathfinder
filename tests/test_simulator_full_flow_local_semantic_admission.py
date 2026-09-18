@@ -263,8 +263,26 @@ class FullFlowLocalSemanticAdmissionTest(unittest.TestCase):
         self.assertTrue(all(
             row["required_runtime_adapter_ids"] == []
             and row["flowmesh_submission_authorized"] is True
+            and row["semantic_input_profile"]["direct_video_input"] is False
             for row in promoted
         ))
+        self.assertTrue(all(
+            row["semantic_input_profile"]["source_byte_selectivity_claimed"]
+            is (row["route_family"] == "indexed-raw")
+            for row in promoted
+        ))
+        raw_profiles = {
+            row["semantic_input_profile"]["profile_id"]
+            for row in promoted
+            if row["route_family"] == "raw"
+        }
+        indexed_profiles = {
+            row["semantic_input_profile"]["profile_id"]
+            for row in promoted
+            if row["route_family"] == "indexed-raw"
+        }
+        self.assertEqual({"raw-dense-uniform-24-v1"}, raw_profiles)
+        self.assertEqual({"indexed-middle-window-8-v1"}, indexed_profiles)
         self.assertEqual(
             (self.legacy / STAGES_NAME).read_bytes(),
             (output / STAGES_NAME).read_bytes(),
@@ -351,10 +369,17 @@ class FullFlowLocalSemanticAdmissionTest(unittest.TestCase):
             "scientific_claim_authorized",
             "upcloud_ready",
             "live_materialization_measured",
+            "indexed_source_byte_selectivity_claimed",
+            "direct_video_input_claimed",
         ):
             self.assertFalse(boundary[key])
         self.assertTrue(boundary["remote_n1_verifier_implemented"])
         inventory = json.loads((output / INVENTORY_NAME).read_text())
+        self.assertTrue(inventory["semantic_input_profiles_frozen"])
+        self.assertEqual(
+            64,
+            len(inventory["semantic_input_profile_source_sha256"]),
+        )
         verifier = inventory["n1_score_verifier"]
         self.assertEqual(
             "remote-n1-authenticated-verification",

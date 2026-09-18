@@ -17,6 +17,7 @@ from pathfinder.simulator.full_flow_semantic_route_runtime import (
     CacheLookupResult,
     ControlAdmission,
     ExactContentRange,
+    ExactTemporalFrameSelection,
     GenericSemanticRouteCoordinator,
     InMemoryRouteExecutionStore,
     IndexSelection,
@@ -49,6 +50,7 @@ PAYLOADS = {
     "multimodal_digest": b"a person opens the door, then walks outside",
     "sampled_frame_bundle": b"ustar-fixture-with-two-ordered-jpeg-frames",
 }
+INDEXED_BUNDLE = b"8frames"
 ORACLE_ID = "generic-route-oracle-v1"
 PUBLIC_SET_SHA = _sha(b"generic-route-public-task-set")
 
@@ -105,11 +107,13 @@ class FakeAdapters:
         omit_index_range: bool = False,
         unauthenticated_score: bool = False,
         substitute_transfer: bool = False,
+        temporal_projection: bool = False,
     ) -> None:
         self.cache_branch = cache_branch
         self.omit_index_range = omit_index_range
         self.unauthenticated_score = unauthenticated_score
         self.substitute_transfer = substitute_transfer
+        self.temporal_projection = temporal_projection
         self.calls: Counter[str] = Counter()
         self.events: list[tuple[str, str]] = []
         self.last_range_call: dict[str, Any] | None = None
@@ -143,17 +147,35 @@ class FakeAdapters:
                 if row["representation_id"] == "raw_video"
             )["representation_binding"]
             raw = PAYLOADS["raw_video"]
-            start, end = 3, 11
-            segment = ExactContentRange(
-                object_id=expected_object_id,
-                representation_id="raw_video",
-                object_catalog_version=identity["object_catalog_version"],
-                full_artifact_size_bytes=len(raw),
-                full_artifact_sha256=_sha(raw),
-                range_start=start,
-                range_end=end,
-                range_sha256=_sha(raw[start : end + 1]),
-            )
+            if self.temporal_projection:
+                segment = ExactTemporalFrameSelection(
+                    object_id=expected_object_id,
+                    representation_id="raw_video",
+                    object_catalog_version=identity["object_catalog_version"],
+                    full_artifact_size_bytes=len(raw),
+                    full_artifact_sha256=_sha(raw),
+                    selected_representation_id=(
+                        "indexed_temporal_frame_bundle"
+                    ),
+                    selected_artifact_size_bytes=len(INDEXED_BUNDLE),
+                    selected_artifact_sha256=_sha(INDEXED_BUNDLE),
+                    frame_count=8,
+                    temporal_start_fraction=0.25,
+                    temporal_end_fraction=0.75,
+                    selection_policy_sha256="c" * 64,
+                )
+            else:
+                start, end = 3, 11
+                segment = ExactContentRange(
+                    object_id=expected_object_id,
+                    representation_id="raw_video",
+                    object_catalog_version=identity["object_catalog_version"],
+                    full_artifact_size_bytes=len(raw),
+                    full_artifact_sha256=_sha(raw),
+                    range_start=start,
+                    range_end=end,
+                    range_sha256=_sha(raw[start : end + 1]),
+                )
         commitment = {
             "selected_object_id": expected_object_id,
             "segment": None if segment is None else segment.to_dict(),
@@ -182,6 +204,25 @@ class FakeAdapters:
             source_identity=identity,
             payload=payload,
             telemetry=self._metric(read=len(payload)),
+        )
+
+    def fetch_selected(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        source_identity: ArtifactIdentity,
+        selection: ExactTemporalFrameSelection,
+    ) -> ArtifactAccess:
+        del run_id, trial
+        self.calls["fetch-selected-N3"] += 1
+        self.events.append(("fetch-selected", stage["stage_key"]))
+        return ArtifactAccess(
+            source_identity=source_identity,
+            payload=INDEXED_BUNDLE,
+            segment=selection,
+            telemetry=self._metric(read=len(INDEXED_BUNDLE)),
         )
 
     def build_request(
@@ -547,6 +588,25 @@ class FullFlowSemanticRouteRuntimeTest(unittest.TestCase):
         )
         self.assertEqual(evidence["model_input"]["mode"], "raw-prepared-frames")
         self.assertTrue(evidence["n2_exact_range_required_for_indexed_raw"])
+
+    def test_indexed_raw_fetches_real_n3_projection_without_raw_range(self) -> None:
+        trial, stages = _bound_case(
+            self.trials,
+            self.stages,
+            route_family="indexed-raw",
+            executor_node_id="N7",
+        )
+        fake = FakeAdapters(temporal_projection=True)
+        evidence = _coordinator(fake).execute(
+            run_id="generic-indexed-projection-run-v1",
+            bound_trial=trial,
+            bound_stages=stages,
+        )
+        self.assertEqual(1, fake.calls["query"])
+        self.assertEqual(1, fake.calls["fetch-selected-N3"])
+        self.assertEqual(0, fake.calls["range-request"])
+        self.assertEqual(0, fake.calls["range-fetch"])
+        self.assertEqual("raw-prepared-frames", evidence["model_input"]["mode"])
 
     def test_indexed_raw_fails_closed_without_content_bound_range(self) -> None:
         trial, stages = _bound_case(

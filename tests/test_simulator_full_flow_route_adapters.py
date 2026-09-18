@@ -37,6 +37,7 @@ from pathfinder.simulator.full_flow_semantic_route_runtime import (
     ArtifactAccess,
     ArtifactIdentity,
     ExactContentRange,
+    ExactTemporalFrameSelection,
     IndexSelection,
     ProvisioningReference,
     SemanticInferenceResult,
@@ -481,6 +482,58 @@ class FullFlowRouteAdaptersTest(unittest.TestCase):
         self.assertEqual("origin-warm", n4.requests[0].binding["location"])
         self.assertEqual(_sha(RAW), raw.payload_sha256)
         self.assertEqual(_sha(DIGEST), digest.payload_sha256)
+
+    def test_data_agent_adapter_fetches_real_n3_temporal_projection(self) -> None:
+        n3 = _DataAgentClient({
+            "raw_video": RAW,
+            "indexed_temporal_frame_bundle": BUNDLE,
+        })
+        n4 = _DataAgentClient({"multimodal_digest": DIGEST})
+        factory = BoundDataAgentAccessRequestFactory(
+            source_locations={"N3": "origin-cold", "N4": "origin-warm"},
+            plan_ids=StaticDataAgentPlanIdResolver({
+                ("N3", "indexed_temporal_frame_bundle"): "projection-plan-v1",
+            }),
+        )
+        adapter = DataAgentArtifactSourceAdapter(
+            clients={"N3": n3, "N4": n4},
+            request_factory=factory,
+            allowed_media_types={
+                "indexed_temporal_frame_bundle": ("application/x-tar",),
+            },
+        )
+        source = _identity("raw_video", RAW)
+        selection = ExactTemporalFrameSelection(
+            object_id=OBJECT,
+            representation_id="raw_video",
+            object_catalog_version=CATALOG,
+            full_artifact_size_bytes=len(RAW),
+            full_artifact_sha256=_sha(RAW),
+            selected_representation_id="indexed_temporal_frame_bundle",
+            selected_artifact_size_bytes=len(BUNDLE),
+            selected_artifact_sha256=_sha(BUNDLE),
+            frame_count=8,
+            temporal_start_fraction=0.25,
+            temporal_end_fraction=0.75,
+            selection_policy_sha256="c" * 64,
+        )
+        result = adapter.fetch_selected(
+            run_id="run-v1",
+            trial=_trial(),
+            stage={"stage_index": 2, "stage_key": "access-indexed"},
+            source_identity=source,
+            selection=selection,
+        )
+        self.assertEqual(BUNDLE, result.payload)
+        self.assertIs(source, result.source_identity)
+        self.assertIs(selection, result.segment)
+        self.assertEqual(len(BUNDLE), result.telemetry.bytes_read)
+        self.assertEqual(1, len(n3.requests))
+        self.assertEqual(
+            "indexed_temporal_frame_bundle",
+            n3.requests[0].representation_id,
+        )
+        self.assertNotEqual("raw_video", n3.requests[0].representation_id)
 
     def test_cache_adapter_preserves_miss_insert_then_paired_hit_lineage(self) -> None:
         clients = {

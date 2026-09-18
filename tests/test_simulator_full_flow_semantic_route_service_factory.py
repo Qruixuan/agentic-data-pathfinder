@@ -24,7 +24,14 @@ from pathfinder.simulator.full_flow_semantic_route_service_factory import (
     FullFlowSemanticRouteServiceFactoryError,
     RuntimeSemanticServiceInputs,
     SQLiteRouteExecutionStore,
+    _data_agent_plan_catalog,
     assemble_full_flow_semantic_route_service,
+)
+from pathfinder.simulator.full_flow_semantic_route_runtime import (
+    ArtifactIdentity,
+)
+from pathfinder.simulator.n3_indexed_data_plane import (
+    INDEXED_REPRESENTATION_ID,
 )
 
 
@@ -398,6 +405,33 @@ class SemanticRouteServiceFactoryTests(unittest.TestCase):
         self.assertNotIn(str(state), serialized)
         self.assertNotIn("http://", repr(runtime))
         self.assertNotIn("runtime-secret", repr(runtime))
+
+    def test_indexed_trial_binds_private_n3_projection_plan(self) -> None:
+        path = self.paths["n3"] / "raw-cold-data-plane.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["objects"].append({
+            "object_id": "object-1",
+            "representation_id": INDEXED_REPRESENTATION_ID,
+            "plan_ids": ["D0"],
+        })
+        path.write_text(json.dumps(document), encoding="utf-8")
+        trial = {**self.trial, "route_family": "indexed-raw"}
+        catalog = _data_agent_plan_catalog(self._sources(), [trial])
+        selected = ArtifactIdentity(
+            object_id="object-1",
+            representation_id=INDEXED_REPRESENTATION_ID,
+            artifact_sha256=HEX_A,
+            artifact_size_bytes=123,
+            object_catalog_version="catalog-v1",
+        )
+        self.assertEqual(
+            "D0",
+            catalog.resolve(
+                source_node_id="N3",
+                trial=trial,
+                identity=selected,
+            ),
+        )
 
     def test_source_contract_cannot_accept_private_n1_package(self) -> None:
         names = {value.name for value in fields(FrozenSemanticRouteServiceSources)}

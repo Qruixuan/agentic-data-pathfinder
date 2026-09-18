@@ -93,6 +93,8 @@ class FullFlowCliTest(unittest.TestCase):
             "serve-simulator-n2-index",
             "build-simulator-n3-raw-data-plane",
             "verify-simulator-n3-raw-data-plane",
+            "build-simulator-n3-indexed-data-plane",
+            "verify-simulator-n3-indexed-data-plane",
             "build-simulator-n4-derived-data-plane",
             "verify-simulator-n4-derived-data-plane",
             "serve-simulator-full-flow-cache",
@@ -1818,6 +1820,58 @@ class FullFlowCliTest(unittest.TestCase):
         self.assertEqual(0, status)
         self.assertEqual("VERIFIED_RAW_COLD_DATA_PLANE", payload["status"])
         verify.assert_called_once_with(Path("n3-raw-data"))
+
+    def test_n3_indexed_data_plane_build_and_verify_are_wired_offline(
+        self,
+    ) -> None:
+        with mock.patch(
+            "pathfinder.simulator.n3_indexed_data_plane."
+            "build_n3_indexed_data_plane_package",
+            return_value={"status": "FROZEN_N3_INDEXED_DATA_PLANE"},
+        ) as build:
+            status, payload = self._invoke([
+                "build-simulator-n3-indexed-data-plane",
+                "--source-raw-package-dir",
+                "n3-raw-data",
+                "--package-id",
+                "n3-indexed-v1",
+                "--frame-count",
+                "8",
+                "--jpeg-max-dimension",
+                "640",
+                "--temporal-start-fraction",
+                "0.2",
+                "--temporal-end-fraction",
+                "0.8",
+                "--output-dir",
+                "n3-indexed-data",
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("FROZEN_N3_INDEXED_DATA_PLANE", payload["status"])
+        build.assert_called_once()
+        positional, keywords = build.call_args
+        self.assertEqual((Path("n3-raw-data"),), positional)
+        self.assertEqual(Path("n3-indexed-data"), keywords["output_dir"])
+        self.assertEqual("n3-indexed-v1", keywords["package_id"])
+        policy = keywords["policy"]
+        self.assertEqual(8, policy.frame_count)
+        self.assertEqual(640, policy.jpeg_max_dimension)
+        self.assertEqual(0.2, policy.temporal_start_fraction)
+        self.assertEqual(0.8, policy.temporal_end_fraction)
+
+        with mock.patch(
+            "pathfinder.simulator.n3_indexed_data_plane."
+            "verify_n3_indexed_data_plane_package",
+            return_value={"status": "VERIFIED_N3_INDEXED_DATA_PLANE"},
+        ) as verify:
+            status, payload = self._invoke([
+                "verify-simulator-n3-indexed-data-plane",
+                "--output-dir",
+                "n3-indexed-data",
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("VERIFIED_N3_INDEXED_DATA_PLANE", payload["status"])
+        verify.assert_called_once_with(Path("n3-indexed-data"))
 
     def test_service_bootstrap_freeze_and_verify_are_wired_offline(self) -> None:
         with mock.patch(

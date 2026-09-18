@@ -365,11 +365,24 @@ def sample_video(
     *,
     frame_count: int,
     jpeg_max_dimension: int,
+    temporal_start_fraction: float = 0.0,
+    temporal_end_fraction: float = 1.0,
 ) -> tuple[list[SampledImage], float]:
     if frame_count <= 0:
         raise VideoPreparationError("frame_count must be positive")
     if jpeg_max_dimension <= 0:
         raise VideoPreparationError("jpeg_max_dimension must be positive")
+    if (
+        isinstance(temporal_start_fraction, bool)
+        or isinstance(temporal_end_fraction, bool)
+        or not isinstance(temporal_start_fraction, (int, float))
+        or not isinstance(temporal_end_fraction, (int, float))
+        or not math.isfinite(float(temporal_start_fraction))
+        or not math.isfinite(float(temporal_end_fraction))
+        or not 0.0 <= float(temporal_start_fraction)
+        < float(temporal_end_fraction) <= 1.0
+    ):
+        raise VideoPreparationError("temporal sampling window is invalid")
     av = _load_video_dependencies()
     with av.open(str(path)) as container:
         streams = list(container.streams.video)
@@ -389,8 +402,12 @@ def sample_video(
         if not math.isfinite(duration) or duration <= 0:
             raise VideoPreparationError(f"{path.name} has invalid duration")
 
+        start = duration * float(temporal_start_fraction)
+        span = duration * (
+            float(temporal_end_fraction) - float(temporal_start_fraction)
+        )
         targets = [
-            duration * (index + 0.5) / frame_count
+            start + span * (index + 0.5) / frame_count
             for index in range(frame_count)
         ]
         sampled: list[SampledImage] = []

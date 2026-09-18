@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -52,6 +53,11 @@ from .full_flow_semantic_execution_admission import (
     BOUND_STAGE_SCHEMA_VERSION,
     BOUND_TRIAL_SCHEMA_VERSION,
     verify_full_flow_semantic_execution_admission,
+)
+from .full_flow_semantic_input_profiles import (
+    build_semantic_input_profile,
+    model_input_frontier_representation_ids,
+    validate_semantic_input_profile,
 )
 from pathfinder.distributed.scoring import (
     MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
@@ -488,9 +494,12 @@ def _evidence_reports(
     _require(
         ranges.get("status") == "VERIFIED"
         and ranges.get("partial_mp4_ranges_supported") is False
-        and ranges.get("index_selectivity_claimed") is False
-        and ranges.get("byte_reduction_claimed") is False,
-        "exact full-object fallback catalog is incomplete",
+        and type(ranges.get("index_selectivity_claimed")) is bool
+        and ranges.get("byte_reduction_claimed")
+        is ranges.get("index_selectivity_claimed")
+        and ranges.get("source_side_projection_executed")
+        is ranges.get("index_selectivity_claimed"),
+        "exact source-selection catalog is incomplete",
     )
     _require(
         provisioning.get("status") == "VERIFIED"
@@ -669,6 +678,12 @@ def _documents(
     )
     _artifact_coverage(source_trials, range_document, provisioning_document)
 
+    stages_by_trial: dict[str, list[dict[str, Any]]] = {}
+    for stage in source_stages:
+        trial_key = stage.get("trial_key")
+        if isinstance(trial_key, str):
+            stages_by_trial.setdefault(trial_key, []).append(stage)
+
     promoted_trials: list[dict[str, Any]] = []
     for source in source_trials:
         _require(
@@ -682,6 +697,14 @@ def _documents(
             "legacy-MCQ mode requires an option-ID scoring rule",
         )
         promoted = dict(source)
+        trial_key = str(source["trial_key"])
+        frontier = model_input_frontier_representation_ids(
+            stages_by_trial.get(trial_key, [])
+        )
+        promoted["semantic_input_profile"] = build_semantic_input_profile(
+            route_family=str(source["route_family"]),
+            model_input_representation_ids=frontier,
+        )
         promoted["required_runtime_adapter_ids"] = []
         promoted["flowmesh_submission_authorized"] = True
         _require(
@@ -708,6 +731,9 @@ def _documents(
         promoted["flowmesh_submission_authorized"] = True
         promoted["semantic_execution_performed"] = False
         promoted["runtime_gate_state"] = "REQUIRED_NOT_EXECUTED"
+        promoted["semantic_input_profile"] = by_trial[str(trial_key)][
+            "semantic_input_profile"
+        ]
         promoted_smokes.append(promoted)
     _require(
         len(promoted_smokes) == len(_SMOKE_CASES)
@@ -724,6 +750,10 @@ def _documents(
         "artifact_availability_preflight_verified": True,
         "exact_full_object_range_catalog_verified": True,
         "preprovisioned_n5_to_n4_catalog_verified": True,
+        "semantic_input_profiles_frozen": True,
+        "semantic_input_profile_source_sha256": _sha256(
+            Path(inspect.getsourcefile(build_semantic_input_profile)).read_bytes()
+        ),
         "live_n5_materialization_executed": False,
         "live_n5_materialization_cost_measured": False,
         "n1_score_verifier": {
@@ -836,6 +866,10 @@ def _documents(
             ],
         },
         "matrix_dimensions": legacy_admission["matrix_dimensions"],
+        "semantic_input_profile_trial_counts": dict(sorted(Counter(
+            row["semantic_input_profile"]["profile_id"]
+            for row in promoted_trials
+        ).items())),
         "trial_template_flowmesh_submission_authorized": True,
         "representative_smoke_gate": {
             "schema_version": SMOKE_GATE_SCHEMA_VERSION,
@@ -857,6 +891,8 @@ def _documents(
             "upcloud_ready": False,
             "remote_n1_verifier_implemented": True,
             "live_materialization_measured": False,
+            "indexed_source_byte_selectivity_claimed": False,
+            "direct_video_input_claimed": False,
         },
         "output_sha256": {
             TRIALS_NAME: _sha256(trial_bytes),
@@ -979,12 +1015,33 @@ def _verify_files(root: Path) -> dict[str, Any]:
             ),
             "promoted trial bound-stage digest changed",
         )
+        frontier = model_input_frontier_representation_ids(
+            [stage_by_key[key] for key in keys]
+        )
+        validate_semantic_input_profile(
+            trial.get("semantic_input_profile", {}),
+            route_family=str(trial.get("route_family")),
+            model_input_representation_ids=frontier,
+        )
+    profile_counts = dict(sorted(Counter(
+        row["semantic_input_profile"]["profile_id"] for row in trials
+    ).items()))
+    _require(
+        admission.get("semantic_input_profile_trial_counts") == profile_counts,
+        "semantic input profile trial counts changed",
+    )
     _require(
         len(smokes) == len(_SMOKE_CASES)
         and {row.get("case_id") for row in smokes} == _SMOKE_CASES
         and all(
             row.get("runtime_gate_state") == "REQUIRED_NOT_EXECUTED"
             and row.get("semantic_execution_performed") is False
+            and row.get("semantic_input_profile")
+            == next(
+                trial["semantic_input_profile"]
+                for trial in trials
+                if trial["trial_key"] == row.get("trial_key")
+            )
             for row in smokes
         ),
         "representative smoke runtime gate changed",
@@ -1008,6 +1065,11 @@ def _verify_files(root: Path) -> dict[str, Any]:
         and boundary.get("upcloud_ready") is False
         and boundary.get("remote_n1_verifier_implemented") is True,
         "local-only claim boundary was weakened",
+    )
+    _require(
+        boundary.get("indexed_source_byte_selectivity_claimed") is False
+        and boundary.get("direct_video_input_claimed") is False,
+        "semantic input claim boundary was weakened",
     )
     _identifier(public_oracle.get("oracle_id"), "public oracle_id")
     _digest(
@@ -1038,6 +1100,11 @@ def _verify_files(root: Path) -> dict[str, Any]:
         and inventory.get("semantics_mode") == LOCAL_SEMANTICS_MODE
         and inventory.get("all_legacy_runtime_adapter_requirements_satisfied_for_mode")
         is True
+        and inventory.get("semantic_input_profiles_frozen") is True
+        and inventory.get("semantic_input_profile_source_sha256")
+        == _sha256(
+            Path(inspect.getsourcefile(build_semantic_input_profile)).read_bytes()
+        )
         and inventory.get("n1_score_verifier", {}).get(
             "remote_n1_verifier_implemented"
         )

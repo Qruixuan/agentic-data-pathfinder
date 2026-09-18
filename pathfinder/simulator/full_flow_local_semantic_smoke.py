@@ -451,6 +451,107 @@ def _result_row(
     return row
 
 
+def _semantic_input_invariants(
+    inputs: FrozenLocalSemanticExecutionInputs,
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    profile_count = sum(
+        "semantic_input_profile" in trial for trial in inputs.bound_trials
+    )
+    _require(
+        profile_count in {0, len(inputs.bound_trials)},
+        "semantic input profiles are only partially frozen",
+    )
+    if profile_count == 0:
+        return {
+            "semantic_input_profiles_verified": False,
+            "execution_location_semantic_invariance_verified": False,
+            "cache_state_semantic_invariance_verified": False,
+            "route_family_semantic_separation_verified": False,
+            "semantic_input_content_sha256_by_case": {},
+        }
+
+    content_by_case: dict[str, str] = {}
+    profile_by_case: dict[str, str] = {}
+    for row in rows:
+        case_id = str(row.get("case_id"))
+        result = row.get("result")
+        evidence = (
+            result.get("semantic_route_evidence")
+            if isinstance(result, Mapping)
+            else None
+        )
+        model_input = (
+            evidence.get("model_input")
+            if isinstance(evidence, Mapping)
+            else None
+        )
+        _require(
+            isinstance(model_input, Mapping)
+            and evidence.get("semantic_input_profile_verified") is True
+            and model_input.get("semantic_input_profile_verified") is True,
+            f"semantic input profile evidence is missing for {case_id}",
+        )
+        content_by_case[case_id] = _digest(
+            model_input.get("semantic_content_sha256"),
+            f"{case_id} semantic_content_sha256",
+        )
+        profile_by_case[case_id] = _digest(
+            model_input.get("semantic_input_profile_sha256"),
+            f"{case_id} semantic_input_profile_sha256",
+        )
+    _require(
+        set(content_by_case) == set(_CASE_ORDER),
+        "semantic input evidence does not cover every smoke case",
+    )
+
+    location_pairs = (
+        ("n7-raw", "n8-raw"),
+        ("n7-indexed-raw", "n8-indexed-raw"),
+        ("n7-remote-derived", "n8-remote-derived"),
+        ("n7-cache-miss", "n8-cache-miss"),
+        ("n7-cache-hit", "n8-cache-hit"),
+    )
+    _require(
+        all(
+            content_by_case[left] == content_by_case[right]
+            and profile_by_case[left] == profile_by_case[right]
+            for left, right in location_pairs
+        ),
+        "N7 and N8 changed semantic input content",
+    )
+    cache_pairs = (
+        ("n7-cache-miss", "n7-cache-hit"),
+        ("n8-cache-miss", "n8-cache-hit"),
+    )
+    _require(
+        all(
+            content_by_case[left] == content_by_case[right]
+            and profile_by_case[left] == profile_by_case[right]
+            for left, right in cache_pairs
+        ),
+        "cache hit and miss changed semantic input content",
+    )
+    representatives = {
+        content_by_case["n7-raw"],
+        content_by_case["n7-indexed-raw"],
+        content_by_case["n7-remote-derived"],
+    }
+    _require(
+        len(representatives) == 3,
+        "raw, indexed, and derived routes collapsed to one semantic input",
+    )
+    return {
+        "semantic_input_profiles_verified": True,
+        "execution_location_semantic_invariance_verified": True,
+        "cache_state_semantic_invariance_verified": True,
+        "route_family_semantic_separation_verified": True,
+        "semantic_input_content_sha256_by_case": dict(sorted(
+            content_by_case.items()
+        )),
+    }
+
+
 def _receipt(
     *,
     inputs: FrozenLocalSemanticExecutionInputs,
@@ -473,6 +574,7 @@ def _receipt(
         if not is_one_case
         else one_case_root / ONE_CASE_TRIALS_NAME
     )
+    semantic_invariants = _semantic_input_invariants(inputs, rows)
     document: dict[str, Any] = {
         "schema_version": (
             SMOKE_RECEIPT_SCHEMA_VERSION
@@ -521,6 +623,7 @@ def _receipt(
         "all_telemetry_complete": True,
         "all_flowmesh_transport": True,
         "all_llm_calls_completed": True,
+        **semantic_invariants,
         "task_success_required_for_gate": False,
         "full_matrix_runtime_gate_satisfied": not is_one_case,
         "full_matrix_submission_authorized": not is_one_case,
@@ -1021,6 +1124,18 @@ def verify_full_flow_local_semantic_smokes(
         "n4_source_binding_checked": True,
         "n4_publication_companion_excluded": True,
         "n4_authorized_compose_profile": "serve-frozen",
+        "semantic_input_profiles_verified": receipt[
+            "semantic_input_profiles_verified"
+        ],
+        "execution_location_semantic_invariance_verified": receipt[
+            "execution_location_semantic_invariance_verified"
+        ],
+        "cache_state_semantic_invariance_verified": receipt[
+            "cache_state_semantic_invariance_verified"
+        ],
+        "route_family_semantic_separation_verified": receipt[
+            "route_family_semantic_separation_verified"
+        ],
         "task_success_required_for_gate": False,
         "w4_retrieval_quality_evaluated": False,
         "credentials_recorded": False,

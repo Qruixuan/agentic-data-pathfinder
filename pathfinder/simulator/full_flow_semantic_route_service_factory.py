@@ -41,6 +41,7 @@ from ..integrations.flowmesh.semantic_matrix_trial import (
 )
 from .full_flow_cache import HttpFullFlowArtifactCacheClient
 from .full_flow_exact_range_catalog import ExactFullObjectRangeCatalog
+from .n3_indexed_data_plane import INDEXED_REPRESENTATION_ID
 from .full_flow_index_query_plan_catalog import (
     CHECKSUMS_NAME,
     INDEX_QUERY_PLAN_CATALOG_NAME,
@@ -587,6 +588,8 @@ class PyAVRawVideoFrameSampler:
         source_payload_sha256: str,
         frame_count: int,
         jpeg_max_dimension: int,
+        temporal_start_fraction: float,
+        temporal_end_fraction: float,
     ) -> Sequence[N6SampledFrame]:
         _identifier(object_id, "raw sampler object_id")
         _require(isinstance(payload, bytes) and bool(payload), "raw payload is empty")
@@ -612,6 +615,8 @@ class PyAVRawVideoFrameSampler:
                 Path(raw_path),
                 frame_count=frame_count,
                 jpeg_max_dimension=jpeg_max_dimension,
+                temporal_start_fraction=temporal_start_fraction,
+                temporal_end_fraction=temporal_end_fraction,
             )
             return tuple(
                 N6SampledFrame(
@@ -964,6 +969,35 @@ def _data_agent_plan_catalog(
             )
             key = (trial_key, node, object_id, representation)
             bindings[key] = design_id
+        if trial.get("route_family") == "indexed-raw":
+            raw_identities = [
+                value
+                for value in identities
+                if isinstance(value, Mapping)
+                and value.get("representation_id") == "raw_video"
+            ]
+            _require(
+                len(raw_identities) == 1,
+                "indexed trial does not bind one raw object",
+            )
+            object_id = _identifier(
+                raw_identities[0].get("artifact_object_id"),
+                "indexed artifact_object_id",
+            )
+            selected = n3.get((object_id, INDEXED_REPRESENTATION_ID))
+            if selected is not None:
+                _require(
+                    design_id in selected["plan_ids"],
+                    "N3 projection has no exact design plan binding",
+                )
+                bindings[
+                    (
+                        trial_key,
+                        "N3",
+                        object_id,
+                        INDEXED_REPRESENTATION_ID,
+                    )
+                ] = design_id
     return FrozenDataAgentPlanIdCatalog(bindings)
 
 
@@ -1155,6 +1189,7 @@ def assemble_full_flow_semantic_route_service(
         allowed_media_types={
             "raw_video": ("video/mp4",),
             "sampled_frame_bundle": (FRAME_BUNDLE_MEDIA_TYPE,),
+            INDEXED_REPRESENTATION_ID: (FRAME_BUNDLE_MEDIA_TYPE,),
         },
     )
     cache_clients = {
