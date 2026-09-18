@@ -30,6 +30,8 @@ COMMAND_NAMES = frozenset({
     "promote-simulator-full-flow-local-semantic-execution-admission",
     "verify-simulator-full-flow-local-semantic-execution-admission",
     "verify-simulator-full-flow-local-semantic-runtime-package",
+    "freeze-simulator-full-flow-one-case-plan",
+    "verify-simulator-full-flow-one-case-plan",
     "build-simulator-full-flow-index-query-plan-catalog",
     "verify-simulator-full-flow-index-query-plan-catalog",
     "freeze-simulator-full-flow-n4-preprovisioned-serve-gate",
@@ -193,6 +195,28 @@ def register_full_flow_semantic_commands(
     _add_required_path(local_semantic_runtime_verify, "--admission-dir")
     _add_compact(local_semantic_runtime_verify)
 
+    one_case_freeze = subcommands.add_parser(
+        "freeze-simulator-full-flow-one-case-plan",
+        help=(
+            "freeze one public workload across the ten representative "
+            "physical paths without executing it"
+        ),
+    )
+    _add_required_path(one_case_freeze, "--local-semantic-admission-dir")
+    one_case_freeze.add_argument("--case-id", required=True)
+    one_case_freeze.add_argument("--workload-id", required=True)
+    one_case_freeze.add_argument("--safe-design-id", default="D0")
+    _add_required_path(one_case_freeze, "--output-dir")
+    _add_compact(one_case_freeze)
+
+    one_case_verify = subcommands.add_parser(
+        "verify-simulator-full-flow-one-case-plan",
+        help="verify a one-case plan against its public source admission",
+    )
+    _add_required_path(one_case_verify, "--plan-dir")
+    _add_required_path(one_case_verify, "--local-semantic-admission-dir")
+    _add_compact(one_case_verify)
+
     index_query_plan_build = subcommands.add_parser(
         "build-simulator-full-flow-index-query-plan-catalog",
         help="freeze visible N2 query plans for indexed semantic trials",
@@ -330,6 +354,9 @@ def register_full_flow_semantic_commands(
         include_shared_sources=True,
     )
     local_semantic_smoke_run.add_argument("--run-id", required=True)
+    local_semantic_smoke_run.add_argument(
+        "--one-case-plan-dir", type=Path
+    )
     _add_required_path(local_semantic_smoke_run, "--output-dir")
     local_semantic_smoke_run.add_argument("--flowmesh-base-url")
     local_semantic_smoke_run.add_argument(
@@ -345,6 +372,9 @@ def register_full_flow_semantic_commands(
         help="verify the ten-smoke receipt, N4 gate, and frozen sources",
     )
     _add_required_path(local_semantic_smoke_verify, "--smoke-dir")
+    local_semantic_smoke_verify.add_argument(
+        "--one-case-plan-dir", type=Path
+    )
     _add_required_path(local_semantic_smoke_verify, "--local-semantic-admission-dir")
     add_n4_serve_gate_sources(
         local_semantic_smoke_verify,
@@ -373,6 +403,7 @@ def register_full_flow_semantic_commands(
     )
     add_multi_host_semantic_smoke_sources(semantic_smoke_run)
     semantic_smoke_run.add_argument("--run-id", required=True)
+    semantic_smoke_run.add_argument("--one-case-plan-dir", type=Path)
     _add_required_path(semantic_smoke_run, "--output-dir")
     semantic_smoke_run.add_argument("--flowmesh-base-url")
     semantic_smoke_run.add_argument("--task-timeout", type=int, default=900)
@@ -388,6 +419,7 @@ def register_full_flow_semantic_commands(
         ),
     )
     _add_required_path(semantic_smoke_verify, "--smoke-dir")
+    semantic_smoke_verify.add_argument("--one-case-plan-dir", type=Path)
     add_multi_host_semantic_smoke_sources(semantic_smoke_verify)
     _add_compact(semantic_smoke_verify)
 
@@ -681,6 +713,31 @@ def dispatch_full_flow_semantic_command(
             args.admission_dir
         )
         return print_payload(payload, compact=args.compact)
+    if args.command == "freeze-simulator-full-flow-one-case-plan":
+        from ..simulator.full_flow_one_case import (
+            freeze_full_flow_one_case_plan,
+        )
+
+        payload = freeze_full_flow_one_case_plan(
+            args.local_semantic_admission_dir,
+            case_id=args.case_id,
+            workload_id=args.workload_id,
+            safe_design_id=args.safe_design_id,
+            output_dir=args.output_dir,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "verify-simulator-full-flow-one-case-plan":
+        from ..simulator.full_flow_one_case import (
+            verify_full_flow_one_case_plan,
+        )
+
+        payload = verify_full_flow_one_case_plan(
+            args.plan_dir,
+            local_semantic_admission_dir=(
+                args.local_semantic_admission_dir
+            ),
+        )
+        return print_payload(payload, compact=args.compact)
     if (
         args.command
         == "build-simulator-full-flow-index-query-plan-catalog"
@@ -822,6 +879,11 @@ def dispatch_full_flow_semantic_command(
                 executor=executor,
                 output_dir=args.output_dir,
                 n4_live_gate_sources=n4_live_gate_sources,
+                **(
+                    {}
+                    if args.one_case_plan_dir is None
+                    else {"one_case_plan_dir": args.one_case_plan_dir}
+                ),
             )
         return print_payload(payload, compact=args.compact)
     if args.command == "verify-simulator-full-flow-local-semantic-smokes":
@@ -848,6 +910,11 @@ def dispatch_full_flow_semantic_command(
             artifact_binding_dir=args.artifact_binding_dir,
             n4_package_dir=args.n4_package_dir,
             n4_live_gate_sources=n4_live_gate_sources,
+            **(
+                {}
+                if args.one_case_plan_dir is None
+                else {"one_case_plan_dir": args.one_case_plan_dir}
+            ),
         )
         return print_payload(payload, compact=args.compact)
     if args.command == "run-simulator-full-flow-semantic-smokes":
@@ -877,6 +944,11 @@ def dispatch_full_flow_semantic_command(
                 executor=executor,
                 output_dir=args.output_dir,
                 n4_live_gate_sources=n4_live_gate_sources,
+                **(
+                    {}
+                    if args.one_case_plan_dir is None
+                    else {"one_case_plan_dir": args.one_case_plan_dir}
+                ),
             )
         return print_payload(payload, compact=args.compact)
     if args.command == "verify-simulator-full-flow-semantic-smokes":
@@ -897,6 +969,11 @@ def dispatch_full_flow_semantic_command(
             container_plan_dir=args.container_plan_dir,
             artifact_binding_dir=args.artifact_binding_dir,
             n4_live_gate_sources=n4_live_gate_sources,
+            **(
+                {}
+                if args.one_case_plan_dir is None
+                else {"one_case_plan_dir": args.one_case_plan_dir}
+            ),
         )
         return print_payload(payload, compact=args.compact)
     if args.command == "run-simulator-full-flow-local-semantic-matrix":

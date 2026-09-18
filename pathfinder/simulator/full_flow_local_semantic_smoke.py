@@ -46,6 +46,13 @@ from .full_flow_n4_live_serve_gate import (
     GATE_NAME as N4_LIVE_GATE_NAME,
     verify_full_flow_n4_live_serve_gate,
 )
+from .full_flow_one_case import (
+    CHECKSUMS_NAME as ONE_CASE_CHECKSUMS_NAME,
+    PLAN_NAME as ONE_CASE_PLAN_NAME,
+    TRIALS_NAME as ONE_CASE_TRIALS_NAME,
+    FrozenFullFlowOneCasePlan,
+    load_full_flow_one_case_plan,
+)
 
 
 SMOKE_RECEIPT_SCHEMA_VERSION = (
@@ -54,12 +61,14 @@ SMOKE_RECEIPT_SCHEMA_VERSION = (
 SMOKE_RESULT_SCHEMA_VERSION = (
     "pathfinder.full-flow-local-semantic-smoke-result/v1alpha1"
 )
+ONE_CASE_RECEIPT_SCHEMA_VERSION = (
+    "pathfinder.full-flow-one-case-run-receipt/v1alpha1"
+)
 RECEIPT_NAME = "local-semantic-smoke-receipt.json"
 RESULTS_NAME = "local-semantic-smoke-results.jsonl"
 CHECKSUMS_NAME = "SHA256SUMS"
 
 _CONTENT = {RECEIPT_NAME, RESULTS_NAME}
-_FILES = _CONTENT | {CHECKSUMS_NAME}
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,255}\Z")
 _CASE_ORDER = (
@@ -343,10 +352,24 @@ def _strict_jsonl(path: Path, name: str) -> list[dict[str, Any]]:
 
 def _smoke_rows(
     inputs: FrozenLocalSemanticExecutionInputs,
+    one_case: FrozenFullFlowOneCasePlan | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    if one_case is None:
+        selection = inputs.representative_smokes
+    else:
+        selection = tuple({
+            "case_id": row.get("case_id"),
+            "trial_key": row.get("trial_key"),
+            "expected_executor_node_id": row.get("executor_node_id"),
+            "expected_cache_branch": row.get("expected_cache_branch"),
+            "prerequisite_trial_key": row.get("prerequisite_trial_key"),
+            "flowmesh_submission_authorized": True,
+            "runtime_gate_state": "REQUIRED_NOT_EXECUTED",
+            "semantic_execution_performed": False,
+        } for row in one_case.trials)
     by_case = {
         str(row.get("case_id")): dict(row)
-        for row in inputs.representative_smokes
+        for row in selection
     }
     _require(
         set(by_case) == set(_CASE_ORDER) and len(by_case) == len(_CASE_ORDER),
@@ -365,6 +388,10 @@ def _smoke_rows(
         trial = by_trial[trial_key]
         _require(
             smoke.get("flowmesh_submission_authorized") is True
+            and (
+                one_case is None
+                or trial.get("flowmesh_submission_authorized") is True
+            )
             and smoke.get("runtime_gate_state") == "REQUIRED_NOT_EXECUTED"
             and smoke.get("semantic_execution_performed") is False,
             "smoke authorization contract changed",
@@ -432,10 +459,26 @@ def _receipt(
     n4_gate: Mapping[str, Any],
     run_id: str,
     rows: list[Mapping[str, Any]],
+    one_case_root: Path | None = None,
+    one_case: FrozenFullFlowOneCasePlan | None = None,
 ) -> dict[str, Any]:
     admission = inputs.admission
+    is_one_case = one_case_root is not None and one_case is not None
+    _require(
+        (one_case_root is None) is (one_case is None),
+        "one-case receipt inputs are incomplete",
+    )
+    selection_path = (
+        source_root / SOURCE_SMOKES_NAME
+        if not is_one_case
+        else one_case_root / ONE_CASE_TRIALS_NAME
+    )
     document: dict[str, Any] = {
-        "schema_version": SMOKE_RECEIPT_SCHEMA_VERSION,
+        "schema_version": (
+            SMOKE_RECEIPT_SCHEMA_VERSION
+            if not is_one_case
+            else ONE_CASE_RECEIPT_SCHEMA_VERSION
+        ),
         "status": "COMPLETE",
         "run_id": run_id,
         "promotion_id": admission["promotion_id"],
@@ -447,7 +490,7 @@ def _receipt(
             (source_root / SOURCE_CHECKSUMS_NAME).read_bytes()
         ),
         "smoke_selection_file_sha256": _sha256(
-            (source_root / SOURCE_SMOKES_NAME).read_bytes()
+            selection_path.read_bytes()
         ),
         "n4_serve_gate_id": n4_gate["gate_id"],
         "n4_serve_gate_sha256": n4_gate["gate_sha256"],
@@ -479,9 +522,13 @@ def _receipt(
         "all_flowmesh_transport": True,
         "all_llm_calls_completed": True,
         "task_success_required_for_gate": False,
-        "full_matrix_runtime_gate_satisfied": True,
-        "full_matrix_submission_authorized": True,
-        "w4_task_semantics": "multiple-choice-placeholder",
+        "full_matrix_runtime_gate_satisfied": not is_one_case,
+        "full_matrix_submission_authorized": not is_one_case,
+        "w4_task_semantics": (
+            "multiple-choice-placeholder"
+            if not is_one_case
+            else "source-bound-public-one-case"
+        ),
         "w4_retrieval_quality_evaluated": False,
         "performance_measured": False,
         "monetary_cost_measured": False,
@@ -489,6 +536,27 @@ def _receipt(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if is_one_case:
+        assert one_case is not None
+        assert one_case_root is not None
+        document.update({
+            "selection_kind": "engineering-demonstration",
+            "one_case_execution_complete": True,
+            "one_case_plan_sha256": one_case.plan["plan_sha256"],
+            "one_case_plan_file_sha256": _sha256(
+                (one_case_root / ONE_CASE_PLAN_NAME).read_bytes()
+            ),
+            "one_case_checksums_file_sha256": _sha256(
+                (one_case_root / ONE_CASE_CHECKSUMS_NAME).read_bytes()
+            ),
+            "one_case_id": one_case.plan["case_id"],
+            "one_case_workload_id": one_case.plan["workload_id"],
+            "one_case_artifact_object_id": one_case.plan[
+                "artifact_object_id"
+            ],
+            "one_case_safe_design_id": one_case.plan["safe_design_id"],
+            "formal_sampling_claimed": False,
+        })
     document["receipt_sha256"] = _sha256(_canonical(document))
     return document
 
@@ -500,11 +568,12 @@ def _verify_files(
     n4_serve_gate_dir: Path,
     n4_gate_sources: Mapping[str, Path],
     n4_live_gate_sources: Mapping[str, Any] | None,
+    one_case_plan_dir: Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     _require(root.is_dir(), "semantic smoke receipt directory is missing")
     files = list(root.iterdir())
     _require(
-        {path.name for path in files} == _FILES
+        {path.name for path in files} == _CONTENT | {CHECKSUMS_NAME}
         and all(path.is_file() and not path.is_symlink() for path in files),
         "semantic smoke receipt file set changed",
     )
@@ -519,6 +588,14 @@ def _verify_files(
     inputs = load_full_flow_local_semantic_execution_inputs(
         local_semantic_admission_dir
     )
+    one_case = (
+        None
+        if one_case_plan_dir is None
+        else load_full_flow_one_case_plan(
+            one_case_plan_dir,
+            local_semantic_admission_dir=local_semantic_admission_dir,
+        )
+    )
     n4_gate = _verify_n4_serve_gate(
         n4_serve_gate_dir,
         preprovisioned_sources=n4_gate_sources,
@@ -526,7 +603,7 @@ def _verify_files(
         admission_root=local_semantic_admission_dir,
         artifact_binding_root=n4_gate_sources["artifact_binding_dir"],
     )
-    selections = _smoke_rows(inputs)
+    selections = _smoke_rows(inputs, one_case)
     receipt = _strict_json(root / RECEIPT_NAME, "semantic smoke receipt")
     rows = _strict_jsonl(root / RESULTS_NAME, "semantic smoke results")
     _require(
@@ -541,12 +618,19 @@ def _verify_files(
         "semantic smoke receipt digest failed",
     )
     _require(
-        receipt.get("schema_version") == SMOKE_RECEIPT_SCHEMA_VERSION
+        receipt.get("schema_version")
+        == (
+            SMOKE_RECEIPT_SCHEMA_VERSION
+            if one_case is None
+            else ONE_CASE_RECEIPT_SCHEMA_VERSION
+        )
         and receipt.get("status") == "COMPLETE"
         and receipt.get("case_ids") == list(_CASE_ORDER)
         and receipt.get("smoke_count") == len(_CASE_ORDER)
-        and receipt.get("full_matrix_runtime_gate_satisfied") is True
-        and receipt.get("full_matrix_submission_authorized") is True
+        and receipt.get("full_matrix_runtime_gate_satisfied")
+        is (one_case is None)
+        and receipt.get("full_matrix_submission_authorized")
+        is (one_case is None)
         and receipt.get("task_success_required_for_gate") is False
         and receipt.get("w4_retrieval_quality_evaluated") is False
         and receipt.get("performance_measured") is False
@@ -570,10 +654,41 @@ def _verify_files(
         )
         and receipt.get("smoke_selection_file_sha256")
         == _sha256(
-            (local_semantic_admission_dir / SOURCE_SMOKES_NAME).read_bytes()
+            (
+                local_semantic_admission_dir / SOURCE_SMOKES_NAME
+                if one_case is None
+                else one_case_plan_dir / ONE_CASE_TRIALS_NAME
+            ).read_bytes()
         ),
         "semantic smoke receipt binds another admission",
     )
+    if one_case is not None:
+        assert one_case_plan_dir is not None
+        _require(
+            receipt.get("selection_kind")
+            == "engineering-demonstration"
+            and receipt.get("one_case_execution_complete") is True
+            and receipt.get("one_case_plan_sha256")
+            == one_case.plan.get("plan_sha256")
+            and receipt.get("one_case_plan_file_sha256")
+            == _sha256(
+                (one_case_plan_dir / ONE_CASE_PLAN_NAME).read_bytes()
+            )
+            and receipt.get("one_case_checksums_file_sha256")
+            == _sha256(
+                (one_case_plan_dir / ONE_CASE_CHECKSUMS_NAME).read_bytes()
+            )
+            and receipt.get("one_case_id")
+            == one_case.plan.get("case_id")
+            and receipt.get("one_case_workload_id")
+            == one_case.plan.get("workload_id")
+            and receipt.get("one_case_artifact_object_id")
+            == one_case.plan.get("artifact_object_id")
+            and receipt.get("one_case_safe_design_id")
+            == one_case.plan.get("safe_design_id")
+            and receipt.get("formal_sampling_claimed") is False,
+            "semantic smoke receipt binds another one-case plan",
+        )
     _require(
         receipt.get("n4_serve_gate_id") == n4_gate.get("gate_id")
         and receipt.get("n4_serve_gate_sha256")
@@ -660,6 +775,8 @@ def _verify_files(
         n4_gate=n4_gate,
         run_id=str(receipt["run_id"]),
         rows=rows,
+        one_case_root=one_case_plan_dir,
+        one_case=one_case,
     )
     _require(
         (root / RECEIPT_NAME).read_bytes() == _json_bytes(expected_receipt),
@@ -685,6 +802,7 @@ def run_full_flow_local_semantic_smokes(
     executor: SemanticTrialExecutor,
     output_dir: str | Path,
     n4_live_gate_sources: N4LiveServeGateSources | None = None,
+    one_case_plan_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Execute ten mandatory local smokes in dependency-safe order."""
 
@@ -702,6 +820,19 @@ def run_full_flow_local_semantic_smokes(
         "n4_package_dir": Path(n4_package_dir).resolve(),
     }
     inputs = load_full_flow_local_semantic_execution_inputs(source_root)
+    one_case_root = (
+        None
+        if one_case_plan_dir is None
+        else Path(one_case_plan_dir).resolve()
+    )
+    one_case = (
+        None
+        if one_case_root is None
+        else load_full_flow_one_case_plan(
+            one_case_root,
+            local_semantic_admission_dir=source_root,
+        )
+    )
     normalized_live_sources = _normal_live_gate_sources(
         n4_live_gate_sources
     )
@@ -716,7 +847,7 @@ def run_full_flow_local_semantic_smokes(
     target = Path(output_dir).resolve()
     _require(not target.exists(), f"output directory already exists: {target}")
     rows: list[dict[str, Any]] = []
-    for smoke, trial in _smoke_rows(inputs):
+    for smoke, trial in _smoke_rows(inputs, one_case):
         case_id = str(smoke["case_id"])
         trial_key = str(smoke["trial_key"])
         idempotency_key = _idempotency_key(
@@ -767,6 +898,8 @@ def run_full_flow_local_semantic_smokes(
         n4_gate=n4_gate,
         run_id=run_id,
         rows=rows,
+        one_case_root=one_case_root,
+        one_case=one_case,
     )
     documents = {
         RECEIPT_NAME: _json_bytes(receipt),
@@ -789,6 +922,7 @@ def run_full_flow_local_semantic_smokes(
             n4_serve_gate_dir=n4_gate_root,
             n4_gate_sources=n4_gate_sources,
             n4_live_gate_sources=normalized_live_sources,
+            one_case_plan_dir=one_case_root,
         )
         os.replace(stage, target)
     finally:
@@ -809,6 +943,7 @@ def run_full_flow_local_semantic_smokes(
         artifact_binding_dir=n4_gate_sources["artifact_binding_dir"],
         n4_package_dir=n4_gate_sources["n4_package_dir"],
         n4_live_gate_sources=normalized_live_sources,
+        one_case_plan_dir=one_case_root,
     ) | {"output_dir": str(target)}
 
 
@@ -827,6 +962,7 @@ def verify_full_flow_local_semantic_smokes(
     artifact_binding_dir: str | Path,
     n4_package_dir: str | Path,
     n4_live_gate_sources: N4LiveServeGateSources | None = None,
+    one_case_plan_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify the ten-smoke receipt and its full-matrix gate decision."""
 
@@ -853,15 +989,24 @@ def verify_full_flow_local_semantic_smokes(
         n4_live_gate_sources=_normal_live_gate_sources(
             n4_live_gate_sources
         ),
+        one_case_plan_dir=(
+            None
+            if one_case_plan_dir is None
+            else Path(one_case_plan_dir).resolve()
+        ),
     )
-    return {
+    report = {
         "status": "VERIFIED",
         "run_id": receipt["run_id"],
         "receipt_sha256": receipt["receipt_sha256"],
         "smoke_count": len(rows),
         "case_ids": list(_CASE_ORDER),
-        "full_matrix_runtime_gate_satisfied": True,
-        "full_matrix_submission_authorized": True,
+        "full_matrix_runtime_gate_satisfied": receipt[
+            "full_matrix_runtime_gate_satisfied"
+        ],
+        "full_matrix_submission_authorized": receipt[
+            "full_matrix_submission_authorized"
+        ],
         "n4_serve_gate_sha256": receipt["n4_serve_gate_sha256"],
         "n4_serve_gate_kind": receipt["n4_serve_gate_kind"],
         "n4_preprovisioned_snapshot_used": receipt[
@@ -881,6 +1026,20 @@ def verify_full_flow_local_semantic_smokes(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if one_case_plan_dir is not None:
+        report.update({
+            "one_case_execution_complete": True,
+            "one_case_id": receipt["one_case_id"],
+            "one_case_workload_id": receipt["one_case_workload_id"],
+            "one_case_artifact_object_id": receipt[
+                "one_case_artifact_object_id"
+            ],
+            "one_case_safe_design_id": receipt[
+                "one_case_safe_design_id"
+            ],
+            "formal_sampling_claimed": False,
+        })
+    return report
 
 
 def _verify_multi_host_smoke_sources(
@@ -989,6 +1148,7 @@ def run_full_flow_semantic_smokes(
     executor: SemanticTrialExecutor,
     output_dir: str | Path,
     n4_live_gate_sources: N4LiveServeGateSources,
+    one_case_plan_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the same source-bound ten cases on a multi-host deployment."""
 
@@ -1019,6 +1179,7 @@ def run_full_flow_semantic_smokes(
         executor=executor,
         output_dir=output_dir,
         n4_live_gate_sources=n4_live_gate_sources,
+        one_case_plan_dir=one_case_plan_dir,
     )
     return report | environment
 
@@ -1034,6 +1195,7 @@ def verify_full_flow_semantic_smokes(
     container_plan_dir: str | Path,
     artifact_binding_dir: str | Path,
     n4_live_gate_sources: N4LiveServeGateSources,
+    one_case_plan_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify a ten-case receipt against its multi-host deployment."""
 
@@ -1062,6 +1224,7 @@ def verify_full_flow_semantic_smokes(
         artifact_binding_dir=artifact_binding_dir,
         n4_package_dir=artifact_binding_dir,
         n4_live_gate_sources=n4_live_gate_sources,
+        one_case_plan_dir=one_case_plan_dir,
     )
     return report | environment
 

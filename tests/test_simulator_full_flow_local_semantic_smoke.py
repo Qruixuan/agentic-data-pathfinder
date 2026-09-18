@@ -29,6 +29,12 @@ from pathfinder.simulator.full_flow_n4_live_serve_gate import (
     CHECKSUMS_NAME as N4_LIVE_GATE_CHECKSUMS_NAME,
     GATE_NAME as N4_LIVE_GATE_NAME,
 )
+from pathfinder.simulator.full_flow_one_case import (
+    CHECKSUMS_NAME as ONE_CASE_CHECKSUMS_NAME,
+    PLAN_NAME as ONE_CASE_PLAN_NAME,
+    TRIALS_NAME as ONE_CASE_TRIALS_NAME,
+    FrozenFullFlowOneCasePlan,
+)
 from pathfinder.simulator.full_flow_matrix_runner import (
     PUBLIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
     SemanticTrialExecutionError,
@@ -281,6 +287,75 @@ class LocalSemanticSmokeTest(unittest.TestCase):
             **self.n4_source_keywords,
         )
         self.assertEqual(report["receipt_sha256"], verify["receipt_sha256"])
+
+    def test_runs_source_bound_one_case_without_authorizing_matrix(self) -> None:
+        design_ids = (
+            "D0", "D1", "D2", "D3", "D3",
+            "D4", "D5", "D6", "D7", "D7",
+        )
+        for trial, design_id in zip(
+            self.inputs.bound_trials, design_ids, strict=True
+        ):
+            trial["flowmesh_submission_authorized"] = True
+            trial["design_id"] = design_id
+            trial["route_family"] = "one-case-route"
+        selections = []
+        for smoke, design_id in zip(
+            self.inputs.representative_smokes, design_ids, strict=True
+        ):
+            selections.append({
+                "case_id": smoke["case_id"],
+                "trial_key": smoke["trial_key"],
+                "executor_node_id": smoke["expected_executor_node_id"],
+                "expected_cache_branch": smoke["expected_cache_branch"],
+                "prerequisite_trial_key": smoke["prerequisite_trial_key"],
+                "design_id": design_id,
+                "representation_ids": ["raw_video"],
+            })
+        one_case = FrozenFullFlowOneCasePlan(
+            plan={
+                "plan_sha256": "1" * 64,
+                "case_id": "causal-one-case-v1",
+                "workload_id": "smoke-causal",
+                "artifact_object_id": "video-causal",
+                "safe_design_id": "D0",
+            },
+            trials=tuple(selections),
+        )
+        plan_root = self.root / "one-case-plan"
+        plan_root.mkdir()
+        for name in (
+            ONE_CASE_PLAN_NAME,
+            ONE_CASE_TRIALS_NAME,
+            ONE_CASE_CHECKSUMS_NAME,
+        ):
+            (plan_root / name).write_text(name + "\n", encoding="utf-8")
+        executor = RecordingExecutor()
+        output = self.root / "one-case-run"
+        with mock.patch(
+            "pathfinder.simulator.full_flow_local_semantic_smoke."
+            "load_full_flow_one_case_plan",
+            return_value=one_case,
+        ):
+            report = run_full_flow_local_semantic_smokes(
+                self.source,
+                *self.n4_sources,
+                run_id="causal-one-case-run-v1",
+                executor=executor,
+                output_dir=output,
+                one_case_plan_dir=plan_root,
+            )
+        self.assertTrue(report["one_case_execution_complete"])
+        self.assertEqual("smoke-causal", report["one_case_workload_id"])
+        self.assertFalse(report["full_matrix_runtime_gate_satisfied"])
+        self.assertFalse(report["full_matrix_submission_authorized"])
+        receipt = json.loads((output / RECEIPT_NAME).read_text())
+        self.assertEqual(
+            "pathfinder.full-flow-one-case-run-receipt/v1alpha1",
+            receipt["schema_version"],
+        )
+        self.assertEqual("1" * 64, receipt["one_case_plan_sha256"])
+        self.assertEqual(list(CASES), [case for case, _ in executor.calls])
 
     def test_wrong_answer_does_not_select_model_or_block_gate(self) -> None:
         report = run_full_flow_local_semantic_smokes(

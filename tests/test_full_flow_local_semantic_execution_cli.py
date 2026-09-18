@@ -122,6 +122,8 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
             if action.dest == "command"
         }["command"]
         self.assertTrue({
+            "freeze-simulator-full-flow-one-case-plan",
+            "verify-simulator-full-flow-one-case-plan",
             "run-simulator-full-flow-local-semantic-smokes",
             "verify-simulator-full-flow-local-semantic-smokes",
             "run-simulator-full-flow-semantic-smokes",
@@ -129,6 +131,88 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
             "run-simulator-full-flow-local-semantic-matrix",
             "verify-simulator-full-flow-local-semantic-matrix",
         }.issubset(commands))
+
+    def test_one_case_commands_forward_public_selection_inputs(self) -> None:
+        with mock.patch(
+            "pathfinder.simulator.full_flow_one_case."
+            "freeze_full_flow_one_case_plan",
+            return_value={"status": "VERIFIED"},
+        ) as freeze:
+            status, payload = self._invoke([
+                "freeze-simulator-full-flow-one-case-plan",
+                "--local-semantic-admission-dir",
+                "admission",
+                "--case-id",
+                "causal-one-case-v1",
+                "--workload-id",
+                "smoke-causal",
+                "--safe-design-id",
+                "D0",
+                "--output-dir",
+                "one-case-plan",
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("VERIFIED", payload["status"])
+        freeze.assert_called_once_with(
+            Path("admission"),
+            case_id="causal-one-case-v1",
+            workload_id="smoke-causal",
+            safe_design_id="D0",
+            output_dir=Path("one-case-plan"),
+        )
+
+        with mock.patch(
+            "pathfinder.simulator.full_flow_one_case."
+            "verify_full_flow_one_case_plan",
+            return_value={"status": "VERIFIED"},
+        ) as verify:
+            status, payload = self._invoke([
+                "verify-simulator-full-flow-one-case-plan",
+                "--plan-dir",
+                "one-case-plan",
+                "--local-semantic-admission-dir",
+                "admission",
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("VERIFIED", payload["status"])
+        verify.assert_called_once_with(
+            Path("one-case-plan"),
+            local_semantic_admission_dir=Path("admission"),
+        )
+
+    def test_multi_host_smoke_forwards_one_case_plan(self) -> None:
+        with TemporaryDirectory() as raw:
+            descriptor = self._write_live_gate_sources(Path(raw))
+            sources = self._multi_host_smoke_sources(descriptor)
+            context = mock.MagicMock()
+            context.__enter__.return_value = object()
+            context.__exit__.return_value = False
+            with (
+                mock.patch(
+                    "pathfinder.cli._local_semantic_flowmesh_executor",
+                    return_value=context,
+                ),
+                mock.patch(
+                    "pathfinder.simulator.full_flow_local_semantic_smoke."
+                    "run_full_flow_semantic_smokes",
+                    return_value={"status": "VERIFIED"},
+                ) as run,
+            ):
+                status, _ = self._invoke([
+                    "run-simulator-full-flow-semantic-smokes",
+                    *sources,
+                    "--one-case-plan-dir",
+                    "one-case-plan",
+                    "--run-id",
+                    "one-case-run-v1",
+                    "--output-dir",
+                    "one-case-run",
+                ])
+        self.assertEqual(0, status)
+        self.assertEqual(
+            Path("one-case-plan"),
+            run.call_args.kwargs["one_case_plan_dir"],
+        )
 
     def test_multi_host_smoke_commands_forward_only_runtime_sources(self) -> None:
         with TemporaryDirectory() as raw:
