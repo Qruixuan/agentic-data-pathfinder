@@ -1995,6 +1995,100 @@ class LocalSemanticExecutionTest(unittest.TestCase):
         self.assertEqual(1, len(llm.requests))  # type: ignore[attr-defined]
         self.assertEqual([], proxy_requests)
 
+    def test_semantic_llm_retries_transient_http_failures(self) -> None:
+        requests: list[dict] = []
+
+        class FlakyHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def do_POST(self) -> None:
+                length = int(self.headers["Content-Length"])
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                requests.append(payload)
+                if len(requests) < 3:
+                    self.send_response(429)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                response = json.dumps({
+                    "model": payload["model"],
+                    "choices": [{"message": {"content": "C"}}],
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+        llm = ThreadingHTTPServer(("127.0.0.1", 0), FlakyHandler)
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "retry-transient-state",
+            enable_semantic_llm=True,
+        )
+        with (
+            mock.patch.dict(os.environ, {
+                "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                    f"http://127.0.0.1:{llm.server_port}"
+                ),
+                "PATHFINDER_SEMANTIC_LLM_MODEL": "retry-test-model",
+                "PATHFINDER_SEMANTIC_LLM_API_KEY": "retry-test-secret",
+            }, clear=False),
+            mock.patch.object(container_node.time, "sleep") as sleep,
+        ):
+            answer, model = runtime._call_semantic_llm("Return an option.")
+
+        self.assertEqual(("C", "retry-test-model"), (answer, model))
+        self.assertEqual(3, len(requests))
+        self.assertEqual(
+            [mock.call(5.0), mock.call(20.0)],
+            sleep.call_args_list,
+        )
+
+    def test_semantic_llm_does_not_retry_nontransient_http_failure(self) -> None:
+        requests = 0
+
+        class RejectedHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+            def do_POST(self) -> None:
+                nonlocal requests
+                length = int(self.headers["Content-Length"])
+                self.rfile.read(length)
+                requests += 1
+                self.send_response(400)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        llm = ThreadingHTTPServer(("127.0.0.1", 0), RejectedHandler)
+        self._start(llm)
+        runtime = ContainerNodeRuntime(
+            "N6",
+            self.root / "retry-nontransient-state",
+            enable_semantic_llm=True,
+        )
+        with (
+            mock.patch.dict(os.environ, {
+                "PATHFINDER_SEMANTIC_LLM_BASE_URL": (
+                    f"http://127.0.0.1:{llm.server_port}"
+                ),
+                "PATHFINDER_SEMANTIC_LLM_MODEL": "retry-test-model",
+                "PATHFINDER_SEMANTIC_LLM_API_KEY": "retry-test-secret",
+            }, clear=False),
+            mock.patch.object(container_node.time, "sleep") as sleep,
+            self.assertRaisesRegex(
+                ContainerNodeError,
+                "semantic LLM request failed with HTTP 400",
+            ),
+        ):
+            runtime._call_semantic_llm("Return an option.")
+
+        self.assertEqual(1, requests)
+        sleep.assert_not_called()
+
     def test_external_semantic_llm_keeps_default_proxy_discovery(self) -> None:
         sentinel = object()
         with mock.patch.object(

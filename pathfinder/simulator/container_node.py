@@ -86,6 +86,10 @@ _MAX_SEMANTIC_IMAGE_PIXELS = 16 * 1024 * 1024
 _MAX_SEMANTIC_TOTAL_IMAGE_PIXELS = 64 * 1024 * 1024
 _MAX_RUNTIME_SECRET_BYTES = 8192
 _SEMANTIC_IMAGE_DECODE_TIMEOUT_SECONDS = 3.0
+_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS = (5.0, 20.0)
+_SEMANTIC_LLM_TRANSIENT_HTTP_STATUS = frozenset(
+    {408, 425, 429, 500, 502, 503, 504}
+)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RUNTIME_EPOCH = re.compile(r"[0-9a-f]{32}")
 _JPEG_START_OF_FRAME_MARKERS = frozenset(
@@ -1206,24 +1210,39 @@ class ContainerNodeRuntime:
                 "Accept": "application/json",
             },
         )
-        try:
-            # This request carries the semantic provider bearer token.  The
-            # standard urllib opener follows redirects and can replay that
-            # header to another origin, so semantic calls always use an
-            # explicit no-redirect transport.
-            with _semantic_llm_opener(base_url).open(
-                request,
-                timeout=timeout,
-            ) as response:
-                raw = response.read(_MAX_JSON_BYTES + 1)
-        except HTTPError as exc:
-            raise ContainerNodeError(
-                f"semantic LLM request failed with HTTP {exc.code}"
-            ) from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            raise ContainerNodeError(
-                f"semantic LLM request failed: {type(exc).__name__}"
-            ) from exc
+        for attempt in range(len(_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS) + 1):
+            try:
+                # This request carries the semantic provider bearer token.
+                # The standard urllib opener follows redirects and can replay
+                # that header to another origin, so semantic calls always use
+                # an explicit no-redirect transport.
+                with _semantic_llm_opener(base_url).open(
+                    request,
+                    timeout=timeout,
+                ) as response:
+                    raw = response.read(_MAX_JSON_BYTES + 1)
+                break
+            except HTTPError as exc:
+                status = int(exc.code)
+                exc.close()
+                retry = (
+                    status in _SEMANTIC_LLM_TRANSIENT_HTTP_STATUS
+                    and attempt < len(_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS)
+                )
+                if not retry:
+                    raise ContainerNodeError(
+                        f"semantic LLM request failed with HTTP {status}"
+                    ) from exc
+            except (URLError, TimeoutError, OSError) as exc:
+                retry = attempt < len(
+                    _SEMANTIC_LLM_RETRY_BACKOFF_SECONDS
+                )
+                if not retry:
+                    raise ContainerNodeError(
+                        "semantic LLM request failed: "
+                        f"{type(exc).__name__}"
+                    ) from exc
+            time.sleep(_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS[attempt])
         _require(len(raw) <= _MAX_JSON_BYTES, "semantic LLM response is too large")
         payload = _strict_json_value(raw, "semantic LLM response")
         _require(isinstance(payload, Mapping), "semantic LLM response must be an object")
