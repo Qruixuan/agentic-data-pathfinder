@@ -71,7 +71,7 @@ def _profile(
     input_mode: str,
     representation_ids: Sequence[str],
     frame_count: int | None,
-    temporal_window_fraction: tuple[float, float] | None,
+    temporal_window_fraction: tuple[int | float, int | float] | None,
     digest_included: bool,
     source_byte_range_kind: str,
 ) -> dict[str, Any]:
@@ -120,7 +120,11 @@ def build_semantic_input_profile(
             input_mode="raw-prepared-frames",
             representation_ids=representations,
             frame_count=24,
-            temporal_window_fraction=(0.0, 1.0),
+            # Freeze exact full-window bounds as integers.  FlowMesh's
+            # Pydantic worker path normalizes integral JSON floats (0.0/1.0)
+            # to integers before delivery.  Starting with 0/1 keeps the
+            # content-bound ingress HMAC byte-stable across that boundary.
+            temporal_window_fraction=(0, 1),
             digest_included=False,
             source_byte_range_kind="complete-artifact",
         )
@@ -158,7 +162,7 @@ def build_semantic_input_profile(
             input_mode="frame-bundle",
             representation_ids=representations,
             frame_count=4,
-            temporal_window_fraction=(0.0, 1.0),
+            temporal_window_fraction=(0, 1),
             digest_included=False,
             source_byte_range_kind="complete-artifact",
         )
@@ -171,7 +175,7 @@ def build_semantic_input_profile(
         input_mode="digest+frames-fusion",
         representation_ids=representations,
         frame_count=4,
-        temporal_window_fraction=(0.0, 1.0),
+        temporal_window_fraction=(0, 1),
         digest_included=True,
         source_byte_range_kind="complete-artifact",
     )

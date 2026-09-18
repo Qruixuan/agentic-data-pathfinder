@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from pathfinder.simulator.full_flow_semantic_input_profiles import (
@@ -27,7 +28,19 @@ class SemanticInputProfileTest(unittest.TestCase):
         self.assertEqual(RAW_DENSE_PROFILE_ID, raw["profile_id"])
         self.assertEqual(24, raw["frame_selection"]["frame_count"])
         self.assertEqual(
-            [0.0, 1.0], raw["frame_selection"]["temporal_window_fraction"]
+            [0, 1], raw["frame_selection"]["temporal_window_fraction"]
+        )
+        self.assertTrue(
+            all(
+                type(value) is int
+                for value in raw["frame_selection"][
+                    "temporal_window_fraction"
+                ]
+            )
+        )
+        self.assertNotIn(
+            "0.0",
+            json.dumps(raw, sort_keys=True, separators=(",", ":")),
         )
         self.assertEqual(INDEXED_WINDOW_PROFILE_ID, indexed["profile_id"])
         self.assertEqual(8, indexed["frame_selection"]["frame_count"])
