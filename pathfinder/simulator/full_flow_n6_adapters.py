@@ -35,6 +35,8 @@ from .container_node import (
     CONTAINER_NODE_SEMANTIC_FUSION_RESULT_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION,
+    CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION,
+    CONTAINER_NODE_SEMANTIC_VIDEO_RESULT_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_VISION_RESULT_SCHEMA_VERSION,
     ContainerNodeRuntime,
@@ -66,10 +68,13 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,255}\Z")
 _INPUT_MODES = {
     "raw-prepared-frames",
+    "direct-video",
     "digest",
     "frame-bundle",
     "digest+frames-fusion",
 }
+DIRECT_VIDEO_REPRESENTATION_ID = "raw_video_direct"
+DIRECT_VIDEO_MEDIA_TYPE = "video/mp4"
 _PRIVATE_KEYS = {
     "api_key",
     "authorization",
@@ -204,6 +209,10 @@ class SemanticRequestExecutor(Protocol):
 @dataclass(frozen=True)
 class N6PreparationLimits:
     max_raw_video_bytes: int = 1024 * 1024 * 1024
+    # Direct video is delivered inside the N6 request, so it is bounded far
+    # more tightly than a routed raw artifact that is only decoded locally.
+    max_direct_video_bytes: int = 6 * 1024 * 1024
+    direct_video_frames_per_second: float = 2.0
     max_digest_bytes: int = 256 * 1024
     max_question_bytes: int = 64 * 1024
     raw_frame_count: int = 16
@@ -225,10 +234,16 @@ class N6PreparationLimits:
             "max_frame_count",
             "max_frame_bytes",
             "max_total_frame_bytes",
+            "max_direct_video_bytes",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        fps = self.direct_video_frames_per_second
+        if type(fps) is not float or not (0.1 <= fps <= 10.0):
+            raise ValueError(
+                "direct_video_frames_per_second must be a float in [0.1, 10.0]"
+            )
         if self.raw_frame_count > self.max_frame_count:
             raise ValueError("raw_frame_count exceeds max_frame_count")
 
@@ -619,6 +634,17 @@ class N6ModelInputAdapter:
                 artifacts,
                 identities,
             )
+        elif mode == "direct-video":
+            request = self._video_request(
+                run_id,
+                trial,
+                stage,
+                public_task,
+                question,
+                artifacts,
+                identities,
+                profile,
+            )
         elif mode == "raw-prepared-frames":
             request = self._raw_request(
                 run_id,
@@ -713,6 +739,86 @@ class N6ModelInputAdapter:
         )
         return {**without_id, "semantic_request_id": request_id}
 
+    def _video_request(
+        self,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        public_task: Mapping[str, Any],
+        question: str,
+        artifacts: Sequence[ArtifactAccess],
+        identities: tuple[ArtifactIdentity, ...],
+        profile: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Deliver the complete original encoded video to N6.
+
+        No decoding happens here.  The exact routed bytes are carried to the
+        backend, and the request binds their immutable content identity.
+        """
+
+        _require(
+            len(artifacts) == 1
+            and identities[0].representation_id == "raw_video",
+            "direct-video mode requires one raw_video artifact",
+        )
+        access = artifacts[0]
+        _require(
+            access.segment is None,
+            "direct-video mode requires the complete original artifact",
+        )
+        payload = access.payload
+        _require(
+            0 < len(payload) <= self._limits.max_direct_video_bytes,
+            "direct-video payload exceeds its N6 byte bound",
+        )
+        _require(
+            profile is None or profile.get("direct_video_input") is True,
+            "direct-video mode requires a direct-video semantic profile",
+        )
+        _require(
+            profile is None or profile.get("frame_selection") is None,
+            "direct-video profile must not freeze a frame selection",
+        )
+        # The complete artifact was validated against its frozen identity, so
+        # the delivered video identity is exactly the source object identity.
+        video_sha256 = _digest(access.payload_sha256, "video_sha256")
+        _require(
+            video_sha256 == identities[0].artifact_sha256
+            and len(payload) == identities[0].artifact_size_bytes,
+            "direct-video payload differs from its frozen source identity",
+        )
+        fps = float(self._limits.direct_video_frames_per_second)
+        prompt = ContainerNodeRuntime.build_semantic_video_prompt(
+            DIRECT_VIDEO_REPRESENTATION_ID, question
+        )
+        without_id = {
+            "schema_version": (
+                CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION
+            ),
+            "execution_node_id": "N6",
+            "representation_id": DIRECT_VIDEO_REPRESENTATION_ID,
+            "representation_sha256": video_sha256,
+            "question": question,
+            "prompt_sha256": _sha256(prompt.encode("utf-8")),
+            "video_media_type": DIRECT_VIDEO_MEDIA_TYPE,
+            "video_size_bytes": len(payload),
+            "video_sha256": video_sha256,
+            "video_frames_per_second": fps,
+            "video_base64": base64.b64encode(payload).decode("ascii"),
+        }
+        request_id = _request_id(
+            run_id=run_id,
+            trial=trial,
+            request_binding_stage_key=_text(
+                stage.get("stage_key"), "stage_key", max_bytes=2048
+            ),
+            public_task=public_task,
+            mode="direct-video",
+            identities=identities,
+            request_without_id=without_id,
+        )
+        return {**without_id, "semantic_request_id": request_id}
+
     def _raw_request(
         self,
         run_id: str,
@@ -733,6 +839,10 @@ class N6ModelInputAdapter:
         _require(
             len(access.payload) <= self._limits.max_raw_video_bytes,
             "raw video payload exceeds its N6 byte bound",
+        )
+        _require(
+            profile is None or profile.get("direct_video_input") is False,
+            "sampled raw mode cannot serve a direct-video profile",
         )
         frame_count, window_start, window_end = _frame_selection(
             profile,
@@ -1104,6 +1214,7 @@ def _validate_prepared_request_binding(
             CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION
         ),
         "frame-bundle": CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION,
+        "direct-video": CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION,
         "digest+frames-fusion": (
             CONTAINER_NODE_SEMANTIC_FUSION_REQUEST_SCHEMA_VERSION
         ),
@@ -1181,6 +1292,76 @@ def _validate_prepared_request_binding(
         _require(
             request.get("prompt_sha256") == _sha256(prompt.encode("utf-8")),
             "prepared digest prompt hash changed",
+        )
+        return
+
+    if mode == "direct-video":
+        _require(
+            set(request)
+            == {
+                "schema_version",
+                "semantic_request_id",
+                "execution_node_id",
+                "representation_id",
+                "representation_sha256",
+                "question",
+                "prompt_sha256",
+                "video_media_type",
+                "video_size_bytes",
+                "video_sha256",
+                "video_frames_per_second",
+                "video_base64",
+            },
+            "prepared direct-video request fields changed",
+        )
+        _require(request.get("question") == question, "public question changed")
+        _require(
+            len(identities) == 1
+            and identities[0].representation_id == "raw_video"
+            and request.get("representation_id")
+            == DIRECT_VIDEO_REPRESENTATION_ID,
+            "prepared direct-video identity binding changed",
+        )
+        _require(
+            request.get("video_media_type") == DIRECT_VIDEO_MEDIA_TYPE,
+            "prepared direct-video media type changed",
+        )
+        encoded = request.get("video_base64")
+        _require(
+            isinstance(encoded, str) and bool(encoded),
+            "prepared direct-video payload is missing",
+        )
+        try:
+            payload = base64.b64decode(str(encoded), validate=True)
+        except Exception as exc:
+            raise N6AdapterError(
+                "prepared direct-video payload is not valid base64"
+            ) from exc
+        # Bind the exact bytes that will reach the backend to the frozen
+        # source identity.  A renamed or re-encoded video cannot pass here.
+        _require(
+            len(payload) == identities[0].artifact_size_bytes
+            and _sha256(payload) == identities[0].artifact_sha256,
+            "prepared direct-video payload differs from its source identity",
+        )
+        _require(
+            request.get("video_size_bytes") == len(payload)
+            and request.get("video_sha256") == identities[0].artifact_sha256
+            and request.get("representation_sha256")
+            == identities[0].artifact_sha256,
+            "prepared direct-video identity fields changed",
+        )
+        fps = request.get("video_frames_per_second")
+        _require(
+            isinstance(fps, float) and 0.1 <= fps <= 10.0,
+            "prepared direct-video frame rate is invalid",
+        )
+        prompt = ContainerNodeRuntime.build_semantic_video_prompt(
+            DIRECT_VIDEO_REPRESENTATION_ID, question
+        )
+        _require(
+            request.get("prompt_sha256") == _sha256(prompt.encode("utf-8")),
+            "prepared direct-video prompt hash changed",
         )
         return
 
@@ -1373,7 +1554,15 @@ class BoundN6SemanticInferenceAdapter:
             "N6 semantic service is not safely configured",
         )
         schema = request.get("schema_version")
-        if schema == CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION:
+        if schema == CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION:
+            # An N6 build without the direct-video adapter must fail closed
+            # rather than silently falling back to a frame representation.
+            _require(
+                value.get("semantic_video_request_adapter_supported") is True
+                and value.get("semantic_video_request_schema_version") == schema,
+                "N6 direct-video adapter is unavailable",
+            )
+        elif schema == CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION:
             _require(
                 value.get("semantic_vision_request_adapter_supported") is True
                 and value.get("semantic_vision_request_schema_version") == schema,
@@ -1414,6 +1603,9 @@ class BoundN6SemanticInferenceAdapter:
             ),
             CONTAINER_NODE_SEMANTIC_FUSION_REQUEST_SCHEMA_VERSION: (
                 CONTAINER_NODE_SEMANTIC_FUSION_RESULT_SCHEMA_VERSION
+            ),
+            CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION: (
+                CONTAINER_NODE_SEMANTIC_VIDEO_RESULT_SCHEMA_VERSION
             ),
         }
         expected_schema = schema_by_request.get(request.get("schema_version"))
@@ -1463,7 +1655,9 @@ class BoundN6SemanticInferenceAdapter:
             service_time == (finished - started) / 1_000_000.0,
             "N6 service time differs from its monotonic interval",
         )
-        if mode in {"raw-prepared-frames", "frame-bundle"}:
+        if mode == "direct-video":
+            self._validate_video_result(result, request)
+        elif mode in {"raw-prepared-frames", "frame-bundle"}:
             self._validate_vision_result(result, request)
         elif mode == "digest+frames-fusion":
             self._validate_vision_result(result, request)
@@ -1482,6 +1676,31 @@ class BoundN6SemanticInferenceAdapter:
                 "N6 direct digest result claims an external artifact fetch",
             )
         return result
+
+    @staticmethod
+    def _validate_video_result(
+        result: Mapping[str, Any], request: Mapping[str, Any]
+    ) -> None:
+        """Require N6 to attest to the exact video it was handed."""
+
+        _require(
+            result.get("video_sha256") == request.get("video_sha256")
+            and result.get("video_size_bytes") == request.get("video_size_bytes")
+            and result.get("video_media_type") == request.get("video_media_type")
+            and result.get("video_frames_per_second")
+            == request.get("video_frames_per_second"),
+            "N6 direct-video identity binding changed",
+        )
+        _require(
+            result.get("representation_delivery_bytes")
+            == request.get("video_size_bytes")
+            and result.get("semantic_input_kind") == "direct-encoded-video"
+            and result.get("direct_video_input") is True
+            and result.get("semantic_video_payload_integrity_verified") is True
+            and result.get("data_plane_artifact_delivery_verified") is False
+            and result.get("source_node_id") is None,
+            "N6 direct-video delivery attestation changed",
+        )
 
     @staticmethod
     def _validate_vision_result(
@@ -1514,6 +1733,8 @@ class BoundN6SemanticInferenceAdapter:
 
 
 __all__ = [
+    "DIRECT_VIDEO_MEDIA_TYPE",
+    "DIRECT_VIDEO_REPRESENTATION_ID",
     "BoundN6SemanticInferenceAdapter",
     "N6AdapterError",
     "N6ModelInputAdapter",

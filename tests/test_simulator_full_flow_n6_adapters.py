@@ -23,12 +23,16 @@ from pathfinder.simulator.container_node import (
     CONTAINER_NODE_SEMANTIC_FUSION_RESULT_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_REQUEST_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION,
+    CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION,
+    CONTAINER_NODE_SEMANTIC_VIDEO_RESULT_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION,
     CONTAINER_NODE_SEMANTIC_VISION_RESULT_SCHEMA_VERSION,
     ContainerNodeRuntime,
     semantic_fusion_representation_sha256,
 )
 from pathfinder.simulator.full_flow_n6_adapters import (
+    DIRECT_VIDEO_MEDIA_TYPE,
+    DIRECT_VIDEO_REPRESENTATION_ID,
     BoundN6SemanticInferenceAdapter,
     N6AdapterError,
     N6ModelInputAdapter,
@@ -358,13 +362,15 @@ class N6PreparationTest(unittest.TestCase):
             request["representation_sha256"],
         )
 
-    def test_frozen_raw_and_indexed_profiles_use_distinct_sampling(self) -> None:
+    def test_frozen_raw_and_indexed_profiles_use_distinct_representations(
+        self,
+    ) -> None:
         payload = b"real-routed-video" * 10_000
         raw_sampler = RecordingSampler(tuple(_frame(index) for index in range(24)))
         raw = self._prepare_profiled(
             self._adapter(raw_sampler),
             route_family="raw",
-            mode="raw-prepared-frames",
+            mode="direct-video",
             artifacts=[_access("raw_video", payload)],
         )
         selected = _bundle_bytes(
@@ -399,16 +405,22 @@ class N6PreparationTest(unittest.TestCase):
                 segment=segment,
             )],
         )
-        self.assertEqual(24, len(decode_prepared_semantic_request(raw)["frames"]))
-        self.assertEqual(8, len(decode_prepared_semantic_request(indexed)["frames"]))
+        raw_request = decode_prepared_semantic_request(raw)
+        # The raw family carries the complete encoded video and no frames at
+        # all; nothing is decoded on the execution side.
+        self.assertNotIn("frames", raw_request)
         self.assertEqual(
-            (24, 0.0, 1.0),
-            (
-                raw_sampler.calls[0]["frame_count"],
-                raw_sampler.calls[0]["temporal_start_fraction"],
-                raw_sampler.calls[0]["temporal_end_fraction"],
-            ),
+            CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION,
+            raw_request["schema_version"],
         )
+        self.assertEqual(
+            payload,
+            base64.b64decode(raw_request["video_base64"], validate=True),
+        )
+        self.assertEqual(_sha(payload), raw_request["video_sha256"])
+        self.assertEqual([], raw_sampler.calls)
+        # Indexed raw remains a selective temporal frame projection.
+        self.assertEqual(8, len(decode_prepared_semantic_request(indexed)["frames"]))
         self.assertEqual([], indexed_sampler.calls)
         self.assertLess(len(selected), len(payload))
         self.assertNotEqual(raw.payload_sha256, indexed.payload_sha256)
@@ -543,12 +555,34 @@ class N6PreparationTest(unittest.TestCase):
             route_family="raw",
             model_input_representation_ids=["raw_video"],
         )
-        profile["frame_selection"]["frame_count"] = 8
+        tampered = {**profile, "direct_video_input": False}
         with self.assertRaisesRegex(
             N6AdapterError,
             "profile differs",
         ):
             self._adapter().prepare(
+                run_id="run",
+                trial={
+                    "trial_key": "trial",
+                    "route_family": "raw",
+                    "artifact_object_id": OBJECT_ID,
+                    "semantic_input_profile": tampered,
+                },
+                stage={"stage_key": "stage"},
+                public_task=_public_task(),
+                mode="direct-video",
+                artifacts=[_access("raw_video", b"raw")],
+            )
+
+    def test_raw_family_profile_cannot_drive_the_sampled_frame_path(self) -> None:
+        """A direct-video profile must never be served as sampled frames."""
+
+        profile = build_semantic_input_profile(
+            route_family="raw",
+            model_input_representation_ids=["raw_video"],
+        )
+        with self.assertRaisesRegex(N6AdapterError, "profile mode differs"):
+            self._adapter(RecordingSampler()).prepare(
                 run_id="run",
                 trial={
                     "trial_key": "trial",

@@ -297,6 +297,23 @@ def _strict_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _direct_video_input_claimed(trials: object) -> bool:
+    """Report whether any frozen trial profile delivers real encoded video."""
+
+    if not isinstance(trials, (list, tuple)):
+        return False
+    for trial in trials:
+        if not isinstance(trial, Mapping):
+            continue
+        profile = trial.get("semantic_input_profile")
+        if (
+            isinstance(profile, Mapping)
+            and profile.get("direct_video_input") is True
+        ):
+            return True
+    return False
+
+
 def _strict_jsonl(path: Path, label: str) -> list[dict[str, Any]]:
     _require(path.is_file() and not path.is_symlink(), f"{label} is missing")
     try:
@@ -892,7 +909,9 @@ def _documents(
             "remote_n1_verifier_implemented": True,
             "live_materialization_measured": False,
             "indexed_source_byte_selectivity_claimed": False,
-            "direct_video_input_claimed": False,
+            "direct_video_input_claimed": _direct_video_input_claimed(
+                promoted_trials
+            ),
         },
         "output_sha256": {
             TRIALS_NAME: _sha256(trial_bytes),
@@ -1067,9 +1086,16 @@ def _verify_files(root: Path) -> dict[str, Any]:
         "local-only claim boundary was weakened",
     )
     _require(
-        boundary.get("indexed_source_byte_selectivity_claimed") is False
-        and boundary.get("direct_video_input_claimed") is False,
+        boundary.get("indexed_source_byte_selectivity_claimed") is False,
         "semantic input claim boundary was weakened",
+    )
+    # Direct video is a real capability of the raw family, so this claim is
+    # not pinned to False.  It must agree exactly with the profiles frozen
+    # into the package, so it can be neither fabricated nor suppressed.
+    _require(
+        boundary.get("direct_video_input_claimed")
+        is _direct_video_input_claimed(trials),
+        "direct video claim disagrees with the frozen semantic profiles",
     )
     _identifier(public_oracle.get("oracle_id"), "public oracle_id")
     _digest(

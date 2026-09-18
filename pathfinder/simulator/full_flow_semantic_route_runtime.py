@@ -69,6 +69,7 @@ _ROUTE_FAMILIES = {
 }
 _INPUT_MODES = {
     "raw-prepared-frames",
+    "direct-video",
     "digest",
     "frame-bundle",
     "digest+frames-fusion",
@@ -1152,6 +1153,37 @@ def _semantic_input_evidence(
             isinstance(request_id, str),
             "profiled N6 input has no request identity",
         )
+    direct_video_sha256: str | None = None
+    direct_video_size_bytes: int | None = None
+    if prepared.mode == "direct-video":
+        encoded = request.get("video_base64")
+        _require(
+            isinstance(encoded, str) and bool(encoded),
+            "prepared N6 direct video payload is missing",
+        )
+        try:
+            video_payload = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise SemanticRouteRuntimeError(
+                "prepared N6 direct video payload is invalid"
+            ) from exc
+        _require(bool(video_payload), "prepared N6 direct video payload is empty")
+        direct_video_sha256 = hashlib.sha256(video_payload).hexdigest()
+        direct_video_size_bytes = len(video_payload)
+        # Evidence must commit to the bytes actually sent for inference, not
+        # merely to a telemetry flag asserting that video was used.
+        _require(
+            request.get("video_sha256") == direct_video_sha256
+            and request.get("video_size_bytes") == direct_video_size_bytes
+            and request.get("representation_sha256") == direct_video_sha256,
+            "prepared N6 direct video does not bind its delivered bytes",
+        )
+        _require(
+            prepared.component_identities[0].artifact_sha256
+            == direct_video_sha256,
+            "prepared N6 direct video differs from its routed artifact",
+        )
+
     frames_value = request.get("frames", [])
     _require(isinstance(frames_value, list), "prepared N6 frames are invalid")
     frame_timestamps: list[float] = []
@@ -1240,7 +1272,9 @@ def _semantic_input_evidence(
         "frame_sequence_sha256": frame_sequence,
         "digest_input_sha256": digest_input,
         "temporal_window_fraction": temporal_window,
-        "direct_video_input": False,
+        "direct_video_input": prepared.mode == "direct-video",
+        "direct_video_sha256": direct_video_sha256,
+        "direct_video_size_bytes": direct_video_size_bytes,
     }
 
 
@@ -1440,14 +1474,23 @@ def _range_artifact(
     return artifact
 
 
-def _input_mode(artifacts: Sequence[ArtifactAccess]) -> str:
+def _input_mode(
+    artifacts: Sequence[ArtifactAccess],
+    route_family: str,
+) -> str:
     representations = [value.source_identity.representation_id for value in artifacts]
     _require(
         len(representations) == len(set(representations)),
         "semantic input repeats a representation",
     )
+    _require(route_family in _ROUTE_FAMILIES, "route family is unsupported")
     values = set(representations)
     if values == {"raw_video"}:
+        # The raw family is the high-fidelity alternative and delivers the
+        # complete encoded video.  Indexed raw stays a selective temporal
+        # frame projection, so the two must not collapse to one mode.
+        if route_family == "raw":
+            return "direct-video"
         return "raw-prepared-frames"
     if values == {"multimodal_digest"}:
         return "digest"
@@ -2073,7 +2116,7 @@ class GenericSemanticRouteCoordinator:
                     for value in dependency_values
                     for artifact in _find_values(value, ArtifactAccess)
                 ]
-                mode = _input_mode(artifacts)
+                mode = _input_mode(artifacts, str(trial["route_family"]))
                 outcome = self._adapters.model_input.prepare(
                     run_id=run_id,
                     trial=trial,
@@ -2101,7 +2144,7 @@ class GenericSemanticRouteCoordinator:
                         for value in dependency_values
                         for artifact in _find_values(value, ArtifactAccess)
                     ]
-                    mode = _input_mode(artifacts)
+                    mode = _input_mode(artifacts, str(trial["route_family"]))
                     model_input = self._adapters.model_input.prepare(
                         run_id=run_id,
                         trial=trial,

@@ -7,7 +7,7 @@ from pathfinder.simulator.full_flow_semantic_input_profiles import (
     DERIVED_SPARSE_FRAMES_PROFILE_ID,
     DERIVED_SPARSE_FUSION_PROFILE_ID,
     INDEXED_WINDOW_PROFILE_ID,
-    RAW_DENSE_PROFILE_ID,
+    RAW_DIRECT_VIDEO_PROFILE_ID,
     SemanticInputProfileError,
     build_semantic_input_profile,
     profile_sha256,
@@ -25,24 +25,21 @@ class SemanticInputProfileTest(unittest.TestCase):
             route_family="indexed-raw",
             model_input_representation_ids=["raw_video"],
         )
-        self.assertEqual(RAW_DENSE_PROFILE_ID, raw["profile_id"])
-        self.assertEqual(24, raw["frame_selection"]["frame_count"])
-        self.assertEqual(
-            [0, 1], raw["frame_selection"]["temporal_window_fraction"]
-        )
-        self.assertTrue(
-            all(
-                type(value) is int
-                for value in raw["frame_selection"][
-                    "temporal_window_fraction"
-                ]
-            )
-        )
+        # The raw family is the direct-video alternative: it delivers the
+        # complete encoded object and freezes no sampling policy at all.
+        self.assertEqual(RAW_DIRECT_VIDEO_PROFILE_ID, raw["profile_id"])
+        self.assertEqual("direct-video", raw["input_mode"])
+        self.assertIsNone(raw["frame_selection"])
+        self.assertTrue(raw["direct_video_input"])
+        self.assertEqual("complete-artifact", raw["source_byte_range_kind"])
+        self.assertFalse(raw["source_byte_selectivity_claimed"])
         self.assertNotIn(
             "0.0",
             json.dumps(raw, sort_keys=True, separators=(",", ":")),
         )
+        # Indexed raw must stay a selective temporal frame projection.
         self.assertEqual(INDEXED_WINDOW_PROFILE_ID, indexed["profile_id"])
+        self.assertEqual("raw-prepared-frames", indexed["input_mode"])
         self.assertEqual(8, indexed["frame_selection"]["frame_count"])
         self.assertEqual(
             [0.25, 0.75],
@@ -80,16 +77,30 @@ class SemanticInputProfileTest(unittest.TestCase):
             route_family="raw",
             model_input_representation_ids=["raw_video"],
         )
-        profile["frame_selection"]["frame_count"] = 8
-        with self.assertRaisesRegex(
-            SemanticInputProfileError,
-            "differs from its frozen route frontier",
+        # Re-labelling a sampled frame policy as the raw family, or dropping
+        # the direct-video claim, must both be rebuilt away rather than
+        # trusted as recorded parameters.
+        for tamper in (
+            {"frame_selection": {
+                "method": "uniform-midpoint",
+                "frame_count": 24,
+                "temporal_window_fraction": [0, 1],
+            }},
+            {"input_mode": "raw-prepared-frames"},
+            {"direct_video_input": False},
+            {"profile_id": "raw-dense-uniform-24-v1"},
         ):
-            validate_semantic_input_profile(
-                profile,
-                route_family="raw",
-                model_input_representation_ids=["raw_video"],
-            )
+            with self.subTest(tamper=sorted(tamper)[0]):
+                tampered = {**profile, **tamper}
+                with self.assertRaisesRegex(
+                    SemanticInputProfileError,
+                    "differs from its frozen route frontier",
+                ):
+                    validate_semantic_input_profile(
+                        tampered,
+                        route_family="raw",
+                        model_input_representation_ids=["raw_video"],
+                    )
 
 
 if __name__ == "__main__":

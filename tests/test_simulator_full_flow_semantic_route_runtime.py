@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import unittest
@@ -390,10 +391,21 @@ class FakeAdapters:
         del run_id, trial, public_task
         self.calls[f"prepare-{mode}"] += 1
         binding_stage_key = str(stage.get("stage_key"))
-        payload = _canonical({
+        content: dict[str, Any] = {
             "mode": mode,
             "artifact_payload_sha256": [value.payload_sha256 for value in artifacts],
-        })
+        }
+        if mode == "direct-video":
+            # Direct video must carry the real encoded bytes and commit to
+            # their identity, exactly as the production adapter does.
+            video = artifacts[0].payload
+            content.update({
+                "video_base64": base64.b64encode(video).decode("ascii"),
+                "video_sha256": _sha(video),
+                "video_size_bytes": len(video),
+                "representation_sha256": _sha(video),
+            })
+        payload = _canonical(content)
         identities = tuple(value.source_identity for value in artifacts)
         commitment = _sha(_canonical({
             "mode": mode,
@@ -537,7 +549,7 @@ class FullFlowSemanticRouteRuntimeTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         admission_fixture.FullFlowSemanticExecutionAdmissionTest.tearDownClass()
 
-    def test_raw_route_runs_n3_n7_n6_n1_with_prepared_frames(self) -> None:
+    def test_raw_route_runs_n3_n7_n6_n1_with_direct_video(self) -> None:
         trial, stages = _bound_case(
             self.trials,
             self.stages,
@@ -552,7 +564,20 @@ class FullFlowSemanticRouteRuntimeTest(unittest.TestCase):
         )
         self.assertEqual(evidence["status"], "COMPLETE")
         self.assertEqual(evidence["route"]["executor_node_id"], "N7")
-        self.assertEqual(evidence["model_input"]["mode"], "raw-prepared-frames")
+        # D0/D4 are now genuine direct-video alternatives: the complete
+        # encoded object reaches N6 and no frames are prepared.
+        self.assertEqual(evidence["model_input"]["mode"], "direct-video")
+        self.assertTrue(evidence["model_input"]["direct_video_input"])
+        self.assertEqual(
+            _sha(PAYLOADS["raw_video"]),
+            evidence["model_input"]["direct_video_sha256"],
+        )
+        self.assertEqual(
+            len(PAYLOADS["raw_video"]),
+            evidence["model_input"]["direct_video_size_bytes"],
+        )
+        self.assertEqual(0, evidence["model_input"]["frame_count"])
+        self.assertIsNone(evidence["model_input"]["frame_sequence_sha256"])
         self.assertEqual(fake.calls["fetch-N3"], 1)
         self.assertEqual(fake.calls["range-fetch"], 0)
         self.assertEqual(fake.calls["infer"], 1)

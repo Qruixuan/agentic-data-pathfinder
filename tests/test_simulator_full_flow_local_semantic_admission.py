@@ -263,7 +263,10 @@ class FullFlowLocalSemanticAdmissionTest(unittest.TestCase):
         self.assertTrue(all(
             row["required_runtime_adapter_ids"] == []
             and row["flowmesh_submission_authorized"] is True
-            and row["semantic_input_profile"]["direct_video_input"] is False
+            # Direct video belongs to the raw family alone; every other
+            # family must keep a derived or sampled representation.
+            and row["semantic_input_profile"]["direct_video_input"]
+            is (row["route_family"] == "raw")
             for row in promoted
         ))
         self.assertTrue(all(
@@ -281,7 +284,7 @@ class FullFlowLocalSemanticAdmissionTest(unittest.TestCase):
             for row in promoted
             if row["route_family"] == "indexed-raw"
         }
-        self.assertEqual({"raw-dense-uniform-24-v1"}, raw_profiles)
+        self.assertEqual({"raw-direct-video-v1"}, raw_profiles)
         self.assertEqual({"indexed-middle-window-8-v1"}, indexed_profiles)
         self.assertEqual(
             (self.legacy / STAGES_NAME).read_bytes(),
@@ -370,9 +373,12 @@ class FullFlowLocalSemanticAdmissionTest(unittest.TestCase):
             "upcloud_ready",
             "live_materialization_measured",
             "indexed_source_byte_selectivity_claimed",
-            "direct_video_input_claimed",
         ):
             self.assertFalse(boundary[key])
+        # The raw family really does deliver encoded video, so this claim is
+        # asserted rather than suppressed; its verifier rebinds it to the
+        # frozen profiles.
+        self.assertTrue(boundary["direct_video_input_claimed"])
         self.assertTrue(boundary["remote_n1_verifier_implemented"])
         inventory = json.loads((output / INVENTORY_NAME).read_text())
         self.assertTrue(inventory["semantic_input_profiles_frozen"])

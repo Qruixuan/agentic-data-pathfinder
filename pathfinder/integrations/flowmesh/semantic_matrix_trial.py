@@ -845,7 +845,8 @@ def _verify_route_evidence(
             and (
                 model_input.get("frame_sequence_sha256") is not None
             ) is (expected_frame_count > 0)
-            and model_input.get("direct_video_input") is False,
+            and model_input.get("direct_video_input")
+            is expected_profile["direct_video_input"],
             "N6 semantic input differs from its frozen profile",
         )
         _digest(

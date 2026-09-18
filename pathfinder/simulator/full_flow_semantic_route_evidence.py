@@ -16,6 +16,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from .full_flow_semantic_input_profiles import RAW_DIRECT_VIDEO_PROFILE_ID
 from .hidden_oracle import (
     N1_SCORE_REQUEST_SCHEMA_VERSION,
     N1_SCORE_RESULT_SCHEMA_VERSION,
@@ -139,6 +140,14 @@ _MODEL_INPUT_FIELDS = {
     "digest_input_sha256",
     "temporal_window_fraction",
     "direct_video_input",
+    "direct_video_sha256",
+    "direct_video_size_bytes",
+}
+# Evidence frozen before the direct-video path existed carries no video
+# fields.  It remains verifiable, but only while it claims no direct video.
+_PRE_DIRECT_VIDEO_MODEL_INPUT_FIELDS = _MODEL_INPUT_FIELDS - {
+    "direct_video_sha256",
+    "direct_video_size_bytes",
 }
 _LEGACY_EVIDENCE_FIELDS = _EVIDENCE_FIELDS - {
     "semantic_input_profile_verified"
@@ -293,6 +302,54 @@ def _copy_json(value: Any) -> Any:
     return json.loads(_canonical(value))
 
 
+def _verify_direct_video_claim(
+    model_input: Mapping[str, Any],
+    profile_id: Any,
+    profile_verified: bool,
+) -> None:
+    """Bind the direct-video claim to the bytes and mode it asserts.
+
+    A telemetry flag alone is never sufficient: the claim must agree with the
+    frozen profile, the N6 input mode, and a committed video identity.
+    """
+
+    claimed = model_input.get("direct_video_input")
+    _require(type(claimed) is bool, "direct_video_input must be boolean")
+    mode = model_input.get("mode")
+    _require(
+        claimed is (mode == "direct-video"),
+        "direct video claim disagrees with the N6 input mode",
+    )
+    if profile_verified:
+        _require(
+            claimed is (profile_id == RAW_DIRECT_VIDEO_PROFILE_ID),
+            "direct video claim disagrees with its frozen profile",
+        )
+    video_sha256 = model_input.get("direct_video_sha256")
+    video_size = model_input.get("direct_video_size_bytes")
+    if not claimed:
+        _require(
+            video_sha256 is None and video_size is None,
+            "non-direct-video input carries a video commitment",
+        )
+        return
+    _digest(video_sha256, "direct_video_sha256")
+    _require(
+        type(video_size) is int and video_size > 0,
+        "direct video size is invalid",
+    )
+    # Real encoded video is delivered whole; it is never a frame sequence and
+    # never carries a sampling window or a derived digest.
+    _require(
+        model_input.get("frame_count") == 0
+        and model_input.get("frame_sequence_sha256") is None
+        and model_input.get("frame_payload_bytes") == 0
+        and model_input.get("temporal_window_fraction") is None
+        and model_input.get("digest_input_sha256") is None,
+        "direct video input also claims a sampled representation",
+    )
+
+
 def _exact_fields(value: Any, expected: set[str], name: str) -> Mapping[str, Any]:
     _require(isinstance(value, Mapping), f"{name} must be an object")
     _require(set(value) == expected, f"{name} fields changed")
@@ -389,11 +446,24 @@ def _validate_shape(evidence: Mapping[str, Any]) -> None:
     for index, row in enumerate(cache):
         _exact_fields(row, _CACHE_BRANCH_FIELDS, f"cache branch {index}")
 
+    model_input_value = evidence.get("model_input")
+    _require(isinstance(model_input_value, Mapping), "model_input must be an object")
+    if is_legacy:
+        _model_input_fields = _LEGACY_MODEL_INPUT_FIELDS
+    elif set(model_input_value) == _PRE_DIRECT_VIDEO_MODEL_INPUT_FIELDS:
+        _model_input_fields = _PRE_DIRECT_VIDEO_MODEL_INPUT_FIELDS
+    else:
+        _model_input_fields = _MODEL_INPUT_FIELDS
     model_input = _exact_fields(
-        evidence.get("model_input"),
-        _LEGACY_MODEL_INPUT_FIELDS if is_legacy else _MODEL_INPUT_FIELDS,
+        model_input_value,
+        _model_input_fields,
         "model_input",
     )
+    if _model_input_fields is _PRE_DIRECT_VIDEO_MODEL_INPUT_FIELDS:
+        _require(
+            model_input.get("direct_video_input") is False,
+            "direct video was claimed without its content-bound evidence",
+        )
     if not is_legacy:
         _digest(
             model_input.get("semantic_content_sha256"),
@@ -486,10 +556,10 @@ def _validate_shape(evidence: Mapping[str, Any]) -> None:
                     and model_input.get("semantic_input_profile_sha256")
                     is None
                 )
-            )
-            and model_input.get("direct_video_input") is False,
+            ),
             "semantic input profile evidence is invalid",
         )
+        _verify_direct_video_claim(model_input, profile_id, profile_verified)
     _exact_fields(evidence.get("semantic"), _SEMANTIC_FIELDS, "semantic")
     _exact_fields(evidence.get("scoring"), _SCORING_FIELDS, "scoring")
 

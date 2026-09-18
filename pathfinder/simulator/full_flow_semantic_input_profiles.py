@@ -5,6 +5,11 @@ module separately freezes how those artifacts are presented to N6.  Keeping
 that policy explicit prevents a raw video and a derived frame bundle from
 silently collapsing to the same model input.
 
+The raw family sends the complete original encoded video to N6 and is the
+only profile permitted to claim ``direct_video_input``.  It freezes no
+frame_selection: the multimodal backend extracts frames itself from the real
+container bytes.
+
 Indexed raw uses an N3-side, source-decoded temporal frame bundle.  N2 binds
 that exact projection to the authoritative MP4, and N6 consumes the returned
 bundle directly.  No arbitrary MP4 byte range or N6-only crop is claimed.
@@ -22,6 +27,7 @@ SEMANTIC_INPUT_PROFILE_SCHEMA_VERSION = (
     "pathfinder.full-flow-semantic-input-profile/v1alpha1"
 )
 
+RAW_DIRECT_VIDEO_PROFILE_ID = "raw-direct-video-v1"
 RAW_DENSE_PROFILE_ID = "raw-dense-uniform-24-v1"
 INDEXED_WINDOW_PROFILE_ID = "indexed-middle-window-8-v1"
 DERIVED_SPARSE_FRAMES_PROFILE_ID = "derived-sparse-frames-4-v1"
@@ -74,6 +80,7 @@ def _profile(
     temporal_window_fraction: tuple[int | float, int | float] | None,
     digest_included: bool,
     source_byte_range_kind: str,
+    direct_video_input: bool = False,
 ) -> dict[str, Any]:
     return {
         "schema_version": SEMANTIC_INPUT_PROFILE_SCHEMA_VERSION,
@@ -95,7 +102,7 @@ def _profile(
             source_byte_range_kind
             == "source-decoded-temporal-frame-bundle"
         ),
-        "direct_video_input": False,
+        "direct_video_input": direct_video_input,
     }
 
 
@@ -115,18 +122,19 @@ def build_semantic_input_profile(
     values = set(representations)
     if route_family == "raw":
         _require(values == {"raw_video"}, "raw profile requires raw_video")
+        # The raw family is the high-fidelity alternative: N6 receives the
+        # complete original encoded video rather than a decoded frame sample.
+        # No frame_selection is frozen because no sampling policy applies on
+        # this path; the backend extracts frames from the real container.
         return _profile(
-            profile_id=RAW_DENSE_PROFILE_ID,
-            input_mode="raw-prepared-frames",
+            profile_id=RAW_DIRECT_VIDEO_PROFILE_ID,
+            input_mode="direct-video",
             representation_ids=representations,
-            frame_count=24,
-            # Freeze exact full-window bounds as integers.  FlowMesh's
-            # Pydantic worker path normalizes integral JSON floats (0.0/1.0)
-            # to integers before delivery.  Starting with 0/1 keeps the
-            # content-bound ingress HMAC byte-stable across that boundary.
-            temporal_window_fraction=(0, 1),
+            frame_count=None,
+            temporal_window_fraction=None,
             digest_included=False,
             source_byte_range_kind="complete-artifact",
+            direct_video_input=True,
         )
     if route_family == "indexed-raw":
         _require(
@@ -256,6 +264,7 @@ __all__ = [
     "DIGEST_ONLY_PROFILE_ID",
     "INDEXED_WINDOW_PROFILE_ID",
     "RAW_DENSE_PROFILE_ID",
+    "RAW_DIRECT_VIDEO_PROFILE_ID",
     "SEMANTIC_INPUT_PROFILE_SCHEMA_VERSION",
     "SemanticInputProfileError",
     "build_semantic_input_profile",

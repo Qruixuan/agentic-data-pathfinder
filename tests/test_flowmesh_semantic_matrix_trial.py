@@ -872,28 +872,41 @@ class ModelInputFrontierTest(unittest.TestCase):
         evidence["trial_sha256"] = _sha(_canonical(trial))
         self._set_model_input(evidence, ["raw_video"])
         evidence["semantic_input_profile_verified"] = True
+        # The raw family is the direct-video alternative, so its frozen
+        # profile carries no frame selection at all.
         evidence["model_input"].update({
-            "mode": "raw-prepared-frames",
+            "mode": "direct-video",
             "semantic_input_profile_id": profile["profile_id"],
             "semantic_input_profile_sha256": profile_sha256(profile),
             "semantic_input_profile_verified": True,
             "semantic_content_sha256": _sha(b"semantic-content"),
-            "frame_count": 24,
-            "frame_timestamps_seconds": [float(index) for index in range(24)],
-            "frame_dimensions": [
-                {"width": 2, "height": 2} for _ in range(24)
-            ],
-            "frame_payload_bytes": 240,
-            "frame_sequence_sha256": _sha(b"frame-sequence"),
+            "frame_count": 0,
+            "frame_timestamps_seconds": [],
+            "frame_dimensions": [],
+            "frame_payload_bytes": 0,
+            "frame_sequence_sha256": None,
             "digest_input_sha256": None,
-            "temporal_window_fraction": [0.0, 1.0],
-            "direct_video_input": False,
+            "temporal_window_fraction": None,
+            "direct_video_input": True,
+            "direct_video_sha256": _sha(b"encoded-video"),
+            "direct_video_size_bytes": 1271056,
         })
         self._verify(trial, stages, evidence)
-        evidence["model_input"]["temporal_window_fraction"] = [0.1, 1.0]
+        # Suppressing the direct-video claim while keeping the direct-video
+        # profile must fail closed.
+        evidence["model_input"]["direct_video_input"] = False
         with self.assertRaisesRegex(
             FlowMeshSemanticTrialError,
-            "frozen profile",
+            "direct video claim",
+        ):
+            self._verify(trial, stages, evidence)
+        evidence["model_input"]["direct_video_input"] = True
+        # So must re-labelling the delivered representation as sampled frames
+        # while still claiming direct video.
+        evidence["model_input"]["mode"] = "raw-prepared-frames"
+        with self.assertRaisesRegex(
+            FlowMeshSemanticTrialError,
+            "direct video claim",
         ):
             self._verify(trial, stages, evidence)
 
