@@ -346,6 +346,34 @@ class SemanticRouteServiceFactoryTests(unittest.TestCase):
         ))
         return stack
 
+    def test_transfer_shaping_requires_one_complete_positive_profile(self) -> None:
+        runtime = self._runtime()
+        with self.assertRaisesRegex(
+            FullFlowSemanticRouteServiceFactoryError,
+            "fully specified",
+        ):
+            replace(
+                runtime,
+                application_transfer_profile_id="core-v1",
+            )
+        with self.assertRaisesRegex(
+            FullFlowSemanticRouteServiceFactoryError,
+            "bandwidth must be positive",
+        ):
+            replace(
+                runtime,
+                application_transfer_profile_id="core-v1",
+                application_transfer_bandwidth_bytes_per_second=0.0,
+                application_transfer_round_trip_time_ms=1.0,
+            )
+        shaped = replace(
+            runtime,
+            application_transfer_profile_id="core-v1",
+            application_transfer_bandwidth_bytes_per_second=250_000_000.0,
+            application_transfer_round_trip_time_ms=1.0,
+        )
+        self.assertEqual("core-v1", shaped.application_transfer_profile_id)
+
     def test_assembles_redacted_http_graph_without_network_calls(self) -> None:
         runtime = self._runtime()
         state = self.root / "state"

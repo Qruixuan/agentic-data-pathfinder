@@ -15,6 +15,7 @@ from pathfinder.data_agent_client import (
 )
 from pathfinder.simulator.full_flow_cache import CachedArtifact
 from pathfinder.simulator.full_flow_route_adapters import (
+    ApplicationShapedByteTransferAdapter,
     FullFlowRouteAdapterError,
     BoundDataAgentAccessRequestFactory,
     BoundIndexQueryAdapter,
@@ -818,6 +819,75 @@ class SemanticAnswerTransportTest(unittest.TestCase):
                         run_id="run-v1", trial=self.TRIAL, stage=self.STAGE,
                         value=value,
                     )
+
+
+class ApplicationShapedTransportTest(unittest.TestCase):
+    def test_executor_link_uses_size_over_rate_plus_rtt(self) -> None:
+        sleeps: list[float] = []
+        ticks = iter((1_000_000_000, 1_250_000_000))
+        result = SemanticInferenceResult(
+            final_answer="four",
+            model="model-v1",
+            input_sha256=_sha(b"input"),
+            request_sha256=_sha(b"request"),
+            result_sha256=_sha(b"result"),
+        )
+        transferred = ApplicationShapedByteTransferAdapter(
+            profile_id="edge-v1",
+            executor_node_id="N8",
+            bandwidth_bytes_per_second=1000.0,
+            round_trip_time_ms=30.0,
+            clock_ns=lambda: next(ticks),
+            sleeper=sleeps.append,
+        ).transfer(
+            run_id="run-v1",
+            trial={"trial_key": "scenario|workload|D4|r0000"},
+            stage={
+                "stage_key": "scenario|workload|D4|r0000|send-input",
+                "logical_node_ids": ["N8", "N6"],
+            },
+            value=result,
+        )
+        self.assertEqual([0.034], sleeps)
+        self.assertEqual("edge-v1", transferred.application_shaping_profile_id)
+        self.assertEqual(
+            34.0,
+            transferred.configured_application_shaping_target_ms,
+        )
+        self.assertEqual(250.0, transferred.telemetry.service_time_ms)
+        self.assertEqual(4, transferred.telemetry.bytes_sent)
+
+    def test_non_executor_link_is_bound_but_not_delayed(self) -> None:
+        sleeps: list[float] = []
+        ticks = iter((1_000_000_000, 1_000_000_000))
+        result = SemanticInferenceResult(
+            final_answer="B",
+            model="model-v1",
+            input_sha256=_sha(b"input"),
+            request_sha256=_sha(b"request"),
+            result_sha256=_sha(b"result"),
+        )
+        transferred = ApplicationShapedByteTransferAdapter(
+            profile_id="edge-v1",
+            executor_node_id="N8",
+            bandwidth_bytes_per_second=1000.0,
+            round_trip_time_ms=30.0,
+            clock_ns=lambda: next(ticks),
+            sleeper=sleeps.append,
+        ).transfer(
+            run_id="run-v1",
+            trial={"trial_key": "scenario|workload|D4|r0000"},
+            stage={
+                "stage_key": "scenario|workload|D4|r0000|return-answer",
+                "logical_node_ids": ["N6", "N1"],
+            },
+            value=result,
+        )
+        self.assertEqual([], sleeps)
+        self.assertEqual(
+            0.0,
+            transferred.configured_application_shaping_target_ms,
+        )
 
 
 class IndexSelectionTransportTest(unittest.TestCase):

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -58,6 +59,7 @@ from .full_flow_n6_adapters import (
 )
 from .full_flow_provisioning_catalog import FrozenProvisioningCatalog
 from .full_flow_route_adapters import (
+    ApplicationShapedByteTransferAdapter,
     BoundDataAgentAccessRequestFactory,
     BoundIndexQueryAdapter,
     DataAgentArtifactSourceAdapter,
@@ -292,6 +294,9 @@ class RuntimeSemanticServiceInputs:
     n1_verification_base_url: str = field(repr=False)
     n1_verification_bearer_token: str = field(repr=False)
     semantic_model: str
+    application_transfer_profile_id: str | None = None
+    application_transfer_bandwidth_bytes_per_second: float | None = None
+    application_transfer_round_trip_time_ms: float | None = None
     timeout_seconds: float = 300.0
     max_artifact_bytes: int = _DEFAULT_MAX_ARTIFACT_BYTES
     simulator_private_http_hosts: tuple[str, ...] = ()
@@ -301,6 +306,37 @@ class RuntimeSemanticServiceInputs:
             self.logical_node_id in {"N7", "N8"},
             "semantic route service must be N7 or N8",
         )
+        shaping = (
+            self.application_transfer_profile_id,
+            self.application_transfer_bandwidth_bytes_per_second,
+            self.application_transfer_round_trip_time_ms,
+        )
+        _require(
+            all(value is None for value in shaping)
+            or all(value is not None for value in shaping),
+            "application transfer shaping must be fully specified",
+        )
+        if self.application_transfer_profile_id is not None:
+            _identifier(
+                self.application_transfer_profile_id,
+                "application transfer profile ID",
+            )
+            bandwidth = self.application_transfer_bandwidth_bytes_per_second
+            rtt = self.application_transfer_round_trip_time_ms
+            _require(
+                not isinstance(bandwidth, bool)
+                and isinstance(bandwidth, (int, float))
+                and math.isfinite(float(bandwidth))
+                and float(bandwidth) > 0.0,
+                "application transfer bandwidth must be positive",
+            )
+            _require(
+                not isinstance(rtt, bool)
+                and isinstance(rtt, (int, float))
+                and math.isfinite(float(rtt))
+                and float(rtt) >= 0.0,
+                "application transfer RTT must be non-negative",
+            )
         mappings = {
             "index_base_urls": (self.index_base_urls, {"N2", "N7", "N8"}),
             "index_bearer_tokens": (
@@ -1203,6 +1239,20 @@ def assemble_full_flow_semantic_route_service(
         scorer=scorer,
         provisioning=FrozenProvisioningReferenceAdapter(
             provisioning_catalog.references
+        ),
+        transport=(
+            None
+            if runtime.application_transfer_profile_id is None
+            else ApplicationShapedByteTransferAdapter(
+                profile_id=runtime.application_transfer_profile_id,
+                executor_node_id=runtime.logical_node_id,
+                bandwidth_bytes_per_second=float(
+                    runtime.application_transfer_bandwidth_bytes_per_second
+                ),
+                round_trip_time_ms=float(
+                    runtime.application_transfer_round_trip_time_ms
+                ),
+            )
         ),
     )
     coordinator = GenericSemanticRouteCoordinator(

@@ -835,6 +835,18 @@ def _direct_launcher(contract: Mapping[str, Any]) -> dict[str, Any] | None:
                 "--max-artifact-bytes",
                 "PATHFINDER_SEMANTIC_ROUTE_MAX_ARTIFACT_BYTES",
             ),
+            (
+                "--application-transfer-profile-id",
+                f"PATHFINDER_{node}_APPLICATION_TRANSFER_PROFILE_ID",
+            ),
+            (
+                "--application-transfer-bandwidth-bytes-per-second",
+                f"PATHFINDER_{node}_APPLICATION_TRANSFER_BANDWIDTH_BPS",
+            ),
+            (
+                "--application-transfer-round-trip-time-ms",
+                f"PATHFINDER_{node}_APPLICATION_TRANSFER_RTT_MS",
+            ),
             ("--port", f"PATHFINDER_{node}_ROUTE_LISTEN_PORT"),
         )
         argv: list[str] = [
@@ -901,6 +913,9 @@ def _direct_launcher(contract: Mapping[str, Any]) -> dict[str, Any] | None:
                 "PATHFINDER_SEMANTIC_ROUTE_MODEL",
                 "PATHFINDER_SEMANTIC_ROUTE_PRIVATE_HTTP_HOSTS",
                 "PATHFINDER_SEMANTIC_ROUTE_TIMEOUT_SECONDS",
+                f"PATHFINDER_{node}_APPLICATION_TRANSFER_BANDWIDTH_BPS",
+                f"PATHFINDER_{node}_APPLICATION_TRANSFER_PROFILE_ID",
+                f"PATHFINDER_{node}_APPLICATION_TRANSFER_RTT_MS",
             ),
             health_route="/healthz",
             independently_startable=True,

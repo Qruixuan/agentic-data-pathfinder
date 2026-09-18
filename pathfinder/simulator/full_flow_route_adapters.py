@@ -852,6 +852,90 @@ class InProcessByteTransferAdapter:
         )
 
 
+class ApplicationShapedByteTransferAdapter:
+    """Apply one explicit executor-link envelope to logical byte handoffs.
+
+    The route still uses real HTTP for service calls.  This adapter adds only
+    the frozen application-level bandwidth/RTT floor for handoffs that touch
+    the selected N7/N8 executor.  It is therefore controlled shaping, not a
+    claim that the underlying UpCloud network was measured at this rate.
+    """
+
+    def __init__(
+        self,
+        *,
+        profile_id: str,
+        executor_node_id: str,
+        bandwidth_bytes_per_second: float,
+        round_trip_time_ms: float,
+        clock_ns: Callable[[], int] = time.perf_counter_ns,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._profile_id = _identifier(profile_id, "shaping profile ID")
+        _require(
+            executor_node_id in {"N7", "N8"},
+            "shaping executor must be N7 or N8",
+        )
+        self._executor = executor_node_id
+        self._bandwidth = _number(
+            bandwidth_bytes_per_second,
+            "shaping bandwidth",
+        )
+        _require(self._bandwidth > 0.0, "shaping bandwidth must be positive")
+        self._rtt_ms = _number(round_trip_time_ms, "shaping RTT")
+        self._clock_ns = clock_ns
+        self._sleeper = sleeper
+
+    def transfer(
+        self,
+        *,
+        run_id: str,
+        trial: Mapping[str, Any],
+        stage: Mapping[str, Any],
+        value: Any,
+    ) -> TransferResult:
+        started = self._clock_ns()
+        payload_sha, size = _value_payload(value)
+        logical_nodes = stage.get("logical_node_ids")
+        _require(
+            isinstance(logical_nodes, list)
+            and all(isinstance(node, str) for node in logical_nodes),
+            "transfer stage logical nodes are invalid",
+        )
+        shaped = self._executor in logical_nodes and len(logical_nodes) > 1
+        target_ms = (
+            self._rtt_ms + (size / self._bandwidth) * 1000.0
+            if shaped
+            else 0.0
+        )
+        if target_ms > 0.0:
+            self._sleeper(target_ms / 1000.0)
+        transfer_sha = _sha256(_canonical({
+            "domain": "pathfinder.application-shaped-byte-handoff/v1",
+            "run_id": run_id,
+            "trial_key": trial.get("trial_key"),
+            "stage_key": stage.get("stage_key"),
+            "payload_sha256": payload_sha,
+            "payload_size_bytes": size,
+            "application_shaping_profile_id": self._profile_id,
+            "bandwidth_bytes_per_second": self._bandwidth,
+            "round_trip_time_ms": self._rtt_ms,
+            "configured_application_shaping_target_ms": target_ms,
+            "network_measurement_claimed": False,
+        }))
+        finished = self._clock_ns()
+        return TransferResult(
+            value=value,
+            transfer_sha256=transfer_sha,
+            telemetry=AdapterTelemetry(
+                service_time_ms=_elapsed_ms(started, finished),
+                bytes_sent=size,
+            ),
+            application_shaping_profile_id=self._profile_id,
+            configured_application_shaping_target_ms=target_ms,
+        )
+
+
 class CacheLineageStore(Protocol):
     def resolve(
         self,
@@ -1515,7 +1599,11 @@ def build_http_semantic_route_adapters(
     scorer: VerifiedN1HTTPScoringAdapter,
     provisioning: FrozenProvisioningReferenceAdapter,
     control: InProcessTrialControlAdapter | None = None,
-    transport: InProcessByteTransferAdapter | None = None,
+    transport: (
+        InProcessByteTransferAdapter
+        | ApplicationShapedByteTransferAdapter
+        | None
+    ) = None,
     raw_range_allowed_media_types: Sequence[str] = ("video/mp4",),
 ) -> SemanticRouteAdapters:
     """Assemble the production-facing adapter bundle.
@@ -1547,6 +1635,7 @@ def build_http_semantic_route_adapters(
 
 
 __all__ = [
+    "ApplicationShapedByteTransferAdapter",
     "BoundDataAgentAccessRequestFactory",
     "BoundIndexQueryAdapter",
     "CacheLineageStore",

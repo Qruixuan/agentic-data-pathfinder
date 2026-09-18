@@ -318,9 +318,25 @@ class TransferResult:
     value: Any
     transfer_sha256: str
     telemetry: AdapterTelemetry = field(default_factory=AdapterTelemetry)
+    application_shaping_profile_id: str | None = None
+    configured_application_shaping_target_ms: float = 0.0
 
     def __post_init__(self) -> None:
         _digest(self.transfer_sha256, "transfer_sha256")
+        if self.application_shaping_profile_id is not None:
+            _identifier(
+                self.application_shaping_profile_id,
+                "application_shaping_profile_id",
+            )
+        _number(
+            self.configured_application_shaping_target_ms,
+            "configured_application_shaping_target_ms",
+        )
+        _require(
+            self.application_shaping_profile_id is not None
+            or self.configured_application_shaping_target_ms == 0.0,
+            "configured shaping target lacks a profile identity",
+        )
 
 
 @dataclass(frozen=True)

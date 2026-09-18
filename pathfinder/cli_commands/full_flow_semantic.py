@@ -527,6 +527,15 @@ def register_full_flow_semantic_commands(
     semantic_route_serve.add_argument(
         "--max-artifact-bytes", type=int, default=2 * 1024 * 1024 * 1024
     )
+    semantic_route_serve.add_argument("--application-transfer-profile-id")
+    semantic_route_serve.add_argument(
+        "--application-transfer-bandwidth-bytes-per-second",
+        type=positive_finite_float,
+    )
+    semantic_route_serve.add_argument(
+        "--application-transfer-round-trip-time-ms",
+        type=positive_finite_float,
+    )
     semantic_route_serve.add_argument("--host", default="0.0.0.0")
     semantic_route_serve.add_argument("--port", type=int, required=True)
 
@@ -1123,6 +1132,15 @@ def dispatch_full_flow_semantic_command(
             n1_verification_base_url=args.n1_verification_base_url,
             n1_verification_bearer_token=credentials["N1 verifier"],
             semantic_model=args.semantic_model,
+            application_transfer_profile_id=(
+                args.application_transfer_profile_id
+            ),
+            application_transfer_bandwidth_bytes_per_second=(
+                args.application_transfer_bandwidth_bytes_per_second
+            ),
+            application_transfer_round_trip_time_ms=(
+                args.application_transfer_round_trip_time_ms
+            ),
             timeout_seconds=args.timeout_seconds,
             max_artifact_bytes=args.max_artifact_bytes,
             simulator_private_http_hosts=private_hosts,
