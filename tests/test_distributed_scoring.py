@@ -85,7 +85,7 @@ class DistributedScoringTest(unittest.TestCase):
         self.assertIn("[A] The person sits down", rendered)
         self.assertIn("[B] The person walks outside", rendered)
         self.assertTrue(rendered.endswith(
-            "Return exactly one option ID and no other text."
+            "Return exactly one listed option ID and no other text."
         ))
 
     def test_canonical_option_marker_rule_accepts_only_one_explicit_marker(self) -> None:
@@ -99,7 +99,10 @@ class DistributedScoringTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertIs(False, evaluate_workload_answer(answer, contract))
         rendered = render_workload_question(exact_workload(), contract)
-        self.assertIn("C or [C] are accepted", rendered)
+        self.assertTrue(rendered.endswith(
+            "Return exactly one listed option ID and no other text."
+        ))
+        self.assertNotIn("C or [C] are accepted", rendered)
 
     def test_malformed_exact_labels_fail_closed(self) -> None:
         cases = (

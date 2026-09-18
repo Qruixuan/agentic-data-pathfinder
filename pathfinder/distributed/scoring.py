@@ -242,12 +242,7 @@ def render_workload_question(
         for option in contract.answer_options
     )
     completion_instruction = (
-        "Return exactly one option ID and no other text."
-        if contract.rule == MULTIPLE_CHOICE_EXACT_SCORING_RULE
-        else (
-            "Return exactly one option marker: C or [C] are accepted; "
-            "do not add prose, punctuation, or multiple options."
-        )
+        "Return exactly one listed option ID and no other text."
     )
     return (
         f"{question}\n\nOptions:\n{options}\n\n"
