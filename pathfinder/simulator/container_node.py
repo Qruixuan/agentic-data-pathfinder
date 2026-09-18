@@ -86,6 +86,7 @@ _MAX_SEMANTIC_IMAGE_PIXELS = 16 * 1024 * 1024
 _MAX_SEMANTIC_TOTAL_IMAGE_PIXELS = 64 * 1024 * 1024
 _MAX_RUNTIME_SECRET_BYTES = 8192
 _SEMANTIC_IMAGE_DECODE_TIMEOUT_SECONDS = 3.0
+_MAX_SEMANTIC_PROVIDER_ERROR_BYTES = 64 * 1024
 _SEMANTIC_LLM_RETRY_BACKOFF_SECONDS = (5.0, 20.0)
 _SEMANTIC_LLM_TRANSIENT_HTTP_STATUS = frozenset(
     {408, 425, 429, 500, 502, 503, 504}
@@ -183,6 +184,27 @@ class ContainerNodeError(ValueError):
     """Raised when an operation is unsafe or assigned to the wrong node."""
 
 
+class SemanticLLMRequestError(ContainerNodeError):
+    """Carry credential-free provider failure metadata for safe diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        http_status: int | None = None,
+        provider_code: str | None = None,
+        provider_type: str | None = None,
+        provider_message_sha256: str | None = None,
+        transport_error_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.provider_code = provider_code
+        self.provider_type = provider_type
+        self.provider_message_sha256 = provider_message_sha256
+        self.transport_error_type = transport_error_type
+
+
 class ContainerNodeUnauthorized(ContainerNodeError):
     """Raised without detail when a protected node endpoint rejects a caller."""
 
@@ -231,6 +253,68 @@ def _semantic_llm_opener(base_url: str) -> Any:
         handlers.append(ProxyHandler({}))
     handlers.append(_RejectRedirects())
     return build_opener(*handlers)
+
+
+def _safe_provider_error_label(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    label = value.strip()
+    if not label or len(label) > 128:
+        return None
+    if re.fullmatch(r"[A-Za-z0-9._-]+", label) is None:
+        return None
+    return label
+
+
+def _semantic_provider_error_metadata(
+    exc: HTTPError,
+) -> tuple[str | None, str | None, str | None]:
+    try:
+        raw = exc.read(_MAX_SEMANTIC_PROVIDER_ERROR_BYTES + 1)
+    except OSError:
+        return None, None, None
+    if len(raw) > _MAX_SEMANTIC_PROVIDER_ERROR_BYTES:
+        return None, None, None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None, None, None
+    if not isinstance(payload, Mapping):
+        return None, None, None
+    error = payload.get("error")
+    source = error if isinstance(error, Mapping) else payload
+    code = _safe_provider_error_label(source.get("code"))
+    error_type = _safe_provider_error_label(source.get("type"))
+    message = source.get("message")
+    message_sha256 = (
+        hashlib.sha256(message.encode("utf-8")).hexdigest()
+        if isinstance(message, str)
+        else None
+    )
+    return code, error_type, message_sha256
+
+
+def _semantic_error_diagnostic(exc: BaseException) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "schema_version": "pathfinder.semantic-request-error/v1alpha1",
+        "event": "semantic-request-error",
+        "error_type": type(exc).__name__,
+        "error_sha256": hashlib.sha256(str(exc).encode("utf-8")).hexdigest(),
+        "credentials_recorded": False,
+    }
+    if isinstance(exc, SemanticLLMRequestError):
+        event.update({
+            key: value
+            for key, value in {
+                "http_status": exc.http_status,
+                "provider_code": exc.provider_code,
+                "provider_type": exc.provider_type,
+                "provider_message_sha256": exc.provider_message_sha256,
+                "transport_error_type": exc.transport_error_type,
+            }.items()
+            if value is not None
+        })
+    return event
 
 
 def _require(condition: bool, message: str) -> None:
@@ -1224,23 +1308,31 @@ class ContainerNodeRuntime:
                 break
             except HTTPError as exc:
                 status = int(exc.code)
+                provider_code, provider_type, message_sha256 = (
+                    _semantic_provider_error_metadata(exc)
+                )
                 exc.close()
                 retry = (
                     status in _SEMANTIC_LLM_TRANSIENT_HTTP_STATUS
                     and attempt < len(_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS)
                 )
                 if not retry:
-                    raise ContainerNodeError(
-                        f"semantic LLM request failed with HTTP {status}"
+                    raise SemanticLLMRequestError(
+                        f"semantic LLM request failed with HTTP {status}",
+                        http_status=status,
+                        provider_code=provider_code,
+                        provider_type=provider_type,
+                        provider_message_sha256=message_sha256,
                     ) from exc
             except (URLError, TimeoutError, OSError) as exc:
                 retry = attempt < len(
                     _SEMANTIC_LLM_RETRY_BACKOFF_SECONDS
                 )
                 if not retry:
-                    raise ContainerNodeError(
+                    raise SemanticLLMRequestError(
                         "semantic LLM request failed: "
-                        f"{type(exc).__name__}"
+                        f"{type(exc).__name__}",
+                        transport_error_type=type(exc).__name__,
                     ) from exc
             time.sleep(_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS[attempt])
         _require(len(raw) <= _MAX_JSON_BYTES, "semantic LLM response is too large")
@@ -2301,6 +2393,16 @@ class ContainerNodeRequestHandler(BaseHTTPRequestHandler):
         except ContainerNodeUnauthorized as exc:
             self._write_unauthorized(exc.challenge)
         except (ContainerNodeError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            if self.path == "/v1/semantic/chat-completions":
+                print(
+                    json.dumps(
+                        _semantic_error_diagnostic(exc),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
             self._write_json(400, {"status": "error", "message": str(exc)})
         except Exception as exc:
             self._write_json(500, {

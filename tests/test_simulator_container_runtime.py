@@ -2059,9 +2059,18 @@ class LocalSemanticExecutionTest(unittest.TestCase):
                 length = int(self.headers["Content-Length"])
                 self.rfile.read(length)
                 requests += 1
+                body = json.dumps({
+                    "error": {
+                        "code": "invalid_multimodal_input",
+                        "type": "invalid_request_error",
+                        "message": "provider detail must not escape",
+                    },
+                }).encode("utf-8")
                 self.send_response(400)
-                self.send_header("Content-Length", "0")
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
+                self.wfile.write(body)
 
         llm = ThreadingHTTPServer(("127.0.0.1", 0), RejectedHandler)
         self._start(llm)
@@ -2079,15 +2088,31 @@ class LocalSemanticExecutionTest(unittest.TestCase):
                 "PATHFINDER_SEMANTIC_LLM_API_KEY": "retry-test-secret",
             }, clear=False),
             mock.patch.object(container_node.time, "sleep") as sleep,
-            self.assertRaisesRegex(
+        ):
+            with self.assertRaisesRegex(
                 ContainerNodeError,
                 "semantic LLM request failed with HTTP 400",
-            ),
-        ):
-            runtime._call_semantic_llm("Return an option.")
+            ) as caught:
+                runtime._call_semantic_llm("Return an option.")
 
         self.assertEqual(1, requests)
         sleep.assert_not_called()
+        error = caught.exception
+        self.assertIsInstance(error, container_node.SemanticLLMRequestError)
+        self.assertEqual(400, error.http_status)
+        self.assertEqual("invalid_multimodal_input", error.provider_code)
+        self.assertEqual("invalid_request_error", error.provider_type)
+        self.assertEqual(
+            sha256(b"provider detail must not escape").hexdigest(),
+            error.provider_message_sha256,
+        )
+        diagnostic = container_node._semantic_error_diagnostic(error)
+        self.assertEqual("semantic-request-error", diagnostic["event"])
+        self.assertEqual(False, diagnostic["credentials_recorded"])
+        self.assertNotIn(
+            "provider detail must not escape",
+            json.dumps(diagnostic),
+        )
 
     def test_external_semantic_llm_keeps_default_proxy_discovery(self) -> None:
         sentinel = object()
