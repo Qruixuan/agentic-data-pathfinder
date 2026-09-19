@@ -104,7 +104,11 @@ def _write_package(target: Path, files: Mapping[str, bytes]) -> None:
     for name in sorted(files):
         (target / name).write_bytes(files[name])
         lines.append(f"{_sha256(files[name])}  {name}")
-    (target / CHECKSUMS_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # Write explicit LF bytes: text mode would apply the platform newline
+    # translation, so a manifest frozen on Windows would not verify with a
+    # strict sha256sum on Linux.
+    manifest = ("\n".join(lines) + "\n").encode("utf-8")
+    (target / CHECKSUMS_NAME).write_bytes(manifest)
 
 
 def verify_checksums(root: Path) -> None:

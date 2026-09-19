@@ -256,6 +256,26 @@ class SelectionRuleTest(unittest.TestCase):
 
 
 class ChecksumTest(unittest.TestCase):
+    def test_manifest_uses_lf_so_strict_sha256sum_can_verify_it(self) -> None:
+        """A manifest frozen on Windows must verify on Linux byte for byte."""
+
+        from pathfinder.simulator.full_flow_visible_screening import (
+            CHECKSUMS_NAME,
+            _write_package,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "pkg"
+            _write_package(target, {"a.json": b'{"x":1}', "b.json": b'{"y":2}'})
+            raw = (target / CHECKSUMS_NAME).read_bytes()
+            self.assertNotIn(b"\r", raw)
+            self.assertTrue(raw.endswith(b"\n"))
+            # Every listed name must be usable verbatim as a path.
+            for line in raw.decode("utf-8").splitlines():
+                _digest, _, name = line.partition("  ")
+                self.assertTrue((target / name).is_file())
+            verify_checksums(target)
+
     def test_tampered_package_fails_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
