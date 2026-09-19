@@ -142,19 +142,45 @@ class RelationDetectionTest(unittest.TestCase):
         from pathfinder.simulator.full_flow_temporal_index import anchor_clause
 
         cases = {
+            # Trailing-cue form: the event runs to the end.
+            "What happened after the dog barked?": "the dog barked",
             "what did the animal do after it entered the room":
                 "it entered the room",
-            "what happened before the vehicle stopped moving":
-                "the vehicle stopped moving",
-            "what is the person doing while standing by the door":
+            "What happened before the vehicle stopped?": "the vehicle stopped",
+            "What is the person doing while standing by the door?":
                 "standing by the door",
+            # Leading-cue form: the event runs to the first comma, and the
+            # requested consequence after the comma must be discarded.
+            "After the dog barked, what happened?": "the dog barked",
+            "Before the vehicle stopped, what happened?": "the vehicle stopped",
+            "While standing by the door, what is the person doing?":
+                "standing by the door",
+            # Case and punctuation variation.
+            "WHAT HAPPENED AFTER THE GATE OPENED?": "THE GATE OPENED",
             # No relation: the whole question is the anchor clause.
-            "what colour is the large object":
-                "what colour is the large object",
+            "what colour is the large object": "what colour is the large object",
         }
         for question, expected in cases.items():
             with self.subTest(question=question):
                 self.assertEqual(expected, anchor_clause(question))
+
+    def test_both_orderings_yield_the_same_anchor_clause(self) -> None:
+        from pathfinder.simulator.full_flow_temporal_index import anchor_clause
+
+        for trailing, leading in (
+            ("What happened after the dog barked?", "After the dog barked, what happened?"),
+            ("What happened before the light changed?", "Before the light changed, what happened?"),
+        ):
+            with self.subTest(pair=trailing):
+                self.assertEqual(anchor_clause(trailing), anchor_clause(leading))
+
+    def test_anchor_is_the_event_not_the_requested_consequence(self) -> None:
+        from pathfinder.simulator.full_flow_temporal_index import anchor_clause
+
+        clause = anchor_clause("what did the person do after the alarm sounded")
+        self.assertEqual("the alarm sounded", clause)
+        # The consequence being asked about must not survive into the anchor.
+        self.assertNotIn("what did the person do", clause)
 
     def test_cue_inside_a_longer_word_is_not_a_relation(self) -> None:
         from pathfinder.simulator.full_flow_temporal_index import anchor_clause

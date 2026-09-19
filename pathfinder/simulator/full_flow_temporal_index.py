@@ -150,9 +150,18 @@ def anchor_clause(question: str) -> str:
     parts = re.split(pattern, question, maxsplit=1, flags=re.IGNORECASE)
     if len(parts) < 2:
         return question.strip()
-    tail = parts[1].strip(" ,;:?.")
+    tail = parts[1]
+    # Both orderings put the event immediately after the cue:
+    #   "what happened after <event>"   -> <event> runs to the end
+    #   "After <event>, what happened?" -> <event> runs to the first comma
+    # so prefer the clause up to the first comma and fall back to the rest.
+    head = tail.split(",", 1)[0]
+    for candidate in (head, tail):
+        cleaned = candidate.strip(" ,;:?.!")
+        if len(cleaned.split()) >= 2:
+            return cleaned
     # A cue with nothing meaningful after it cannot define an anchor clause.
-    return tail if len(tail.split()) >= 2 else question.strip()
+    return question.strip()
 
 
 @dataclass(frozen=True)
