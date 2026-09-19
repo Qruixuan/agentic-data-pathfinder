@@ -136,6 +136,11 @@ def _frame(index: int) -> N6SampledFrame:
     )
 
 
+# One N3 selection-policy document digest, written into both bundle manifest
+# fields and into the exact-range row, exactly as the real freezer does.
+SELECTION_POLICY_SHA = "e" * 64
+
+
 def _bundle_bytes(
     frame_count: int = 2,
     *,
@@ -143,6 +148,7 @@ def _bundle_bytes(
     sampling_method: str = "uniform-midpoint",
     source_duration_seconds: float | None = None,
     timestamp_start: float = 0.5,
+    selection_policy_sha256: str = SELECTION_POLICY_SHA,
 ) -> bytes:
     frames = [
         N6SampledFrame(
@@ -190,9 +196,9 @@ def _bundle_bytes(
         "source_frame_descriptions": {
             "representation_id": "sampled_frames",
             "path": f"{OBJECT_ID}/sampled_frames.json",
-            "sha256": "b" * 64,
+            "sha256": selection_policy_sha256,
         },
-        "generation_manifest_sha256": "c" * 64,
+        "generation_manifest_sha256": selection_policy_sha256,
         "frames": rows,
         "frame_count": frame_count,
         "total_jpeg_bytes": sum(len(frame.jpeg_bytes) for frame in frames),
@@ -392,7 +398,7 @@ class N6PreparationTest(unittest.TestCase):
             frame_count=8,
             temporal_start_fraction=0.25,
             temporal_end_fraction=0.75,
-            selection_policy_sha256="e" * 64,
+            selection_policy_sha256=SELECTION_POLICY_SHA,
         )
         indexed_sampler = RecordingSampler()
         indexed = self._prepare_profiled(

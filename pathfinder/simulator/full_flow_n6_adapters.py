@@ -53,6 +53,7 @@ from .full_flow_semantic_route_runtime import (
     SemanticInferenceResult,
 )
 from .hidden_oracle import build_n1_public_task_binding
+from .n3_indexed_data_plane import SOURCE_SIDE_TEMPORAL_SAMPLING_METHODS
 from .full_flow_semantic_input_profiles import (
     SemanticInputProfileError,
     validate_semantic_input_profile,
@@ -923,14 +924,24 @@ class N6ModelInputAdapter:
             artifact_media_type=FRAME_BUNDLE_MEDIA_TYPE,
             limits=self._limits.frame_bundle_limits,
         )
+        # Bind the projection policy itself rather than one hard-coded method
+        # name.  N3 writes the digest of its selection-policy document into
+        # both manifest fields and into the catalog row this descriptor came
+        # from, so equality pins the method, the frame count, the window and
+        # the JPEG parameters together -- for every projection method the N3
+        # data plane supports, not just the fixed middle window.
         _require(
             bundle.source.source_video_sha256
             == access.source_identity.artifact_sha256
             and bundle.source.source_video_size_bytes
             == access.source_identity.artifact_size_bytes
             and bundle.source.declared_frame_count == selection.frame_count
+            and bundle.source.generation_manifest_sha256
+            == selection.selection_policy_sha256
+            and bundle.source.frame_descriptions_sha256
+            == selection.selection_policy_sha256
             and bundle.source.sampling_method
-            == "uniform-midpoint-temporal-window",
+            in SOURCE_SIDE_TEMPORAL_SAMPLING_METHODS,
             "N3 temporal bundle does not bind its raw source and policy",
         )
         sampled = tuple(

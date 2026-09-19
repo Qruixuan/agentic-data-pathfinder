@@ -79,10 +79,11 @@ DEFAULT_TEMPORAL_END_FRACTION = 0.75
 # frozen alongside it so the selection can be audited rather than assumed.
 UNIFORM_MIDPOINT_SAMPLING_METHOD = "uniform-midpoint-temporal-window"
 TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD = "temporal-index-selected-interval"
-_SAMPLING_METHODS = frozenset({
+SOURCE_SIDE_TEMPORAL_SAMPLING_METHODS = frozenset({
     UNIFORM_MIDPOINT_SAMPLING_METHOD,
     TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD,
 })
+_SAMPLING_METHODS = SOURCE_SIDE_TEMPORAL_SAMPLING_METHODS
 _SELECTION_PROVENANCE_KEYS = frozenset({
     "action_id",
     "anchor_window_ordinals",
@@ -843,6 +844,7 @@ __all__ = [
     "INDEXED_PROVENANCE_SCHEMA_VERSION",
     "INDEXED_REPRESENTATION_ID",
     "N3_INDEXED_DATA_PLANE_SCHEMA_VERSION",
+    "SOURCE_SIDE_TEMPORAL_SAMPLING_METHODS",
     "N3IndexedDataPlaneError",
     "N3TemporalSelectionPolicy",
     "build_n3_indexed_data_plane_package",
