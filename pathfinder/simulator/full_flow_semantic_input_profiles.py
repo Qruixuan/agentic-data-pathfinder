@@ -30,6 +30,16 @@ SEMANTIC_INPUT_PROFILE_SCHEMA_VERSION = (
 RAW_DIRECT_VIDEO_PROFILE_ID = "raw-direct-video-v1"
 RAW_DENSE_PROFILE_ID = "raw-dense-uniform-24-v1"
 INDEXED_WINDOW_PROFILE_ID = "indexed-middle-window-8-v1"
+# A distinct profile ID for the query-aware projection. The legacy ID keeps
+# describing the fixed middle window so historical artifacts stay verifiable;
+# the design IDs (D1/D5) are unchanged so the comparison stays comparable.
+INDEXED_QUERY_AWARE_PROFILE_ID = "indexed-query-aware-temporal-selection-v1"
+FIXED_MIDDLE_WINDOW_SELECTION = "fixed-middle-window"
+QUERY_AWARE_TEMPORAL_INDEX_SELECTION = "query-aware-temporal-index"
+_INDEXED_SELECTION_KINDS = frozenset({
+    FIXED_MIDDLE_WINDOW_SELECTION,
+    QUERY_AWARE_TEMPORAL_INDEX_SELECTION,
+})
 DERIVED_SPARSE_FRAMES_PROFILE_ID = "derived-sparse-frames-4-v1"
 DERIVED_SPARSE_FUSION_PROFILE_ID = "derived-sparse-fusion-4-v1"
 DIGEST_ONLY_PROFILE_ID = "derived-digest-only-v1"
@@ -80,6 +90,7 @@ def _profile(
     temporal_window_fraction: tuple[int | float, int | float] | None,
     digest_included: bool,
     source_byte_range_kind: str,
+    frame_selection_method: str = "uniform-midpoint",
     direct_video_input: bool = False,
 ) -> dict[str, Any]:
     return {
@@ -91,7 +102,7 @@ def _profile(
             None
             if frame_count is None
             else {
-                "method": "uniform-midpoint",
+                "method": frame_selection_method,
                 "frame_count": frame_count,
                 "temporal_window_fraction": list(temporal_window_fraction),
             }
@@ -110,10 +121,41 @@ def build_semantic_input_profile(
     *,
     route_family: str,
     model_input_representation_ids: Sequence[str],
+    indexed_selection_kind: str = FIXED_MIDDLE_WINDOW_SELECTION,
+    indexed_frame_count: int | None = None,
+    indexed_temporal_window_fraction: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """Build the one allowed profile for a frozen model-input frontier."""
 
     _require(route_family in _ROUTE_FAMILIES, "semantic route family is invalid")
+    _require(
+        indexed_selection_kind in _INDEXED_SELECTION_KINDS,
+        "indexed selection kind is invalid",
+    )
+    query_aware = indexed_selection_kind == QUERY_AWARE_TEMPORAL_INDEX_SELECTION
+    _require(
+        query_aware or (
+            indexed_frame_count is None
+            and indexed_temporal_window_fraction is None
+        ),
+        "the fixed middle window profile does not accept a derived selection",
+    )
+    if query_aware:
+        _require(
+            route_family == "indexed-raw",
+            "only the indexed-raw family has a query-aware projection",
+        )
+        _require(
+            type(indexed_frame_count) is int and 0 < indexed_frame_count <= 32,
+            "a query-aware profile requires its runtime frame count",
+        )
+        _require(
+            isinstance(indexed_temporal_window_fraction, tuple)
+            and len(indexed_temporal_window_fraction) == 2
+            and 0.0 <= float(indexed_temporal_window_fraction[0])
+            < float(indexed_temporal_window_fraction[1]) <= 1.0,
+            "a query-aware profile requires its selected interval",
+        )
     representations = tuple(sorted(model_input_representation_ids))
     _require(
         representations and len(representations) == len(set(representations)),
@@ -141,6 +183,17 @@ def build_semantic_input_profile(
             values == {"raw_video"},
             "indexed profile requires raw_video",
         )
+        if query_aware:
+            return _profile(
+                profile_id=INDEXED_QUERY_AWARE_PROFILE_ID,
+                input_mode="raw-prepared-frames",
+                representation_ids=representations,
+                frame_count=indexed_frame_count,
+                temporal_window_fraction=indexed_temporal_window_fraction,
+                digest_included=False,
+                source_byte_range_kind="source-decoded-temporal-frame-bundle",
+                frame_selection_method="temporal-index-selected-interval",
+            )
         return _profile(
             profile_id=INDEXED_WINDOW_PROFILE_ID,
             input_mode="raw-prepared-frames",
@@ -262,7 +315,10 @@ __all__ = [
     "DERIVED_SPARSE_FRAMES_PROFILE_ID",
     "DERIVED_SPARSE_FUSION_PROFILE_ID",
     "DIGEST_ONLY_PROFILE_ID",
+    "FIXED_MIDDLE_WINDOW_SELECTION",
+    "INDEXED_QUERY_AWARE_PROFILE_ID",
     "INDEXED_WINDOW_PROFILE_ID",
+    "QUERY_AWARE_TEMPORAL_INDEX_SELECTION",
     "RAW_DENSE_PROFILE_ID",
     "RAW_DIRECT_VIDEO_PROFILE_ID",
     "SEMANTIC_INPUT_PROFILE_SCHEMA_VERSION",
