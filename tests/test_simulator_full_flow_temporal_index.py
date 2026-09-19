@@ -138,6 +138,37 @@ class RelationDetectionTest(unittest.TestCase):
             with self.subTest(question=question):
                 self.assertEqual(expected, detect_relation(question))
 
+    def test_anchor_clause_keeps_the_event_side_of_the_relation(self) -> None:
+        from pathfinder.simulator.full_flow_temporal_index import anchor_clause
+
+        cases = {
+            "what did the animal do after it entered the room":
+                "it entered the room",
+            "what happened before the vehicle stopped moving":
+                "the vehicle stopped moving",
+            "what is the person doing while standing by the door":
+                "standing by the door",
+            # No relation: the whole question is the anchor clause.
+            "what colour is the large object":
+                "what colour is the large object",
+        }
+        for question, expected in cases.items():
+            with self.subTest(question=question):
+                self.assertEqual(expected, anchor_clause(question))
+
+    def test_cue_inside_a_longer_word_is_not_a_relation(self) -> None:
+        from pathfinder.simulator.full_flow_temporal_index import anchor_clause
+
+        # "rafters" contains "after"; a missing word boundary would split here.
+        question = "the rafters collapsed onto the floor"
+        self.assertEqual("none", detect_relation(question))
+        self.assertEqual(question, anchor_clause(question))
+
+    def test_cue_with_no_usable_event_clause_falls_back_to_the_question(self) -> None:
+        from pathfinder.simulator.full_flow_temporal_index import anchor_clause
+
+        self.assertEqual("what happened after", anchor_clause("what happened after"))
+
     def test_relation_words_do_not_bias_anchor_matching(self) -> None:
         tokens = anchor_query_tokens("what did the dog do after it barks")
         self.assertNotIn("after", tokens)
@@ -370,6 +401,20 @@ class NoHardCodingTest(unittest.TestCase):
             "0.25", "0.75",
         ):
             self.assertNotIn(forbidden, source, f"hard-coded token {forbidden!r}")
+
+    def test_source_contains_no_stray_control_characters(self) -> None:
+        """A control byte inside a regex silently disables it; catch it here."""
+
+        from pathlib import Path
+
+        import pathfinder.simulator.full_flow_temporal_index as module
+
+        raw = Path(module.__file__).read_bytes()
+        stray = {
+            byte for byte in raw
+            if byte < 0x20 and byte not in (0x09, 0x0A, 0x0D)
+        }
+        self.assertEqual(set(), stray, f"stray control bytes: {sorted(stray)}")
 
 
 if __name__ == "__main__":

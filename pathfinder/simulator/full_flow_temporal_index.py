@@ -130,6 +130,31 @@ def anchor_query_tokens(question: str) -> tuple[str, ...]:
     )
 
 
+def anchor_clause(question: str) -> str:
+    """Return the clause describing the anchor *event*, not the whole question.
+
+    "what did X do after <event>" asks about the consequence, but the segment
+    to retrieve is the one showing <event>.  Embedding the whole question
+    conflates the two, so the relation cue is used as a clause boundary and the
+    event side is kept.  This is positional, not a synonym or keyword table.
+    """
+
+    _require(isinstance(question, str) and bool(question.strip()), "question is empty")
+    relation = detect_relation(question)
+    if relation in ("none", "start", "end"):
+        return question.strip()
+    cues = RELATION_CUES[relation]
+    # Split on the first cue token occurrence, keeping the event side.
+    alternation = "|".join(re.escape(cue) for cue in cues)
+    pattern = r"\b(?:" + alternation + r")\b"
+    parts = re.split(pattern, question, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) < 2:
+        return question.strip()
+    tail = parts[1].strip(" ,;:?.")
+    # A cue with nothing meaningful after it cannot define an anchor clause.
+    return tail if len(tail.split()) >= 2 else question.strip()
+
+
 @dataclass(frozen=True)
 class TemporalSegment:
     """One independently addressable, content-bound temporal segment."""
@@ -544,6 +569,7 @@ __all__ = [
     "TemporalIndexError",
     "TemporalIndexSelection",
     "TemporalSegment",
+    "anchor_clause",
     "anchor_query_tokens",
     "build_segments",
     "detect_relation",
