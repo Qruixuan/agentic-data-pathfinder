@@ -72,6 +72,31 @@ DEFAULT_JPEG_MAX_DIMENSION = 768
 DEFAULT_TEMPORAL_START_FRACTION = 0.25
 DEFAULT_TEMPORAL_END_FRACTION = 0.75
 
+# The legacy projection picks a fixed middle window with no knowledge of the
+# question. The query-aware projection decodes the interval a temporal index
+# selected for one specific public question; the interval is carried as a
+# fraction pair like any other window, but the provenance that produced it is
+# frozen alongside it so the selection can be audited rather than assumed.
+UNIFORM_MIDPOINT_SAMPLING_METHOD = "uniform-midpoint-temporal-window"
+TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD = "temporal-index-selected-interval"
+_SAMPLING_METHODS = frozenset({
+    UNIFORM_MIDPOINT_SAMPLING_METHOD,
+    TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD,
+})
+_SELECTION_PROVENANCE_KEYS = frozenset({
+    "action_id",
+    "anchor_window_ordinals",
+    "expansion_basis",
+    "fallback_used",
+    "max_selected_windows",
+    "anchor_top_k",
+    "merged_intervals_seconds",
+    "public_question_sha256",
+    "relation",
+    "selected_window_ordinals",
+    "temporal_index_package_sha256",
+})
+
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+|-]{0,255}\Z")
 _REPORT_KEYS = {
@@ -122,6 +147,8 @@ class N3TemporalSelectionPolicy:
     jpeg_max_dimension: int = DEFAULT_JPEG_MAX_DIMENSION
     temporal_start_fraction: float = DEFAULT_TEMPORAL_START_FRACTION
     temporal_end_fraction: float = DEFAULT_TEMPORAL_END_FRACTION
+    sampling_method: str = UNIFORM_MIDPOINT_SAMPLING_METHOD
+    selection_provenance: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _require(
@@ -143,11 +170,30 @@ class N3TemporalSelectionPolicy:
             and 0.0 <= float(start) < float(end) <= 1.0,
             "temporal selection fractions are invalid",
         )
+        _require(
+            self.sampling_method in _SAMPLING_METHODS,
+            "unsupported N3 temporal sampling method",
+        )
+        if self.sampling_method == TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD:
+            _require(
+                isinstance(self.selection_provenance, Mapping)
+                and set(self.selection_provenance) == _SELECTION_PROVENANCE_KEYS,
+                "a query-aware projection requires its full selection provenance",
+            )
+            _require(
+                self.selection_provenance["fallback_used"] is False,
+                "a query-aware projection must not record a fallback selection",
+            )
+        else:
+            _require(
+                self.selection_provenance is None,
+                "a fixed-window projection cannot carry selection provenance",
+            )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        document: dict[str, Any] = {
             "selection_semantics": "source-decoded-temporal-frame-bundle",
-            "sampling_method": "uniform-midpoint-temporal-window",
+            "sampling_method": self.sampling_method,
             "frame_count": self.frame_count,
             "jpeg_max_dimension": self.jpeg_max_dimension,
             "temporal_window_fraction": [
@@ -157,6 +203,12 @@ class N3TemporalSelectionPolicy:
             "partial_mp4_byte_range_claimed": False,
             "source_side_projection_executed": True,
         }
+        if self.selection_provenance is not None:
+            document["temporal_index_selection"] = json.loads(
+                _canonical(dict(self.selection_provenance)).decode("utf-8")
+            )
+            document["query_aware_selection"] = True
+        return document
 
 
 FrameSampler = Callable[..., tuple[Sequence[SampledImage], float]]
@@ -288,7 +340,7 @@ def _bundle(
         "source_video_sha256": raw_row["artifact_sha256"],
         "source_duration_seconds": float(duration),
         "sampling": {
-            "method": "uniform-midpoint-temporal-window",
+            "method": policy.sampling_method,
             "frame_count": policy.frame_count,
             "jpeg_max_dimension": policy.jpeg_max_dimension,
             "jpeg_quality": JPEG_QUALITY,
@@ -554,6 +606,12 @@ def verify_n3_indexed_data_plane_package(
         temporal_end_fraction=report["selection_policy"].get(
             "temporal_window_fraction", [None, None]
         )[1],
+        sampling_method=report["selection_policy"].get(
+            "sampling_method", UNIFORM_MIDPOINT_SAMPLING_METHOD
+        ),
+        selection_provenance=report["selection_policy"].get(
+            "temporal_index_selection"
+        ),
     )
     _require(
         report["selection_policy"] == policy.to_dict(),
@@ -780,6 +838,8 @@ __all__ = [
     "DEFAULT_JPEG_MAX_DIMENSION",
     "DEFAULT_TEMPORAL_END_FRACTION",
     "DEFAULT_TEMPORAL_START_FRACTION",
+    "TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD",
+    "UNIFORM_MIDPOINT_SAMPLING_METHOD",
     "INDEXED_PROVENANCE_SCHEMA_VERSION",
     "INDEXED_REPRESENTATION_ID",
     "N3_INDEXED_DATA_PLANE_SCHEMA_VERSION",
