@@ -19,6 +19,13 @@ def add_required_path(
     command.add_argument(option, type=Path, required=True)
 
 
+def add_optional_path(
+    command: argparse.ArgumentParser,
+    option: str,
+) -> None:
+    command.add_argument(option, type=Path, default=None)
+
+
 def add_compact(command: argparse.ArgumentParser) -> None:
     command.add_argument("--compact", action="store_true")
 

@@ -16,6 +16,7 @@ from ..config import ConfigError
 from ._common import (
     PayloadPrinter,
     add_compact as _add_compact,
+    add_optional_path as _add_optional_path,
     add_required_path as _add_required_path,
     resolve_credentials as _resolve_credentials,
     semantic_route_credential_contract as _semantic_route_credential_contract,
@@ -162,6 +163,8 @@ def register_full_flow_semantic_commands(
     _add_required_path(local_semantic_promote, "--n3-package-dir")
     _add_required_path(local_semantic_promote, "--provisioning-catalog-dir")
     _add_required_path(local_semantic_promote, "--n4-package-dir")
+    # Required by a query-aware N3 package, refused by a fixed-window one.
+    _add_optional_path(local_semantic_promote, "--runtime-frame-manifest-dir")
     local_semantic_promote.add_argument("--semantics-mode", required=True)
     local_semantic_promote.add_argument("--promotion-id", required=True)
     _add_required_path(local_semantic_promote, "--output-dir")
@@ -186,6 +189,7 @@ def register_full_flow_semantic_commands(
     _add_required_path(local_semantic_verify, "--n3-package-dir")
     _add_required_path(local_semantic_verify, "--provisioning-catalog-dir")
     _add_required_path(local_semantic_verify, "--n4-package-dir")
+    _add_optional_path(local_semantic_verify, "--runtime-frame-manifest-dir")
     _add_compact(local_semantic_verify)
 
     local_semantic_runtime_verify = subcommands.add_parser(
@@ -682,6 +686,7 @@ def dispatch_full_flow_semantic_command(
             semantics_mode=args.semantics_mode,
             promotion_id=args.promotion_id,
             output_dir=args.output_dir,
+            runtime_frame_manifest_dir=args.runtime_frame_manifest_dir,
         )
         return print_payload(payload, compact=args.compact)
     if (
@@ -708,6 +713,7 @@ def dispatch_full_flow_semantic_command(
             args.n3_package_dir,
             args.provisioning_catalog_dir,
             args.n4_package_dir,
+            args.runtime_frame_manifest_dir,
         )
         return print_payload(payload, compact=args.compact)
     if (

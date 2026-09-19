@@ -36,6 +36,9 @@ INDEXED_WINDOW_PROFILE_ID = "indexed-middle-window-8-v1"
 INDEXED_QUERY_AWARE_PROFILE_ID = "indexed-query-aware-temporal-selection-v1"
 FIXED_MIDDLE_WINDOW_SELECTION = "fixed-middle-window"
 QUERY_AWARE_TEMPORAL_INDEX_SELECTION = "query-aware-temporal-index"
+# The frame_selection.method a query-aware profile records.  It is the only
+# marker by which a already-frozen profile can be recognised again later.
+QUERY_AWARE_FRAME_SELECTION_METHOD = "temporal-index-selected-interval"
 _INDEXED_SELECTION_KINDS = frozenset({
     FIXED_MIDDLE_WINDOW_SELECTION,
     QUERY_AWARE_TEMPORAL_INDEX_SELECTION,
@@ -192,7 +195,7 @@ def build_semantic_input_profile(
                 temporal_window_fraction=indexed_temporal_window_fraction,
                 digest_included=False,
                 source_byte_range_kind="source-decoded-temporal-frame-bundle",
-                frame_selection_method="temporal-index-selected-interval",
+                frame_selection_method=QUERY_AWARE_FRAME_SELECTION_METHOD,
             )
         return _profile(
             profile_id=INDEXED_WINDOW_PROFILE_ID,
@@ -290,18 +293,62 @@ def model_input_frontier_representation_ids(
     return tuple(sorted(representations))
 
 
+def indexed_selection_from_profile(
+    profile: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Recover the query-aware selection a frozen profile declares, if any.
+
+    Returns ``None`` for every fixed-window profile, so recovering a selection
+    never changes how the legacy profiles are rebuilt.
+    """
+
+    if not isinstance(profile, Mapping):
+        return None
+    selection = profile.get("frame_selection")
+    if not isinstance(selection, Mapping):
+        return None
+    if selection.get("method") != QUERY_AWARE_FRAME_SELECTION_METHOD:
+        return None
+    window = selection.get("temporal_window_fraction")
+    _require(
+        isinstance(window, Sequence)
+        and not isinstance(window, (str, bytes))
+        and len(window) == 2,
+        "a query-aware profile declares no selected interval",
+    )
+    return {
+        "indexed_selection_kind": QUERY_AWARE_TEMPORAL_INDEX_SELECTION,
+        "indexed_frame_count": selection.get("frame_count"),
+        "indexed_temporal_window_fraction": (
+            float(window[0]),
+            float(window[1]),
+        ),
+    }
+
+
 def validate_semantic_input_profile(
     profile: Mapping[str, Any],
     *,
     route_family: str,
     model_input_representation_ids: Sequence[str],
+    indexed_selection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Rebuild a profile rather than trusting its recorded parameters."""
+    """Rebuild a profile rather than trusting its recorded parameters.
+
+    ``indexed_selection`` is the authoritative query-aware selection, read
+    from the N3 package that actually produced the projection.  Callers that
+    hold that authority pass it, and a profile disagreeing with it is refused.
+    Callers that do not still rebuild the profile from the selection it
+    declares, so its shape, route family and parameters must remain exact.
+    """
 
     _require(isinstance(profile, Mapping), "semantic input profile is missing")
+    if indexed_selection is None:
+        indexed_selection = indexed_selection_from_profile(profile)
     expected = build_semantic_input_profile(
         route_family=route_family,
         model_input_representation_ids=model_input_representation_ids,
+        **dict(indexed_selection or {}),
     )
     supplied = json.loads(_canonical(profile))
     _require(
@@ -318,12 +365,14 @@ __all__ = [
     "FIXED_MIDDLE_WINDOW_SELECTION",
     "INDEXED_QUERY_AWARE_PROFILE_ID",
     "INDEXED_WINDOW_PROFILE_ID",
+    "QUERY_AWARE_FRAME_SELECTION_METHOD",
     "QUERY_AWARE_TEMPORAL_INDEX_SELECTION",
     "RAW_DENSE_PROFILE_ID",
     "RAW_DIRECT_VIDEO_PROFILE_ID",
     "SEMANTIC_INPUT_PROFILE_SCHEMA_VERSION",
     "SemanticInputProfileError",
     "build_semantic_input_profile",
+    "indexed_selection_from_profile",
     "model_input_frontier_representation_ids",
     "profile_sha256",
     "validate_semantic_input_profile",

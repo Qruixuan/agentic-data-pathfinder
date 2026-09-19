@@ -1130,6 +1130,7 @@ class FullFlowCliTest(unittest.TestCase):
             semantics_mode="legacy-mcq-local-conformance",
             promotion_id="promotion-v1",
             output_dir=Path("local-admission"),
+            runtime_frame_manifest_dir=None,
         )
 
         with mock.patch(
@@ -1165,6 +1166,7 @@ class FullFlowCliTest(unittest.TestCase):
             Path("n3-package"),
             Path("provisioning"),
             Path("n4-package"),
+            None,
         )
 
         with mock.patch(

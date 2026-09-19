@@ -55,9 +55,14 @@ from .full_flow_semantic_execution_admission import (
     verify_full_flow_semantic_execution_admission,
 )
 from .full_flow_semantic_input_profiles import (
+    QUERY_AWARE_TEMPORAL_INDEX_SELECTION,
     build_semantic_input_profile,
     model_input_frontier_representation_ids,
     validate_semantic_input_profile,
+)
+from .n3_indexed_data_plane import TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD
+from .raw_cold_data_plane import (
+    PACKAGE_MANIFEST_NAME as N3_MANIFEST_NAME,
 )
 from pathfinder.distributed.scoring import (
     MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
@@ -473,6 +478,142 @@ def _implementation_inventory(gap_ids: set[str]) -> list[dict[str, Any]]:
     return rows
 
 
+def _n3_indexed_selection(n3_package_dir: Path) -> dict[str, Any] | None:
+    """Read the query-aware selection the N3 package actually projected.
+
+    The N3 package is the authority: it is what decoded the runtime frames, so
+    the semantic input profile is derived from its frozen policy rather than
+    from anything a trial template asserts.  A fixed-window package returns
+    ``None`` and every legacy profile is rebuilt exactly as before.
+    """
+
+    policy = _strict_json(
+        Path(n3_package_dir) / N3_MANIFEST_NAME,
+        "N3 indexed package manifest",
+    ).get("selection_policy")
+    if policy is None:
+        # Packages frozen before the policy was recorded are the fixed middle
+        # window by construction, so they keep their original profiles.
+        return None
+    _require(isinstance(policy, Mapping), "N3 selection policy is malformed")
+    if policy.get("sampling_method") != TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD:
+        _require(
+            policy.get("query_aware_selection") is not True,
+            "a fixed-window N3 package must not claim a query-aware selection",
+        )
+        return None
+    _require(
+        policy.get("query_aware_selection") is True
+        and isinstance(policy.get("temporal_index_selection"), Mapping)
+        and policy["temporal_index_selection"].get("fallback_used") is False,
+        "the query-aware N3 selection policy is incomplete",
+    )
+    window = policy.get("temporal_window_fraction")
+    _require(
+        isinstance(window, Sequence)
+        and not isinstance(window, (str, bytes))
+        and len(window) == 2,
+        "the query-aware N3 policy has no selected interval",
+    )
+    return {
+        "indexed_selection_kind": QUERY_AWARE_TEMPORAL_INDEX_SELECTION,
+        "indexed_frame_count": policy.get("frame_count"),
+        "indexed_temporal_window_fraction": (
+            float(window[0]),
+            float(window[1]),
+        ),
+    }
+
+
+RUNTIME_FRAME_MANIFEST_NAME = "runtime-frame-manifest.json"
+
+
+def _runtime_frame_binding(
+    runtime_frame_manifest_dir: Path | None,
+    *,
+    n3_package_dir: Path,
+    indexed_selection: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Bind the runtime frames a query-aware projection actually delivered.
+
+    The N3 package proves which interval was selected.  This manifest proves
+    which frames were decoded inside it, and it lives beside the package
+    rather than inside it because the package enforces an exact file set.
+    Binding its digest here puts it inside the same checksum-bound chain as
+    every other source the admission commits to.
+    """
+
+    if indexed_selection is None:
+        _require(
+            runtime_frame_manifest_dir is None,
+            "a fixed-window projection has no runtime frame manifest",
+        )
+        return None
+    _require(
+        runtime_frame_manifest_dir is not None,
+        "a query-aware projection requires its runtime frame manifest",
+    )
+    root = Path(runtime_frame_manifest_dir).resolve()
+    manifest_path = root / RUNTIME_FRAME_MANIFEST_NAME
+    manifest = _strict_json(manifest_path, "runtime frame manifest")
+    package = _strict_json(
+        Path(n3_package_dir) / N3_MANIFEST_NAME,
+        "N3 indexed package manifest",
+    )
+    _require(
+        manifest.get("n3_package_id") == package.get("package_id"),
+        "the runtime frame manifest belongs to a different N3 package",
+    )
+    _require(
+        manifest.get("selection_policy") == package.get("selection_policy"),
+        "the runtime frame manifest records a different selection policy",
+    )
+    _require(
+        manifest.get("runtime_frame_count")
+        == indexed_selection["indexed_frame_count"],
+        "the runtime frame manifest has the wrong frame count",
+    )
+    _require(
+        manifest.get("all_frames_inside_selected_interval") is True
+        and manifest.get("all_frames_strictly_ordered") is True
+        and manifest.get("all_frame_payloads_distinct") is True
+        and manifest.get("all_frames_bound_to_source_video") is True,
+        "the runtime frames were not fully verified against their plan",
+    )
+    _require(
+        manifest.get("partial_mp4_byte_range_claimed") is False
+        and manifest.get("reduced_source_storage_io_claimed") is False,
+        "the runtime frame manifest claims a source byte-range reduction",
+    )
+    return {
+        "runtime_frame_plan_id": manifest["plan_id"],
+        "runtime_frame_plan_sha256": _digest(
+            manifest.get("plan_sha256"), "runtime frame plan SHA-256"
+        ),
+        "runtime_frame_manifest_sha256": _digest(
+            manifest.get("manifest_sha256"), "runtime frame manifest SHA-256"
+        ),
+        "runtime_frame_manifest_file_sha256": _sha256(
+            manifest_path.read_bytes()
+        ),
+        "runtime_frame_checksums_sha256": _sha256(
+            (root / CHECKSUMS_NAME).read_bytes()
+        ),
+        "runtime_frame_object_id": manifest["object_id"],
+        "runtime_frame_source_video_sha256": _digest(
+            manifest.get("source_video_sha256"), "runtime source video SHA-256"
+        ),
+        "runtime_frame_count": manifest["runtime_frame_count"],
+        "runtime_selected_artifact_bytes": manifest["selected_artifact_bytes"],
+        "runtime_original_object_bytes_read": manifest[
+            "original_object_bytes_read"
+        ],
+        "runtime_representation_label": manifest["representation_label"],
+        "partial_mp4_byte_range_claimed": False,
+        "reduced_source_storage_io_claimed": False,
+    }
+
+
 def _evidence_reports(
     *,
     legacy_root: Path,
@@ -622,6 +763,7 @@ def _documents(
     n4_package_dir: Path,
     promotion_id: str,
     semantics_mode: str,
+    runtime_frame_manifest_dir: Path | None = None,
 ) -> dict[str, bytes]:
     promotion_id = _identifier(promotion_id, "promotion_id")
     _require(
@@ -654,6 +796,12 @@ def _documents(
         provisioning_catalog_dir=provisioning_catalog_dir,
         artifact_binding_path=artifact_path,
         n4_package_dir=n4_package_dir,
+    )
+    indexed_selection = _n3_indexed_selection(n3_package_dir)
+    runtime_frame_binding = _runtime_frame_binding(
+        runtime_frame_manifest_dir,
+        n3_package_dir=n3_package_dir,
+        indexed_selection=indexed_selection,
     )
 
     legacy_admission = _strict_json(
@@ -718,9 +866,16 @@ def _documents(
         frontier = model_input_frontier_representation_ids(
             stages_by_trial.get(trial_key, [])
         )
+        route_family = str(source["route_family"])
         promoted["semantic_input_profile"] = build_semantic_input_profile(
-            route_family=str(source["route_family"]),
+            route_family=route_family,
             model_input_representation_ids=frontier,
+            **(
+                dict(indexed_selection)
+                if indexed_selection is not None
+                and route_family == "indexed-raw"
+                else {}
+            ),
         )
         promoted["required_runtime_adapter_ids"] = []
         promoted["flowmesh_submission_authorized"] = True
@@ -835,6 +990,8 @@ def _documents(
             (provisioning_catalog_dir / PROVISIONING_CHECKSUMS_NAME).read_bytes()
         ),
     }
+    if runtime_frame_binding is not None:
+        source_commitments["query_aware_runtime_frames"] = runtime_frame_binding
     source_commitments["source_commitments_sha256"] = _sha256(
         _canonical(source_commitments)
     )
@@ -1253,6 +1410,7 @@ def promote_full_flow_local_semantic_execution_admission(
     semantics_mode: str,
     promotion_id: str,
     output_dir: str | Path,
+    runtime_frame_manifest_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Freeze local trial templates while leaving the legacy package intact."""
 
@@ -1272,6 +1430,11 @@ def promote_full_flow_local_semantic_execution_admission(
         n3_package_dir=Path(n3_package_dir).resolve(),
         provisioning_catalog_dir=Path(provisioning_catalog_dir).resolve(),
         n4_package_dir=Path(n4_package_dir).resolve(),
+        runtime_frame_manifest_dir=(
+            None
+            if runtime_frame_manifest_dir is None
+            else Path(runtime_frame_manifest_dir).resolve()
+        ),
         promotion_id=promotion_id,
         semantics_mode=semantics_mode,
     )
@@ -1318,6 +1481,7 @@ def verify_full_flow_local_semantic_execution_admission(
     n3_package_dir: str | Path,
     provisioning_catalog_dir: str | Path,
     n4_package_dir: str | Path,
+    runtime_frame_manifest_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Reproduce a local admission from every original and later source."""
 
@@ -1338,6 +1502,11 @@ def verify_full_flow_local_semantic_execution_admission(
         n3_package_dir=Path(n3_package_dir).resolve(),
         provisioning_catalog_dir=Path(provisioning_catalog_dir).resolve(),
         n4_package_dir=Path(n4_package_dir).resolve(),
+        runtime_frame_manifest_dir=(
+            None
+            if runtime_frame_manifest_dir is None
+            else Path(runtime_frame_manifest_dir).resolve()
+        ),
         promotion_id=admission["promotion_id"],
         semantics_mode=admission["semantics_mode"],
     )
