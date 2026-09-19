@@ -461,7 +461,7 @@ def _implementation_inventory(gap_ids: set[str]) -> list[dict[str, Any]]:
         )
         source_digest = source_digests.setdefault(
             module_name,
-            _sha256(source.read_bytes()),
+            _source_sha256(source),
         )
         row = {
             "adapter_id": adapter_id,
@@ -476,6 +476,19 @@ def _implementation_inventory(gap_ids: set[str]) -> list[dict[str, Any]]:
         row["inventory_entry_sha256"] = _sha256(_canonical(row))
         rows.append(row)
     return rows
+
+
+def _source_sha256(path: Path) -> str:
+    """Digest a Python source file independently of its checkout convention.
+
+    A source commitment names the source, not the line endings a particular
+    working copy happens to use.  Windows checkouts store CRLF and Linux
+    checkouts store LF, so hashing the raw bytes makes the same commit produce
+    two different admissions.  Normalising first makes the commitment
+    reproducible on either platform.
+    """
+
+    return _sha256(path.read_bytes().replace(b"\r\n", b"\n"))
 
 
 def _n3_indexed_selection(n3_package_dir: Path) -> dict[str, Any] | None:
@@ -923,8 +936,8 @@ def _documents(
         "exact_full_object_range_catalog_verified": True,
         "preprovisioned_n5_to_n4_catalog_verified": True,
         "semantic_input_profiles_frozen": True,
-        "semantic_input_profile_source_sha256": _sha256(
-            Path(inspect.getsourcefile(build_semantic_input_profile)).read_bytes()
+        "semantic_input_profile_source_sha256": _source_sha256(
+            Path(inspect.getsourcefile(build_semantic_input_profile))
         ),
         "live_n5_materialization_executed": False,
         "live_n5_materialization_cost_measured": False,
@@ -1285,8 +1298,8 @@ def _verify_files(root: Path) -> dict[str, Any]:
         is True
         and inventory.get("semantic_input_profiles_frozen") is True
         and inventory.get("semantic_input_profile_source_sha256")
-        == _sha256(
-            Path(inspect.getsourcefile(build_semantic_input_profile)).read_bytes()
+        == _source_sha256(
+            Path(inspect.getsourcefile(build_semantic_input_profile))
         )
         and inventory.get("n1_score_verifier", {}).get(
             "remote_n1_verifier_implemented"
