@@ -211,7 +211,9 @@ class N6PreparationLimits:
     max_raw_video_bytes: int = 1024 * 1024 * 1024
     # Direct video is delivered inside the N6 request, so it is bounded far
     # more tightly than a routed raw artifact that is only decoded locally.
-    max_direct_video_bytes: int = 6 * 1024 * 1024
+    # The bound is the backend's documented base64 guidance for the original
+    # file; a tighter arbitrary bound would refuse videos it actually accepts.
+    max_direct_video_bytes: int = 7_000_000
     direct_video_frames_per_second: float = 2.0
     max_digest_bytes: int = 256 * 1024
     max_question_bytes: int = 64 * 1024

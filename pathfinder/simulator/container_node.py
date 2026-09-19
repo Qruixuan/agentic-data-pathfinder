@@ -88,8 +88,8 @@ _MAX_SEMANTIC_ANSWER_BYTES = 16 * 1024
 # accepts a base64 ``data:`` URL for a video file; its published guidance is
 # to keep the original file below roughly 7 MB because base64 inflates the
 # payload by about a third.  These caps stay strictly inside that guidance.
-_MAX_SEMANTIC_VIDEO_BYTES = 6 * 1024 * 1024
-_MAX_SEMANTIC_VIDEO_REQUEST_BYTES = 10 * 1024 * 1024
+_MAX_SEMANTIC_VIDEO_BYTES = 7_000_000
+_MAX_SEMANTIC_VIDEO_REQUEST_BYTES = 16 * 1024 * 1024
 # Only media types whose direct-video request schema has actually been
 # established against the configured backend may be sent.  Anything else
 # fails closed rather than silently degrading to another representation.

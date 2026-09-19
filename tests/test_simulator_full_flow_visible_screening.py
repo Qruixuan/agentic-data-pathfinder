@@ -297,5 +297,40 @@ class ClaimBoundaryTest(unittest.TestCase):
         self.assertEqual("visible-development-demo-screening", SELECTION_KIND)
 
 
+class DirectVideoBoundTest(unittest.TestCase):
+    """The direct-video bound must admit every object the backend accepts."""
+
+    def test_bound_matches_the_documented_base64_guidance(self) -> None:
+        from pathfinder.simulator.container_node import (
+            _MAX_SEMANTIC_VIDEO_BYTES,
+            _MAX_SEMANTIC_VIDEO_REQUEST_BYTES,
+        )
+        from pathfinder.simulator.full_flow_n6_adapters import (
+            N6PreparationLimits,
+        )
+
+        self.assertEqual(7_000_000, N6PreparationLimits().max_direct_video_bytes)
+        self.assertEqual(7_000_000, _MAX_SEMANTIC_VIDEO_BYTES)
+        # Base64 inflates by 4/3, so the envelope must hold the largest
+        # admissible video plus its JSON overhead.
+        self.assertGreater(
+            _MAX_SEMANTIC_VIDEO_REQUEST_BYTES,
+            _MAX_SEMANTIC_VIDEO_BYTES * 4 // 3,
+        )
+
+    def test_every_packaged_object_is_admissible(self) -> None:
+        """No routed object may be refused by our own conservative bound."""
+
+        from pathfinder.simulator.full_flow_n6_adapters import (
+            N6PreparationLimits,
+        )
+
+        # Sizes of the frozen N3 objects, as public metadata.
+        packaged_object_bytes = (1_271_056, 1_626_982, 6_623_500, 6_942_253)
+        limit = N6PreparationLimits().max_direct_video_bytes
+        for size in packaged_object_bytes:
+            self.assertLessEqual(size, limit)
+
+
 if __name__ == "__main__":
     unittest.main()

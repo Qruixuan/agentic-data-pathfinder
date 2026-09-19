@@ -446,6 +446,52 @@ def run_visible_screening(
     summaries: list[dict[str, Any]] = []
     selected: dict[str, Any] | None = None
     workflows = 0
+
+    def _persist(status: str, failure: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Freeze whatever screening work has completed so far.
+
+        Every action that reached the model is LLM-bearing and paid for, so a
+        later failure must never discard an earlier authenticated result.
+        """
+
+        result_bytes = _jsonl_bytes(rows)
+        receipt = {
+            "schema_version": VISIBLE_SCREENING_RUN_SCHEMA_VERSION,
+            "selection_kind": SELECTION_KIND,
+            "screening_id": plan["screening_id"],
+            "run_id": run_id,
+            "plan_sha256": plan["plan_sha256"],
+            "source_admission_sha256": plan["source_admission_sha256"],
+            "candidates_screened": len(summaries),
+            "workflows_submitted": workflows,
+            "llm_bearing_calls": workflows,
+            "candidate_summaries": summaries,
+            "selected_workload_id": (
+                None if selected is None else selected["workload_id"]
+            ),
+            "selected_object_id": (
+                None if selected is None else selected["object_id"]
+            ),
+            "selection_rule_satisfied": (
+                None
+                if selected is None
+                else selected["selection_verdict"]["rule"]
+            ),
+            "results_sha256": _sha256(result_bytes),
+            "failure": None if failure is None else dict(failure),
+            "credentials_recorded": False,
+            "hidden_label_values_included": False,
+            "eligible_for_scientific_claims": False,
+            "formal_sampling_claimed": False,
+            "status": status,
+        }
+        receipt["receipt_sha256"] = _sha256(_canonical(receipt))
+        _write_package(
+            target,
+            {RESULTS_NAME: result_bytes, RECEIPT_NAME: _canonical(receipt)},
+        )
+        return receipt
+
     for candidate in candidates:
         if selected is not None:
             break
@@ -465,7 +511,22 @@ def run_visible_screening(
                     "trial_key": action["trial_key"],
                 })
             )
-            result = execute_action(candidate, action, idempotency_key)
+            try:
+                result = execute_action(candidate, action, idempotency_key)
+            except Exception as exc:
+                workflows += 1
+                _persist(
+                    "INCOMPLETE_VISIBLE_SCREENING",
+                    {
+                        "workload_id": candidate["workload_id"],
+                        "action_id": action["action_id"],
+                        "trial_key": action["trial_key"],
+                        "idempotency_key": idempotency_key,
+                        "failure_type": type(exc).__name__,
+                        "failure_reason": str(exc),
+                    },
+                )
+                raise
             workflows += 1
             evidence = result["semantic_route_evidence"]
             prediction = str(evidence["n1_score_request"]["predicted_answer"])
@@ -530,40 +591,7 @@ def run_visible_screening(
                 selected = summary
                 break
 
-    result_bytes = _jsonl_bytes(rows)
-    receipt = {
-        "schema_version": VISIBLE_SCREENING_RUN_SCHEMA_VERSION,
-        "selection_kind": SELECTION_KIND,
-        "screening_id": plan["screening_id"],
-        "run_id": run_id,
-        "plan_sha256": plan["plan_sha256"],
-        "source_admission_sha256": plan["source_admission_sha256"],
-        "candidates_screened": len(summaries),
-        "workflows_submitted": workflows,
-        "llm_bearing_calls": workflows,
-        "candidate_summaries": summaries,
-        "selected_workload_id": (
-            None if selected is None else selected["workload_id"]
-        ),
-        "selected_object_id": (
-            None if selected is None else selected["object_id"]
-        ),
-        "selection_rule_satisfied": (
-            None if selected is None else selected["selection_verdict"]["rule"]
-        ),
-        "results_sha256": _sha256(result_bytes),
-        "credentials_recorded": False,
-        "hidden_label_values_included": False,
-        "eligible_for_scientific_claims": False,
-        "formal_sampling_claimed": False,
-        "status": "COMPLETED_VISIBLE_SCREENING",
-    }
-    receipt["receipt_sha256"] = _sha256(_canonical(receipt))
-    _write_package(
-        target,
-        {RESULTS_NAME: result_bytes, RECEIPT_NAME: _canonical(receipt)},
-    )
-    return receipt
+    return _persist("COMPLETED_VISIBLE_SCREENING", None)
 
 
 def verify_visible_screening_run(
@@ -590,6 +618,11 @@ def verify_visible_screening_run(
         and receipt.get("eligible_for_scientific_claims") is False,
         "screening receipt does not bind its frozen plan",
     )
+    _require(
+        receipt.get("status")
+        in {"COMPLETED_VISIBLE_SCREENING", "INCOMPLETE_VISIBLE_SCREENING"},
+        "screening receipt status is unsupported",
+    )
     result_bytes = (root / RESULTS_NAME).read_bytes()
     _require(
         _sha256(result_bytes) == receipt.get("results_sha256"),
@@ -600,8 +633,9 @@ def verify_visible_screening_run(
         for line in result_bytes.decode("utf-8").splitlines()
         if line.strip()
     ]
+    failed = receipt.get("failure") is not None
     _require(
-        len(rows) == receipt["workflows_submitted"],
+        len(rows) == receipt["workflows_submitted"] - (1 if failed else 0),
         "screening result count differs from its recorded workflow count",
     )
     by_order = {row["order_index"] for row in rows}
