@@ -1415,9 +1415,8 @@ def _write_receipt(output_dir: Path, document: Mapping[str, Any]) -> None:
         stage.mkdir()
         payload = _json_bytes(document)
         (stage / RECEIPT_NAME).write_bytes(payload)
-        (stage / CHECKSUMS_NAME).write_text(
-            f"{_sha256(payload)}  {RECEIPT_NAME}\n",
-            encoding="utf-8",
+        (stage / CHECKSUMS_NAME).write_bytes(
+            f"{_sha256(payload)}  {RECEIPT_NAME}\n".encode("utf-8")
         )
         os.replace(stage, output_dir)
     finally:
@@ -1814,9 +1813,8 @@ def _write_named_receipt(
         stage.mkdir()
         payload = _json_bytes(document)
         (stage / receipt_name).write_bytes(payload)
-        (stage / CHECKSUMS_NAME).write_text(
-            f"{_sha256(payload)}  {receipt_name}\n",
-            encoding="utf-8",
+        (stage / CHECKSUMS_NAME).write_bytes(
+            f"{_sha256(payload)}  {receipt_name}\n".encode("utf-8")
         )
         os.replace(stage, output_dir)
     finally:

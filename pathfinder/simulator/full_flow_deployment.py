@@ -742,9 +742,8 @@ def build_full_flow_deployment_binding(
         stage.mkdir()
         binding_bytes = _json_bytes(binding)
         (stage / DEPLOYMENT_BINDING_NAME).write_bytes(binding_bytes)
-        (stage / CHECKSUMS_NAME).write_text(
-            f"{_sha256(binding_bytes)}  {DEPLOYMENT_BINDING_NAME}\n",
-            encoding="utf-8",
+        (stage / CHECKSUMS_NAME).write_bytes(
+            f"{_sha256(binding_bytes)}  {DEPLOYMENT_BINDING_NAME}\n".encode("utf-8")
         )
         verify_full_flow_deployment_binding(
             stage,

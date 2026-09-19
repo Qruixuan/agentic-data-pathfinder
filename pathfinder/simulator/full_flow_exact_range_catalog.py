@@ -429,9 +429,8 @@ def _publish(target: Path, report: Mapping[str, Any]) -> None:
         stage.mkdir()
         content = _json_bytes(report)
         (stage / CATALOG_NAME).write_bytes(content)
-        (stage / CHECKSUMS_NAME).write_text(
-            f"{_sha256(content)}  {CATALOG_NAME}\n",
-            encoding="utf-8",
+        (stage / CHECKSUMS_NAME).write_bytes(
+            f"{_sha256(content)}  {CATALOG_NAME}\n".encode("utf-8")
         )
         _verify_files(stage)
         os.replace(stage, target)

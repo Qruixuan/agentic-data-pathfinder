@@ -388,8 +388,8 @@ def freeze_full_flow_n4_preprovisioned_serve_gate(
     try:
         stage.mkdir()
         (stage / GATE_NAME).write_bytes(payload)
-        (stage / CHECKSUMS_NAME).write_text(
-            f"{_sha256(payload)}  {GATE_NAME}\n", encoding="utf-8"
+        (stage / CHECKSUMS_NAME).write_bytes(
+            f"{_sha256(payload)}  {GATE_NAME}\n".encode("utf-8")
         )
         _verify_gate_files(stage)
         os.replace(stage, target)

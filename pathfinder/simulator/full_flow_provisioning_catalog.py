@@ -304,9 +304,8 @@ def build_full_flow_provisioning_catalog(
         stage.mkdir()
         payload = _json_bytes(document)
         (stage / CATALOG_NAME).write_bytes(payload)
-        (stage / CHECKSUMS_NAME).write_text(
-            f"{_sha256(payload)}  {CATALOG_NAME}\n",
-            encoding="utf-8",
+        (stage / CHECKSUMS_NAME).write_bytes(
+            f"{_sha256(payload)}  {CATALOG_NAME}\n".encode("utf-8")
         )
         _verify_files(stage)
         os.replace(stage, target)
