@@ -242,3 +242,121 @@ class CaptionShapeNormalizationTest(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(CAPTION_PROMPT.encode()).hexdigest(), CAPTION_PROMPT_SHA256
         )
+
+
+class ResumeCacheTest(unittest.TestCase):
+    """A cached caption may be reused only when every binding verifies."""
+
+    MODEL = "vision-model-x"
+    PROMPT = CAPTION_PROMPT_SHA256
+    PKG = "d" * 64
+
+    def _windows(self):
+        return build_windows(
+            object_id="obj-x", duration_seconds=15.6, frames=_frames(16, 15.6),
+            source_video_sha256=SRC, source_video_size_bytes=100,
+        )
+
+    def _entry(self, window, **overrides):
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            cache_entry_bindings,
+        )
+
+        entry = dict(cache_entry_bindings(
+            window=window, model_id=self.MODEL, prompt_sha256=self.PROMPT,
+            segmentation_package_sha256=self.PKG,
+        ))
+        entry.update({
+            "request_input_sha256": "e" * 64,
+            "response_sha256": "f" * 64,
+            "structured_caption": _caption(),
+        })
+        entry.update(overrides)
+        return entry
+
+    def test_atomic_write_leaves_no_partial_file(self) -> None:
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            atomic_write_json,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested" / "00.json"
+            digest = atomic_write_json(target, {"a": 1})
+            self.assertTrue(target.is_file())
+            self.assertEqual(64, len(digest))
+            self.assertFalse(list(target.parent.glob("*.partial")))
+
+    def test_remaining_is_derived_from_verified_cache_state(self) -> None:
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            atomic_write_json, remaining_windows,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            windows = self._windows()
+            atomic_write_json(Path(tmp) / "00.json", self._entry(windows[0]))
+            atomic_write_json(Path(tmp) / "01.json", self._entry(windows[1]))
+            cached, todo = remaining_windows(
+                windows=windows, cache_dir=tmp, model_id=self.MODEL,
+                prompt_sha256=self.PROMPT, segmentation_package_sha256=self.PKG,
+            )
+            self.assertEqual(2, len(cached))
+            self.assertEqual(len(windows) - 2, len(todo))
+            self.assertNotIn(0, [w["ordinal"] for w in todo])
+
+    def test_entry_from_another_window_is_refused(self) -> None:
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            atomic_write_json, remaining_windows,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            windows = self._windows()
+            # Window 1's caption written under window 0's slot.
+            atomic_write_json(Path(tmp) / "00.json", self._entry(windows[1]))
+            cached, todo = remaining_windows(
+                windows=windows, cache_dir=tmp, model_id=self.MODEL,
+                prompt_sha256=self.PROMPT, segmentation_package_sha256=self.PKG,
+            )
+            self.assertEqual(0, len(cached))
+            self.assertIn(0, [w["ordinal"] for w in todo])
+
+    def test_entry_from_another_model_prompt_or_package_is_refused(self) -> None:
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            verify_cache_entry, cache_entry_bindings,
+        )
+
+        window = self._windows()[0]
+        expected = cache_entry_bindings(
+            window=window, model_id=self.MODEL, prompt_sha256=self.PROMPT,
+            segmentation_package_sha256=self.PKG,
+        )
+        for field, value in (
+            ("model_id", "another-model"),
+            ("caption_prompt_sha256", "a" * 64),
+            ("segmentation_package_sha256", "b" * 64),
+            ("window_descriptor_sha256", "c" * 64),
+            ("frame_sha256", ["9" * 64]),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(FineWindowError, "does not match"):
+                    verify_cache_entry(self._entry(window, **{field: value}), expected)
+
+    def test_corrupt_or_unparseable_entry_is_treated_as_absent(self) -> None:
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            remaining_windows,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            windows = self._windows()
+            (Path(tmp) / "00.json").write_text("{not json", encoding="utf-8")
+            cached, todo = remaining_windows(
+                windows=windows, cache_dir=tmp, model_id=self.MODEL,
+                prompt_sha256=self.PROMPT, segmentation_package_sha256=self.PKG,
+            )
+            self.assertEqual(0, len(cached))
+            self.assertEqual(len(windows), len(todo))
+
+    def test_cache_entry_never_carries_credentials(self) -> None:
+        entry = self._entry(self._windows()[0])
+        blob = json.dumps(entry).casefold()
+        for forbidden in ("authorization", "api_key", "bearer", "secret", "password"):
+            self.assertNotIn(forbidden, blob)

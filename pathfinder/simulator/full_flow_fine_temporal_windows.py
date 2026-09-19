@@ -301,3 +301,120 @@ __all__ = [
     "validate_structured_caption",
     "window_geometry",
 ]
+
+
+CACHE_ENTRY_SCHEMA_VERSION = "pathfinder.full-flow-fine-caption-cache/v1alpha1"
+
+
+def cache_entry_bindings(
+    *,
+    window: Mapping[str, Any],
+    model_id: str,
+    prompt_sha256: str,
+    segmentation_package_sha256: str,
+) -> dict[str, Any]:
+    """Identities a cached caption must match before it may be reused."""
+
+    _require(bool(model_id), "model_id is required")
+    _digest(prompt_sha256, "prompt_sha256")
+    _digest(segmentation_package_sha256, "segmentation_package_sha256")
+    return {
+        "cache_schema_version": CACHE_ENTRY_SCHEMA_VERSION,
+        "model_id": model_id,
+        "caption_prompt_sha256": prompt_sha256,
+        "segmentation_package_sha256": segmentation_package_sha256,
+        "window_id": str(window["window_id"]),
+        "window_descriptor_sha256": _sha256(_canonical(window)),
+        "frame_sha256": list(window["frame_sha256"]),
+        "response_schema_version": FINE_CAPTION_SCHEMA_VERSION,
+    }
+
+
+def verify_cache_entry(entry: Any, expected: Mapping[str, Any]) -> dict[str, Any]:
+    """Accept a cached caption only when every binding matches exactly.
+
+    A cache entry from another window, prompt, model or segmentation package is
+    refused rather than silently reused.
+    """
+
+    _require(isinstance(entry, Mapping), "cache entry must be an object")
+    for key, value in expected.items():
+        _require(
+            entry.get(key) == value,
+            f"cache entry binding {key} does not match the current build",
+        )
+    _require(
+        _digest(entry.get("request_input_sha256"), "request_input_sha256"),
+        "cache entry has no request identity",
+    )
+    _require(
+        _digest(entry.get("response_sha256"), "response_sha256"),
+        "cache entry has no response identity",
+    )
+    validate_structured_caption(entry.get("structured_caption"))
+    return dict(entry)
+
+
+def atomic_write_json(path: str | Path, payload: Mapping[str, Any]) -> str:
+    """Write through a temp file and rename, so a crash cannot truncate it."""
+
+    import os as _os
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = _canonical(payload)
+    temporary = target.with_suffix(target.suffix + ".partial")
+    with open(temporary, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        try:
+            _os.fsync(handle.fileno())
+        except (OSError, AttributeError):
+            # fsync is unavailable on some filesystems; the rename is still
+            # atomic, so durability degrades but correctness does not.
+            pass
+    _os.replace(temporary, target)
+    return _sha256(data)
+
+
+def remaining_windows(
+    *,
+    windows: Sequence[Mapping[str, Any]],
+    cache_dir: str | Path,
+    model_id: str,
+    prompt_sha256: str,
+    segmentation_package_sha256: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split windows into (already cached and verified, still to materialize).
+
+    Derived from verified cache state, never from a maintained counter.
+    """
+
+    root = Path(cache_dir)
+    cached: list[dict[str, Any]] = []
+    todo: list[dict[str, Any]] = []
+    for window in windows:
+        path = root / f"{int(window['ordinal']):02d}.json"
+        if not path.is_file():
+            todo.append(dict(window))
+            continue
+        expected = cache_entry_bindings(
+            window=window, model_id=model_id, prompt_sha256=prompt_sha256,
+            segmentation_package_sha256=segmentation_package_sha256,
+        )
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            cached.append(verify_cache_entry(entry, expected))
+        except (FineWindowError, json.JSONDecodeError, OSError):
+            # An unverifiable entry is treated as absent rather than trusted.
+            todo.append(dict(window))
+    return cached, todo
+
+
+__all__ += [
+    "CACHE_ENTRY_SCHEMA_VERSION",
+    "atomic_write_json",
+    "cache_entry_bindings",
+    "remaining_windows",
+    "verify_cache_entry",
+]
