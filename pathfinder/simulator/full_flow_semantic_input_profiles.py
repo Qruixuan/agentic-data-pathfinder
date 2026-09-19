@@ -84,6 +84,22 @@ def profile_sha256(profile: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical(profile)).hexdigest()
 
 
+def _exact_fraction(value: int | float) -> int | float:
+    """Render a whole-number bound as an int, as the fixed profiles already do.
+
+    A profile is signed and then carried across process and language
+    boundaries.  A float that happens to be whole serialises as ``1.0`` here
+    and as ``1`` in encoders that drop the redundant fraction, which changes
+    the bytes a signature was taken over without changing the value.  The
+    fixed-window profiles avoid this by writing ``(0, 1)``; a derived interval
+    must do the same.
+    """
+
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 def _profile(
     *,
     profile_id: str,
@@ -107,7 +123,9 @@ def _profile(
             else {
                 "method": frame_selection_method,
                 "frame_count": frame_count,
-                "temporal_window_fraction": list(temporal_window_fraction),
+                "temporal_window_fraction": [
+                    _exact_fraction(bound) for bound in temporal_window_fraction
+                ],
             }
         ),
         "digest_included": digest_included,

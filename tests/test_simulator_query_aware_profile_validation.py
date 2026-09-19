@@ -112,6 +112,41 @@ class ValidationTest(unittest.TestCase):
                         model_input_representation_ids=reps),
                 )
 
+    def test_a_whole_number_bound_survives_a_json_boundary(self) -> None:
+        # A signature is taken over these bytes and the profile then crosses a
+        # process boundary.  1.0 and 1 are the same number but not the same
+        # bytes, and encoders that drop the redundant fraction would break the
+        # signature, so a whole bound is written as an int here.
+        import json
+
+        selection = _query_aware()["frame_selection"]
+        self.assertEqual([0.4, 1], selection["temporal_window_fraction"])
+        self.assertIsInstance(selection["temporal_window_fraction"][1], int)
+        encoded = json.dumps(selection, sort_keys=True, separators=(",", ":"))
+        self.assertNotIn("1.0", encoded)
+        self.assertEqual(selection, json.loads(encoded))
+
+    def test_a_fractional_bound_is_left_alone(self) -> None:
+        profile = build_semantic_input_profile(
+            route_family="indexed-raw",
+            model_input_representation_ids=["raw_video"],
+            indexed_selection_kind=QUERY_AWARE_TEMPORAL_INDEX_SELECTION,
+            indexed_frame_count=10,
+            indexed_temporal_window_fraction=(0.25, 0.75),
+        )
+        self.assertEqual([0.25, 0.75],
+                         profile["frame_selection"]["temporal_window_fraction"])
+
+    def test_the_normalised_profile_still_validates(self) -> None:
+        profile = _query_aware()
+        self.assertEqual(
+            profile,
+            validate_semantic_input_profile(
+                profile, route_family="indexed-raw",
+                model_input_representation_ids=["raw_video"],
+                indexed_selection=SELECTION),
+        )
+
     def test_the_two_indexed_profiles_stay_distinct(self) -> None:
         self.assertEqual(INDEXED_WINDOW_PROFILE_ID, _fixed()["profile_id"])
         self.assertEqual(
