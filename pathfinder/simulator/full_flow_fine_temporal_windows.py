@@ -195,6 +195,17 @@ def validate_structured_caption(caption: Any) -> dict[str, Any]:
                 f"{key} must be a list of non-empty strings",
             )
             result[key] = [item.strip() for item in value]
+        elif isinstance(value, list):
+            # Providers legitimately answer a scalar descriptive field with a
+            # list. Join deterministically rather than discarding the caption;
+            # this normalizes shape only and never changes what was asked.
+            _require(
+                all(isinstance(item, str) for item in value),
+                f"{key} list must contain only strings",
+            )
+            result[key] = ", ".join(item.strip() for item in value if item.strip())
+        elif value is None:
+            result[key] = ""
         else:
             _require(isinstance(value, str), f"{key} must be a string")
             result[key] = value.strip()

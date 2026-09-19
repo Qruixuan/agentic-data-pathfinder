@@ -218,3 +218,27 @@ class SourceHygieneTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CaptionShapeNormalizationTest(unittest.TestCase):
+    """Providers vary scalar/list shape; normalize without changing the ask."""
+
+    def test_list_valued_scalar_field_is_joined_deterministically(self) -> None:
+        caption = _caption(camera_relation=["far from camera", "then close"])
+        first = validate_structured_caption(caption)
+        again = validate_structured_caption(caption)
+        self.assertEqual("far from camera, then close", first["camera_relation"])
+        self.assertEqual(first, again)
+
+    def test_null_scalar_field_becomes_empty_string(self) -> None:
+        self.assertEqual("", validate_structured_caption(_caption(uncertainty=None))["uncertainty"])
+
+    def test_non_string_list_items_are_still_rejected(self) -> None:
+        with self.assertRaisesRegex(FineWindowError, "only strings"):
+            validate_structured_caption(_caption(camera_relation=["ok", 7]))
+
+    def test_normalization_does_not_change_the_prompt(self) -> None:
+        # Shape tolerance must never alter what was asked of the model.
+        self.assertEqual(
+            hashlib.sha256(CAPTION_PROMPT.encode()).hexdigest(), CAPTION_PROMPT_SHA256
+        )
