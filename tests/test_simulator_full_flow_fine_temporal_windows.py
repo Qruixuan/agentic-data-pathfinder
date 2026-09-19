@@ -360,3 +360,147 @@ class ResumeCacheTest(unittest.TestCase):
         blob = json.dumps(entry).casefold()
         for forbidden in ("authorization", "api_key", "bearer", "secret", "password"):
             self.assertNotIn(forbidden, blob)
+
+
+class JsonExtractionTest(unittest.TestCase):
+    """Exactly one complete object, never repaired, never guessed."""
+
+    VALID = '{"a": 1, "b": "x"}'
+
+    def _extract(self, text):
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            extract_single_json_object,
+        )
+        return extract_single_json_object(text)
+
+    def _error(self, text):
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            CaptionParseError, extract_single_json_object,
+        )
+        with self.assertRaises(CaptionParseError) as caught:
+            extract_single_json_object(text)
+        return caught.exception
+
+    def test_strict_json(self) -> None:
+        self.assertEqual({"a": 1, "b": "x"}, self._extract(self.VALID))
+        self.assertEqual({"a": 1, "b": "x"}, self._extract("  \n" + self.VALID + " \n"))
+
+    def test_fenced_json(self) -> None:
+        self.assertEqual({"a": 1, "b": "x"}, self._extract(f"```json\n{self.VALID}\n```"))
+        self.assertEqual({"a": 1, "b": "x"}, self._extract(f"```\n{self.VALID}\n```"))
+
+    def test_harmless_prose_around_one_object(self) -> None:
+        self.assertEqual(
+            {"a": 1, "b": "x"},
+            self._extract(f"Here is the result:\n{self.VALID}\nHope that helps."),
+        )
+
+    def test_braces_and_escaped_quotes_inside_strings(self) -> None:
+        # Built via json.dumps so the fixture cannot be mangled by escaping.
+        inner = 'a brace { and } a "quote" and a backslash ' + chr(92)
+        text = json.dumps({"note": inner})
+        self.assertEqual(inner, self._extract(text)["note"])
+        # The scanner must also survive a stray brace inside a string when the
+        # object is surrounded by prose.
+        self.assertEqual(inner, self._extract("before\n" + text + "\nafter")["note"])
+
+    def test_missing_comma_is_rejected(self) -> None:
+        self.assertIn(self._error('{"a": 1 "b": 2}').stage, {"strict", "scan"})
+
+    def test_truncated_object_is_rejected(self) -> None:
+        error = self._error('{"a": 1, "b": "unterminated')
+        self.assertEqual("scan", error.stage)
+        self.assertIn("no complete top-level JSON object", str(error))
+
+    def test_token_limit_truncation_is_rejected(self) -> None:
+        # Output cut mid-value by a token limit must never be repaired.
+        error = self._error('{"subjects": ["a child"], "subject_actions": ["walks')
+        self.assertEqual("scan", error.stage)
+
+    def test_multiple_objects_are_rejected(self) -> None:
+        error = self._error(f"{self.VALID}\n{self.VALID}")
+        self.assertEqual("scan", error.stage)
+        self.assertIn("2 top-level objects", str(error))
+
+    def test_malformed_escape_is_rejected(self) -> None:
+        # A literal backslash-q is not a valid JSON escape.
+        self._error('{"a": "bad ' + chr(92) + 'q escape"}')
+
+    def test_non_finite_values_are_rejected(self) -> None:
+        self._error('{"a": NaN}')
+
+    def test_non_object_json_is_rejected(self) -> None:
+        self._error("[1, 2, 3]")
+
+    def test_empty_content_is_rejected(self) -> None:
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            FineWindowError, extract_single_json_object,
+        )
+        with self.assertRaises(FineWindowError):
+            extract_single_json_object("   ")
+
+    def test_nothing_is_repaired(self) -> None:
+        # Each of these is a repair the parser must refuse to perform.
+        for broken in (
+            '{"a": 1,}',                 # trailing comma
+            '{a: 1}',                    # unquoted key
+            "{'a': 1}",                  # single quotes
+            '{"a": 1',                   # unclosed
+        ):
+            with self.subTest(broken=broken):
+                self._error(broken)
+
+
+class RawResponseRecordTest(unittest.TestCase):
+    def _window(self):
+        return build_windows(
+            object_id="obj-x", duration_seconds=15.6, frames=_frames(16, 15.6),
+            source_video_sha256=SRC, source_video_size_bytes=100,
+        )[0]
+
+    def _record(self, content="{}", **doc):
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            build_raw_response_record,
+        )
+        document = {
+            "model": "m",
+            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+            "usage": {"total_tokens": 7},
+        }
+        document.update(doc)
+        return build_raw_response_record(
+            window=self._window(), model_id="m",
+            prompt_sha256=CAPTION_PROMPT_SHA256, segmentation_package_sha256="d" * 64,
+            request_input_sha256="e" * 64, response_bytes=b"{}", document=document,
+        )
+
+    def test_record_captures_diagnosis_fields(self) -> None:
+        record = self._record(content='{"a": 1}')
+        self.assertEqual("stop", record["finish_reason"])
+        self.assertEqual({"total_tokens": 7}, record["usage"])
+        self.assertEqual('{"a": 1}', record["raw_content"])
+        self.assertEqual(8, record["raw_content_length"])
+        self.assertTrue(record["raw_content_sha256"])
+        self.assertFalse(record["credentials_recorded"])
+
+    def test_record_carries_no_credential_fields(self) -> None:
+        blob = json.dumps(self._record()).casefold()
+        for forbidden in ("authorization", "api_key", "bearer", "secret", "base_url"):
+            self.assertNotIn(forbidden, blob)
+
+    def test_reasoning_is_retained_only_as_digest(self) -> None:
+        record = self._record(
+            choices=[{"finish_reason": "length",
+                      "message": {"content": "{}", "reasoning_content": "long chain"}}],
+        )
+        self.assertEqual("length", record["finish_reason"])
+        self.assertNotIn("long chain", json.dumps(record))
+        self.assertEqual(10, record["reasoning_content_length"])
+
+    def test_persisted_raw_content_can_be_reparsed_offline(self) -> None:
+        from pathfinder.simulator.full_flow_fine_temporal_windows import (
+            extract_single_json_object,
+        )
+        # A stored raw response is re-parsable with no provider call.
+        record = self._record(content='prose\n{"a": 1}\nmore prose')
+        self.assertEqual({"a": 1}, extract_single_json_object(record["raw_content"]))

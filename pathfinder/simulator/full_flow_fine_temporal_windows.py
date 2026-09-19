@@ -418,3 +418,174 @@ __all__ += [
     "remaining_windows",
     "verify_cache_entry",
 ]
+
+
+RAW_RESPONSE_SCHEMA_VERSION = "pathfinder.full-flow-fine-caption-raw-response/v1alpha1"
+_FENCE = re.compile(r"\A\s*```(?:json)?\s*\n(?P<body>.*?)\n\s*```\s*\Z", re.S)
+
+
+class CaptionParseError(FineWindowError):
+    """Raised when model output cannot be parsed without repairing it."""
+
+    def __init__(self, message: str, *, stage: str) -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
+def _strict_loads(text: str) -> Any:
+    """json.loads that refuses NaN/Infinity, which are not valid JSON."""
+
+    def _reject(value: str) -> Any:
+        raise ValueError(f"non-finite JSON constant: {value}")
+
+    return json.loads(text, parse_constant=_reject)
+
+
+def _top_level_object_spans(text: str) -> list[tuple[int, int]]:
+    """Find balanced top-level {...} spans, honouring strings and escapes.
+
+    Braces inside JSON strings, escaped quotes and escaped backslashes do not
+    affect nesting.  A span that never closes is not returned, so truncated
+    output cannot masquerade as a complete object.
+    """
+
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for index, character in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif character == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    spans.append((start, index + 1))
+                    start = -1
+    return spans
+
+
+def extract_single_json_object(content: str) -> dict[str, Any]:
+    """Extract exactly one JSON object without ever repairing the text.
+
+    Order: strict parse, then one standard Markdown fence, then a string-aware
+    scan for exactly one complete top-level object.  Nothing is inserted,
+    closed, quoted or rewritten, and an ambiguous response is refused.
+    """
+
+    _require(isinstance(content, str), "model content must be text")
+    trimmed = content.strip()
+    _require(bool(trimmed), "model content is empty")
+
+    try:
+        value = _strict_loads(trimmed)
+    except ValueError:
+        pass
+    else:
+        if isinstance(value, dict):
+            return value
+        raise CaptionParseError("model returned JSON that is not an object", stage="strict")
+
+    fence = _FENCE.match(trimmed)
+    if fence is not None:
+        try:
+            value = _strict_loads(fence.group("body").strip())
+        except ValueError as exc:
+            raise CaptionParseError(f"fenced content is not valid JSON: {exc}", stage="fence") from exc
+        if isinstance(value, dict):
+            return value
+        raise CaptionParseError("fenced content is not an object", stage="fence")
+
+    spans = _top_level_object_spans(trimmed)
+    if not spans:
+        raise CaptionParseError(
+            "no complete top-level JSON object was found", stage="scan",
+        )
+    parsed = []
+    for begin, end in spans:
+        try:
+            candidate = _strict_loads(trimmed[begin:end])
+        except ValueError:
+            continue
+        if isinstance(candidate, dict):
+            parsed.append(candidate)
+    if not parsed:
+        raise CaptionParseError(
+            "a top-level object was located but did not parse", stage="scan",
+        )
+    if len(parsed) > 1:
+        raise CaptionParseError(
+            f"response contains {len(parsed)} top-level objects", stage="scan",
+        )
+    return parsed[0]
+
+
+def build_raw_response_record(
+    *,
+    window: Mapping[str, Any],
+    model_id: str,
+    prompt_sha256: str,
+    segmentation_package_sha256: str,
+    request_input_sha256: str,
+    response_bytes: bytes,
+    document: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Credential-free raw-response record, persisted before any parsing.
+
+    Retaining this means a later parser improvement can be applied without
+    another provider request.
+    """
+
+    choice = (document.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    content = message.get("content")
+    record = {
+        "schema_version": RAW_RESPONSE_SCHEMA_VERSION,
+        "window_id": str(window["window_id"]),
+        "ordinal": int(window["ordinal"]),
+        "window_descriptor_sha256": _sha256(_canonical(window)),
+        "model_id": model_id,
+        "caption_prompt_sha256": prompt_sha256,
+        "segmentation_package_sha256": segmentation_package_sha256,
+        "request_input_sha256": request_input_sha256,
+        "request_succeeded": True,
+        "finish_reason": choice.get("finish_reason"),
+        "usage": document.get("usage"),
+        "reported_model": document.get("model"),
+        "raw_content": content if isinstance(content, str) else None,
+        "raw_content_sha256": (
+            _sha256(content.encode("utf-8")) if isinstance(content, str) else None
+        ),
+        "raw_content_length": len(content) if isinstance(content, str) else None,
+        "response_sha256": _sha256(response_bytes),
+        "response_byte_length": len(response_bytes),
+        "credentials_recorded": False,
+    }
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str):
+        # Kept only as a digest and length: it is provider-returned and
+        # credential-free, but it is not needed verbatim.
+        record["reasoning_content_sha256"] = _sha256(reasoning.encode("utf-8"))
+        record["reasoning_content_length"] = len(reasoning)
+    return record
+
+
+__all__ += [
+    "RAW_RESPONSE_SCHEMA_VERSION",
+    "CaptionParseError",
+    "build_raw_response_record",
+    "extract_single_json_object",
+]
