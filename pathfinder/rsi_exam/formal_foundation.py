@@ -63,6 +63,7 @@ SEMANTIC_SPEC_SCHEMA_VERSION = (
 )
 N2_SOURCE_SCHEMA_VERSION = "pathfinder.n2-index-source/v1alpha1"
 PLAN_IDS = ("D2", "D3", "D6", "D7")
+FORMAL_INDEXED_DESIGN_IDS = frozenset({"D1", "D5"})
 STRATUM_TO_WORKLOAD_CLASS = {
     "descriptive": "W1",
     "temporal": "W2",
@@ -408,12 +409,63 @@ def _formal_scenario(
         for workload in scenario["workloads"]
     }
     for design in scenario["designs"]:
-        design["route_templates"] = {
-            workload_class: template_id
-            for workload_class, template_id in design["route_templates"].items()
-            if workload_class in workload_classes
-        }
+        design_id = str(design["design_id"])
+        if design_id in FORMAL_INDEXED_DESIGN_IDS:
+            # The base simulator scenario predates the formal collection and
+            # maps descriptive W1 D1/D5 trials to ``raw-full``.  That is a
+            # valid historical smoke shape, but it collapses the formal
+            # collection's indexed action into its raw action for an entire
+            # stratum.  Every selected formal object has a frozen,
+            # content-bound temporal selection, so D1/D5 must denote that
+            # indexed action for every included workload class.
+            design["route_templates"] = {
+                workload_class: "raw-indexed"
+                for workload_class in sorted(workload_classes)
+            }
+        else:
+            design["route_templates"] = {
+                workload_class: template_id
+                for workload_class, template_id
+                in design["route_templates"].items()
+                if workload_class in workload_classes
+            }
     return scenario
+
+
+def _verify_formal_indexed_designs(scenario: Mapping[str, Any]) -> None:
+    """Require the formal D1/D5 action to stay indexed in every stratum."""
+
+    workloads = scenario.get("workloads")
+    designs = scenario.get("designs")
+    _require(isinstance(workloads, list) and bool(workloads),
+             "formal scenario workloads are missing")
+    _require(isinstance(designs, list), "formal scenario designs are missing")
+    workload_classes = {
+        str(row.get("workload_class"))
+        for row in workloads
+        if isinstance(row, Mapping)
+    }
+    indexed = {
+        str(row.get("design_id")): row
+        for row in designs
+        if isinstance(row, Mapping)
+        and str(row.get("design_id")) in FORMAL_INDEXED_DESIGN_IDS
+    }
+    _require(
+        set(indexed) == set(FORMAL_INDEXED_DESIGN_IDS),
+        "formal indexed designs D1/D5 are missing",
+    )
+    for design_id, design in sorted(indexed.items()):
+        routes = design.get("route_templates")
+        _require(
+            isinstance(routes, Mapping)
+            and set(routes) == workload_classes,
+            f"formal {design_id} workload coverage changed",
+        )
+        _require(
+            set(routes.values()) == {"raw-indexed"},
+            f"formal {design_id} collapses an indexed action into raw",
+        )
 
 
 def build_formal_runtime_foundation(
@@ -629,6 +681,7 @@ def build_formal_runtime_foundation(
             n4_rows,
             package_id=package_id,
         )
+        _verify_formal_indexed_designs(scenario)
         (staging / SCENARIO_NAME).write_bytes(_json_bytes(scenario))
         load_simulator_scenario(staging / SCENARIO_NAME)
 
@@ -708,6 +761,8 @@ def verify_formal_runtime_foundation(
     task = verify_full_flow_task_plane(root / TASK_PLANE_DIR)
     n2 = verify_n2_index_package(root / N2_PACKAGE_DIR)
     n4 = verify_n4_derived_data_package(root / N4_PACKAGE_DIR)
+    scenario_document = _read_json(root / SCENARIO_NAME, "formal scenario")
+    _verify_formal_indexed_designs(scenario_document)
     scenario = load_simulator_scenario(root / SCENARIO_NAME)
     _require(task["public_task_count"] == manifest["case_count"],
              "task-plane case count differs")

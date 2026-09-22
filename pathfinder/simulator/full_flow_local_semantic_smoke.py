@@ -539,7 +539,8 @@ def _semantic_input_invariants(
     }
     _require(
         len(representatives) == 3,
-        "raw, indexed, and derived routes collapsed to one semantic input",
+        "raw, indexed, and derived routes do not have three distinct "
+        "semantic inputs",
     )
     return {
         "semantic_input_profiles_verified": True,

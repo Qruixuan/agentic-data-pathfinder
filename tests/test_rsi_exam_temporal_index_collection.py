@@ -349,6 +349,21 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
         )
         self.assertEqual(6, verified_foundation["n4_artifact_count"])
         self.assertTrue(verified_foundation["labels_confined_to_n1"])
+        formal_scenario = json.loads(
+            (foundation / "formal-scenario.json").read_text(encoding="utf-8")
+        )
+        formal_classes = {
+            row["workload_class"] for row in formal_scenario["workloads"]
+        }
+        indexed_designs = {
+            row["design_id"]: row["route_templates"]
+            for row in formal_scenario["designs"]
+            if row["design_id"] in {"D1", "D5"}
+        }
+        self.assertEqual({"D1", "D5"}, set(indexed_designs))
+        for routes in indexed_designs.values():
+            self.assertEqual(formal_classes, set(routes))
+            self.assertEqual({"raw-indexed"}, set(routes.values()))
         foundation_manifest = json.loads(
             (foundation / "formal-foundation-manifest.json").read_text(
                 encoding="utf-8"
