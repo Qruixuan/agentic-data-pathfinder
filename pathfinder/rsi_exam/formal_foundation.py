@@ -584,10 +584,10 @@ def build_formal_runtime_foundation(
                         "media_type": "video",
                         "modalities": ["text", "video"],
                         "source_collection": "nextqa-val-formal-cohort",
-                        "tags": [
+                        "tags": sorted({
                             option["text"]
                             for option in tasks[object_id]["answer_options"]
-                        ],
+                        }),
                     },
                 }
                 for object_id in sorted(case_ids)
