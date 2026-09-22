@@ -23,6 +23,7 @@ import tarfile
 import time
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -486,6 +487,7 @@ def materialize_formal_temporal_captions(
     base_url: str,
     api_key: str,
     max_attempts_per_window: int = 2,
+    parallelism: int = 1,
     timeout_seconds: float = 180.0,
     transport: Transport = _default_transport,
 ) -> dict[str, Any]:
@@ -499,6 +501,10 @@ def materialize_formal_temporal_captions(
         type(max_attempts_per_window) is int
         and 1 <= max_attempts_per_window <= 3,
         "max_attempts_per_window must be within 1..3",
+    )
+    _require(
+        type(parallelism) is int and 1 <= parallelism <= 8,
+        "caption parallelism must be within 1..8",
     )
     target = Path(output_dir).resolve()
     _require(not target.exists(), f"output directory already exists: {target}")
@@ -514,11 +520,9 @@ def materialize_formal_temporal_captions(
                  "caption frame changed before materialization")
         frames_by_sha[str(row["jpeg_sha256"])] = data
 
-    usage_rows: list[dict[str, Any]] = []
-    provider_requests = 0
-    validation_failures = 0
-    reused = 0
+    provider_requests = validation_failures = reused = 0
     entries: list[dict[str, Any]] = []
+    todo: list[dict[str, Any]] = []
     for window in windows:
         cache_path = _caption_cache_path(cache_root, window)
         cached = _load_valid_caption(
@@ -531,6 +535,12 @@ def materialize_formal_temporal_captions(
             entries.append(cached)
             reused += 1
             continue
+        todo.append(window)
+
+    def materialize_one(
+        window: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], int, int, dict[str, Any]]:
+        cache_path = _caption_cache_path(cache_root, window)
         body = _caption_request(
             window=window,
             frames_by_sha=frames_by_sha,
@@ -538,6 +548,9 @@ def materialize_formal_temporal_captions(
         )
         completed = None
         last_error = None
+        request_count = 0
+        failure_count = 0
+        usage = None
         for attempt in range(1, max_attempts_per_window + 1):
             request = urllib.request.Request(
                 base_url.rstrip("/") + "/chat/completions",
@@ -552,7 +565,7 @@ def materialize_formal_temporal_captions(
             started = time.monotonic()
             try:
                 raw = transport(request, timeout_seconds)
-                provider_requests += 1
+                request_count += 1
                 response = json.loads(raw.decode("utf-8"))
             except Exception as exc:
                 raise FormalTemporalIndexError(
@@ -574,7 +587,7 @@ def materialize_formal_temporal_captions(
                 parsed = extract_single_json_object(record["raw_content"] or "")
                 caption = validate_structured_caption(parsed)
             except Exception as exc:
-                validation_failures += 1
+                failure_count += 1
                 last_error = type(exc).__name__
                 continue
             entry = dict(cache_entry_bindings(
@@ -601,14 +614,14 @@ def materialize_formal_temporal_captions(
                 "credentials_recorded": False,
             })
             _atomic_json(cache_path, entry)
-            usage_rows.append({
+            usage = {
                 "window_id": window["window_id"],
                 "attempt": attempt,
                 "request_body_bytes": len(body),
                 "response_bytes": len(raw),
                 "service_time_seconds": round(elapsed, 6),
                 "provider_usage": record.get("usage"),
-            })
+            }
             completed = entry
             break
         _require(
@@ -616,7 +629,17 @@ def materialize_formal_temporal_captions(
             f"caption validation failed for {window['window_id']} after "
             f"{max_attempts_per_window} attempts ({last_error})",
         )
-        entries.append(completed)
+        return completed, request_count, failure_count, usage
+
+    usage_rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=parallelism) as executor:
+        for completed, requests, failures, usage in executor.map(
+            materialize_one, todo
+        ):
+            entries.append(completed)
+            provider_requests += requests
+            validation_failures += failures
+            usage_rows.append(usage)
 
     entries.sort(key=lambda row: (row["object_id"], row["ordinal"]))
     _require(len(entries) == len(windows), "caption package is incomplete")
@@ -631,6 +654,7 @@ def materialize_formal_temporal_captions(
             "provider_request_count_this_run": provider_requests,
             "validated_caption_reuse_count": reused,
             "response_validation_failure_count": validation_failures,
+            "parallelism": parallelism,
             "per_request_usage": usage_rows,
             "monetary_cost_measured": False,
             "credentials_recorded": False,

@@ -95,6 +95,7 @@ def register_rsi_exam_commands(
     caption.add_argument("--model-id", required=True)
     caption.add_argument("--max-attempts-per-window", type=_positive_integer,
                          default=2)
+    caption.add_argument("--parallelism", type=_positive_integer, default=1)
     caption.add_argument("--timeout-seconds", type=float, default=180.0)
     caption.add_argument("--output-dir", type=Path, required=True)
     add_compact(caption)
@@ -285,6 +286,7 @@ def dispatch_rsi_exam_command(
             base_url=os.environ.get("PATHFINDER_PREP_LLM_BASE_URL", ""),
             api_key=os.environ.get("PATHFINDER_PREP_LLM_API_KEY", ""),
             max_attempts_per_window=args.max_attempts_per_window,
+            parallelism=args.parallelism,
             timeout_seconds=args.timeout_seconds,
         )
         return print_payload(payload, compact=args.compact)

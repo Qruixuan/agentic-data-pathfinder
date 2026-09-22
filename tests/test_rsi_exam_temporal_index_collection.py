@@ -243,6 +243,7 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
             model_id="caption-model",
             base_url="https://provider.invalid/v1",
             api_key="not-recorded-test-key",
+            parallelism=3,
             transport=self._caption_transport,
         )
         self.assertEqual(receipt["caption_count"], receipt[
