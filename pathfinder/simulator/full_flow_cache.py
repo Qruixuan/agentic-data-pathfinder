@@ -39,6 +39,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _TEMP_OBJECT = re.compile(r"\.[0-9a-f]{64}\.\d+\.\d+\.tmp")
 _ALLOWED_NODES = frozenset({"N7", "N8"})
 _MAX_JSON_BYTES = 1024 * 1024
+LEGACY_CACHE_NAMESPACE = "legacy-default"
 
 
 class FullFlowCacheError(RuntimeError):
@@ -95,16 +96,30 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def cache_key(object_id: str, representation_id: str) -> str:
+def cache_key(
+    object_id: str,
+    representation_id: str,
+    *,
+    cache_namespace: str = LEGACY_CACHE_NAMESPACE,
+) -> str:
     """Return a stable opaque key for one logical cached representation."""
 
-    identity = {
+    namespace = _identifier(cache_namespace, "cache_namespace")
+    identity: dict[str, str] = {
         "object_id": _identifier(object_id, "object_id"),
         "representation_id": _identifier(
             representation_id,
             "representation_id",
         ),
     }
+    # Preserve the exact key used by existing durable cache volumes.  New
+    # run-scoped namespaces are domain-separated without invalidating legacy
+    # evidence or requiring a destructive migration.
+    if namespace != LEGACY_CACHE_NAMESPACE:
+        identity = {
+            "cache_namespace": namespace,
+            **identity,
+        }
     return _sha256(_canonical_bytes(identity))
 
 
@@ -121,6 +136,7 @@ class CachedArtifact:
     size_bytes: int
     payload: bytes
     event_id: int
+    cache_namespace: str = LEGACY_CACHE_NAMESPACE
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -129,6 +145,7 @@ class CachedArtifact:
             "cache_id": self.cache_id,
             "node_id": self.node_id,
             "cache_key": self.cache_key,
+            "cache_namespace": self.cache_namespace,
             "object_id": self.object_id,
             "representation_id": self.representation_id,
             "content_sha256": self.content_sha256,
@@ -189,6 +206,7 @@ class _FullFlowArtifactCacheBase:
                 );
                 CREATE TABLE IF NOT EXISTS cache_entries (
                     cache_key TEXT PRIMARY KEY,
+                    cache_namespace TEXT NOT NULL DEFAULT 'legacy-default',
                     object_id TEXT NOT NULL,
                     representation_id TEXT NOT NULL,
                     content_sha256 TEXT NOT NULL,
@@ -204,6 +222,7 @@ class _FullFlowArtifactCacheBase:
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_kind TEXT NOT NULL,
                     cache_key TEXT NOT NULL,
+                    cache_namespace TEXT NOT NULL DEFAULT 'legacy-default',
                     object_id TEXT NOT NULL,
                     representation_id TEXT NOT NULL,
                     content_sha256 TEXT,
@@ -212,6 +231,28 @@ class _FullFlowArtifactCacheBase:
                 );
                 """
             )
+            # SQLite cannot add the new namespace column through the
+            # CREATE-IF-NOT-EXISTS statements above when reopening a v1
+            # volume.  Add it in place with the legacy namespace as the only
+            # truthful value for pre-upgrade rows.
+            entry_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(cache_entries)")
+            }
+            if "cache_namespace" not in entry_columns:
+                connection.execute(
+                    "ALTER TABLE cache_entries ADD COLUMN "
+                    "cache_namespace TEXT NOT NULL DEFAULT 'legacy-default'"
+                )
+            event_columns = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(cache_events)")
+            }
+            if "cache_namespace" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE cache_events ADD COLUMN "
+                    "cache_namespace TEXT NOT NULL DEFAULT 'legacy-default'"
+                )
             current = connection.execute(
                 "SELECT * FROM cache_state WHERE singleton = 1"
             ).fetchone()
@@ -320,6 +361,7 @@ class _FullFlowArtifactCacheBase:
             "entry_count": int(row["entry_count"]),
             "persistent_state": True,
             "payload_bytes_are_real": True,
+            "cache_namespace_isolation": True,
             "credentials_recorded": False,
         }
 
@@ -420,11 +462,25 @@ class FullFlowCacheRequestHandler(http.server.BaseHTTPRequestHandler):
                 set(query) in (
                     {"object_id", "representation_id"},
                     {"object_id", "representation_id", "expected_sha256"},
+                    {
+                        "cache_namespace",
+                        "object_id",
+                        "representation_id",
+                    },
+                    {
+                        "cache_namespace",
+                        "object_id",
+                        "representation_id",
+                        "expected_sha256",
+                    },
                 )
                 and all(len(values) == 1 for values in query.values()),
                 "cache artifact query is invalid",
             )
             artifact = self.server.cache.lookup(
+                cache_namespace=query.get(
+                    "cache_namespace", [LEGACY_CACHE_NAMESPACE]
+                )[0],
                 object_id=query["object_id"][0],
                 representation_id=query["representation_id"][0],
                 expected_sha256=(
@@ -437,6 +493,9 @@ class FullFlowCacheRequestHandler(http.server.BaseHTTPRequestHandler):
                     "status": "MISS",
                     "node_id": self.server.cache.node_id,
                     "cache_id": self.server.cache.cache_id,
+                    "cache_namespace": query.get(
+                        "cache_namespace", [LEGACY_CACHE_NAMESPACE]
+                    )[0],
                     "credentials_recorded": False,
                 })
                 return
@@ -447,6 +506,10 @@ class FullFlowCacheRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("X-Pathfinder-Cache-Node", artifact.node_id)
             self.send_header("X-Pathfinder-Cache-Id", artifact.cache_id)
             self.send_header("X-Pathfinder-Cache-Key", artifact.cache_key)
+            self.send_header(
+                "X-Pathfinder-Cache-Namespace",
+                artifact.cache_namespace,
+            )
             self.send_header(
                 "X-Pathfinder-Content-SHA256",
                 artifact.content_sha256,
@@ -488,6 +551,10 @@ class FullFlowCacheRequestHandler(http.server.BaseHTTPRequestHandler):
             payload = self.rfile.read(length)
             _require(len(payload) == length, "cache artifact body is truncated")
             result = self.server.cache.put(
+                cache_namespace=self.headers.get(
+                    "X-Pathfinder-Cache-Namespace",
+                    LEGACY_CACHE_NAMESPACE,
+                ),
                 request_id=self.headers.get("X-Pathfinder-Request-Id"),
                 object_id=self.headers.get("X-Pathfinder-Object-Id"),
                 representation_id=self.headers.get(
@@ -629,6 +696,7 @@ class HttpFullFlowArtifactCacheClient:
             value.get("status") == "ok"
             and value.get("node_id") == self._node
             and value.get("cache_id") == self._cache
+            and value.get("cache_namespace_isolation") is True
             and value.get("credentials_recorded") is False,
             "cache health identity is invalid",
         )
@@ -637,11 +705,16 @@ class HttpFullFlowArtifactCacheClient:
     def get(
         self,
         *,
+        cache_namespace: str = LEGACY_CACHE_NAMESPACE,
         object_id: str,
         representation_id: str,
         expected_sha256: str | None = None,
     ) -> CachedArtifact | None:
         query: dict[str, str] = {
+            "cache_namespace": _identifier(
+                cache_namespace,
+                "cache_namespace",
+            ),
             "object_id": _identifier(object_id, "object_id"),
             "representation_id": _identifier(
                 representation_id,
@@ -695,8 +768,11 @@ class HttpFullFlowArtifactCacheClient:
             )
         node_id = headers.get("X-Pathfinder-Cache-Node")
         cache_id = headers.get("X-Pathfinder-Cache-Id")
+        response_namespace = headers.get("X-Pathfinder-Cache-Namespace")
         _require(
-            node_id == self._node and cache_id == self._cache,
+            node_id == self._node
+            and cache_id == self._cache
+            and response_namespace == cache_namespace,
             "cache response identity changed",
         )
         raw_event_id = headers.get("X-Pathfinder-Cache-Event-Id")
@@ -717,11 +793,13 @@ class HttpFullFlowArtifactCacheClient:
             size_bytes=len(raw),
             payload=raw,
             event_id=int(raw_event_id),
+            cache_namespace=cache_namespace,
         )
 
     def put(
         self,
         *,
+        cache_namespace: str = LEGACY_CACHE_NAMESPACE,
         request_id: str,
         object_id: str,
         representation_id: str,
@@ -750,6 +828,10 @@ class HttpFullFlowArtifactCacheClient:
                     request_id,
                     "request_id",
                 ),
+                "X-Pathfinder-Cache-Namespace": _identifier(
+                    cache_namespace,
+                    "cache_namespace",
+                ),
                 "X-Pathfinder-Object-Id": _identifier(
                     object_id,
                     "object_id",
@@ -776,6 +858,7 @@ class HttpFullFlowArtifactCacheClient:
             result.get("status") == "STORED"
             and result.get("node_id") == self._node
             and result.get("cache_id") == self._cache
+            and result.get("cache_namespace") == cache_namespace
             and result.get("content_sha256") == digest
             and result.get("size_bytes") == len(payload)
             and result.get("credentials_recorded") is False,
@@ -790,6 +873,7 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
     def lookup(
         self,
         *,
+        cache_namespace: str = LEGACY_CACHE_NAMESPACE,
         object_id: str,
         representation_id: str,
         expected_sha256: str | None = None,
@@ -804,7 +888,12 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
             if expected_sha256 is None
             else _digest(expected_sha256, "expected_sha256")
         )
-        key = cache_key(object_id, representation_id)
+        cache_namespace = _identifier(cache_namespace, "cache_namespace")
+        key = cache_key(
+            object_id,
+            representation_id,
+            cache_namespace=cache_namespace,
+        )
         with self._lock, closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -817,11 +906,19 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                 event = connection.execute(
                     """
                     INSERT INTO cache_events (
-                        event_kind, cache_key, object_id, representation_id,
+                        event_kind, cache_key, cache_namespace,
+                        object_id, representation_id,
                         content_sha256, size_bytes, created_monotonic_ns
-                    ) VALUES ('MISS', ?, ?, ?, ?, 0, ?)
+                    ) VALUES ('MISS', ?, ?, ?, ?, ?, 0, ?)
                     """,
-                    (key, object_id, representation_id, expected, time.monotonic_ns()),
+                    (
+                        key,
+                        cache_namespace,
+                        object_id,
+                        representation_id,
+                        expected,
+                        time.monotonic_ns(),
+                    ),
                 )
                 connection.execute("COMMIT")
                 _require(event.lastrowid is not None, "cache event ID is absent")
@@ -837,12 +934,14 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
             event = connection.execute(
                 """
                 INSERT INTO cache_events (
-                    event_kind, cache_key, object_id, representation_id,
+                    event_kind, cache_key, cache_namespace,
+                    object_id, representation_id,
                     content_sha256, size_bytes, created_monotonic_ns
-                ) VALUES ('HIT', ?, ?, ?, ?, ?, ?)
+                ) VALUES ('HIT', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     key,
+                    cache_namespace,
                     object_id,
                     representation_id,
                     row["content_sha256"],
@@ -872,11 +971,13 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
             size_bytes=int(row["size_bytes"]),
             payload=payload,
             event_id=int(event.lastrowid),
+            cache_namespace=cache_namespace,
         )
 
     def put(
         self,
         *,
+        cache_namespace: str = LEGACY_CACHE_NAMESPACE,
         request_id: str,
         object_id: str,
         representation_id: str,
@@ -902,7 +1003,12 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                 == _digest(expected_sha256, "expected_sha256"),
                 "payload digest differs from expected_sha256",
             )
-        key = cache_key(object_id, representation_id)
+        cache_namespace = _identifier(cache_namespace, "cache_namespace")
+        key = cache_key(
+            object_id,
+            representation_id,
+            cache_namespace=cache_namespace,
+        )
         request_sha256 = _sha256(_canonical_bytes({
             "request_id": request_id,
             "cache_key": key,
@@ -926,6 +1032,12 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                             "request_id was reused for different cache content"
                         )
                     result = json.loads(str(replay["result_json"]))
+                    if "cache_namespace" not in result:
+                        _require(
+                            cache_namespace == LEGACY_CACHE_NAMESPACE,
+                            "legacy request replay changed cache namespace",
+                        )
+                        result["cache_namespace"] = LEGACY_CACHE_NAMESPACE
                     result["idempotent_replay"] = True
                     return result
 
@@ -981,6 +1093,7 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                     required = used + size_bytes
                     evicted.append({
                         "cache_key": victim["cache_key"],
+                        "cache_namespace": victim["cache_namespace"],
                         "object_id": victim["object_id"],
                         "representation_id": victim["representation_id"],
                         "content_sha256": victim["content_sha256"],
@@ -990,10 +1103,11 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                 connection.execute(
                     """
                     INSERT INTO cache_entries (
-                        cache_key, object_id, representation_id,
+                        cache_key, cache_namespace, object_id, representation_id,
                         content_sha256, size_bytes, last_access_sequence
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(cache_key) DO UPDATE SET
+                        cache_namespace = excluded.cache_namespace,
                         object_id = excluded.object_id,
                         representation_id = excluded.representation_id,
                         content_sha256 = excluded.content_sha256,
@@ -1002,6 +1116,7 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                     """,
                     (
                         key,
+                        cache_namespace,
                         object_id,
                         representation_id,
                         content_sha256,
@@ -1012,12 +1127,14 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                 event = connection.execute(
                     """
                     INSERT INTO cache_events (
-                        event_kind, cache_key, object_id, representation_id,
+                        event_kind, cache_key, cache_namespace,
+                        object_id, representation_id,
                         content_sha256, size_bytes, created_monotonic_ns
-                    ) VALUES ('STORE', ?, ?, ?, ?, ?, ?)
+                    ) VALUES ('STORE', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         key,
+                        cache_namespace,
                         object_id,
                         representation_id,
                         content_sha256,
@@ -1032,6 +1149,7 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                     "cache_id": self.cache_id,
                     "node_id": self.node_id,
                     "cache_key": key,
+                    "cache_namespace": cache_namespace,
                     "object_id": object_id,
                     "representation_id": representation_id,
                     "content_sha256": content_sha256,
@@ -1070,6 +1188,7 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
                 "event_id": int(row["event_id"]),
                 "event_kind": str(row["event_kind"]),
                 "cache_key": str(row["cache_key"]),
+                "cache_namespace": str(row["cache_namespace"]),
                 "object_id": str(row["object_id"]),
                 "representation_id": str(row["representation_id"]),
                 "content_sha256": row["content_sha256"],
@@ -1097,9 +1216,23 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
             ).fetchall()
         used = 0
         for row in rows:
-            _digest(str(row["cache_key"]), "cache_key")
-            _identifier(row["object_id"], "object_id")
-            _identifier(row["representation_id"], "representation_id")
+            key = _digest(str(row["cache_key"]), "cache_key")
+            namespace = _identifier(
+                row["cache_namespace"], "cache_namespace"
+            )
+            object_id = _identifier(row["object_id"], "object_id")
+            representation_id = _identifier(
+                row["representation_id"], "representation_id"
+            )
+            _require(
+                key
+                == cache_key(
+                    object_id,
+                    representation_id,
+                    cache_namespace=namespace,
+                ),
+                "cache entry key differs from its namespace and identity",
+            )
             digest = _digest(row["content_sha256"], "content_sha256")
             size = _positive_integer(row["size_bytes"], "size_bytes")
             path = self._content_path(digest)
@@ -1121,6 +1254,7 @@ class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
             "entry_count": len(rows),
             "persistent_state": True,
             "payload_bytes_are_real": True,
+            "cache_namespace_isolation": True,
             "credentials_recorded": False,
         }
 
@@ -1183,6 +1317,7 @@ def serve_full_flow_cache(
 __all__ = [
     "FULL_FLOW_CACHE_RESULT_SCHEMA_VERSION",
     "FULL_FLOW_CACHE_SCHEMA_VERSION",
+    "LEGACY_CACHE_NAMESPACE",
     "CachedArtifact",
     "FullFlowArtifactCache",
     "FullFlowCacheConflict",

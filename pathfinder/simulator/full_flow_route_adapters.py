@@ -92,6 +92,16 @@ class FullFlowRouteAdapterError(RuntimeError):
     """Raised when a service response cannot satisfy the frozen route."""
 
 
+def semantic_cache_namespace(run_id: str) -> str:
+    """Return the public, run-scoped namespace used by N7/N8 caches."""
+
+    normalized = _text(run_id, "cache namespace run_id", maximum=256)
+    return "run-" + _sha256(_canonical({
+        "domain": "pathfinder.semantic-cache-namespace/v1",
+        "run_id": normalized,
+    }))[:40]
+
+
 def _require(condition: object, message: str) -> None:
     if not condition:
         raise FullFlowRouteAdapterError(message)
@@ -1229,9 +1239,11 @@ class HttpArtifactCacheRouteAdapter:
         identity: ArtifactIdentity,
     ) -> CacheLookupResult:
         node = self._node(trial, stage)
+        namespace = semantic_cache_namespace(run_id)
         cache_id, epoch_before = self._identity(node)
         started = self._clock_ns()
         artifact = self._clients[node].get(
+            cache_namespace=namespace,
             object_id=identity.object_id,
             representation_id=identity.representation_id,
             expected_sha256=identity.artifact_sha256,
@@ -1272,6 +1284,10 @@ class HttpArtifactCacheRouteAdapter:
                 artifact.content_sha256 == identity.artifact_sha256
                 and artifact.size_bytes == identity.artifact_size_bytes,
                 "cache lookup returned a different artifact identity",
+            )
+            _require(
+                artifact.cache_namespace == namespace,
+                "cache lookup returned another run namespace",
             )
             with self._lock:
                 self._hits[lookup_sha] = artifact
@@ -1350,6 +1366,7 @@ class HttpArtifactCacheRouteAdapter:
         }))
         started = self._clock_ns()
         result = self._clients[node].put(
+            cache_namespace=semantic_cache_namespace(run_id),
             request_id=request_id,
             object_id=identity.object_id,
             representation_id=identity.representation_id,
@@ -1734,4 +1751,5 @@ __all__ = [
     "StaticDataAgentPlanIdResolver",
     "VerifiedN1HTTPScoringAdapter",
     "build_http_semantic_route_adapters",
+    "semantic_cache_namespace",
 ]

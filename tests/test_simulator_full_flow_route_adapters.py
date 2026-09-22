@@ -32,6 +32,7 @@ from pathfinder.simulator.full_flow_route_adapters import (
     SQLiteCacheLineageStore,
     StaticDataAgentPlanIdResolver,
     VerifiedN1HTTPScoringAdapter,
+    semantic_cache_namespace,
 )
 from pathfinder.simulator.full_flow_semantic_route_runtime import (
     ArtifactAccess,
@@ -203,7 +204,7 @@ class _CacheClient:
     def __init__(self, node: str, cache_id: str) -> None:
         self.node = node
         self.cache_id = cache_id
-        self.values: dict[tuple[str, str], bytes] = {}
+        self.values: dict[tuple[str, str, str], bytes] = {}
         self.event = 0
 
     def health(self) -> dict:
@@ -211,11 +212,21 @@ class _CacheClient:
             "status": "ok",
             "node_id": self.node,
             "cache_id": self.cache_id,
+            "cache_namespace_isolation": True,
             "credentials_recorded": False,
         }
 
-    def get(self, *, object_id, representation_id, expected_sha256=None):
-        payload = self.values.get((object_id, representation_id))
+    def get(
+        self,
+        *,
+        cache_namespace,
+        object_id,
+        representation_id,
+        expected_sha256=None,
+    ):
+        payload = self.values.get(
+            (cache_namespace, object_id, representation_id)
+        )
         if payload is None or (
             expected_sha256 is not None and _sha(payload) != expected_sha256
         ):
@@ -231,11 +242,13 @@ class _CacheClient:
             size_bytes=len(payload),
             payload=payload,
             event_id=self.event,
+            cache_namespace=cache_namespace,
         )
 
     def put(
         self,
         *,
+        cache_namespace,
         request_id,
         object_id,
         representation_id,
@@ -244,12 +257,13 @@ class _CacheClient:
     ):
         if expected_sha256 is not None:
             assert _sha(payload) == expected_sha256
-        self.values[(object_id, representation_id)] = payload
+        self.values[(cache_namespace, object_id, representation_id)] = payload
         return {
             "status": "STORED",
             "request_id": request_id,
             "node_id": self.node,
             "cache_id": self.cache_id,
+            "cache_namespace": cache_namespace,
             "content_sha256": _sha(payload),
             "size_bytes": len(payload),
             "credentials_recorded": False,
@@ -595,12 +609,27 @@ class FullFlowRouteAdaptersTest(unittest.TestCase):
         )
         self.assertEqual(BUNDLE, read.payload)
 
+        next_run = adapter.lookup(
+            run_id="run-v2",
+            trial=_trial(route="local-cache-derived", repetition=0),
+            stage={"logical_node_ids": ["N7"], "stage_key": "lookup"},
+            identity=identity,
+        )
+        self.assertEqual("miss", next_run.branch)
+        self.assertIsNone(next_run.source_insert_trial_key)
+
     def test_cache_hit_without_durable_lineage_is_rejected(self) -> None:
         clients = {
             "N7": _CacheClient("N7", "n7-cache"),
             "N8": _CacheClient("N8", "n8-cache"),
         }
-        clients["N7"].values[(OBJECT, "sampled_frame_bundle")] = BUNDLE
+        clients["N7"].values[
+            (
+                semantic_cache_namespace("run-v1"),
+                OBJECT,
+                "sampled_frame_bundle",
+            )
+        ] = BUNDLE
         adapter = HttpArtifactCacheRouteAdapter(
             clients=clients,
             runtime_epoch_probes={

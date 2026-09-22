@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -83,6 +84,70 @@ class FullFlowArtifactCacheTest(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(artifact.metadata()))
         self.assertEqual("VERIFIED", reopened.verify()["status"])
 
+    def test_legacy_volume_schema_is_migrated_without_rebinding(self) -> None:
+        state = self.root / "state"
+        (state / "objects").mkdir(parents=True)
+        database = state / "cache.sqlite3"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE cache_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    schema_version TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    cache_id TEXT NOT NULL,
+                    capacity_bytes INTEGER NOT NULL,
+                    access_sequence INTEGER NOT NULL
+                );
+                CREATE TABLE cache_entries (
+                    cache_key TEXT PRIMARY KEY,
+                    object_id TEXT NOT NULL,
+                    representation_id TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    last_access_sequence INTEGER NOT NULL
+                );
+                CREATE TABLE cache_requests (
+                    request_id TEXT PRIMARY KEY,
+                    request_sha256 TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                );
+                CREATE TABLE cache_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_kind TEXT NOT NULL,
+                    cache_key TEXT NOT NULL,
+                    object_id TEXT NOT NULL,
+                    representation_id TEXT NOT NULL,
+                    content_sha256 TEXT,
+                    size_bytes INTEGER NOT NULL,
+                    created_monotonic_ns INTEGER NOT NULL
+                );
+                INSERT INTO cache_state VALUES (
+                    1,
+                    'pathfinder.full-flow-artifact-cache/v1alpha1',
+                    'N7',
+                    'N7.derived-cache',
+                    64,
+                    0
+                );
+                """
+            )
+
+        cache = self._cache(capacity_bytes=64)
+
+        self.assertEqual("VERIFIED", cache.verify()["status"])
+        with closing(sqlite3.connect(database)) as connection:
+            entry_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(cache_entries)")
+            }
+            event_columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(cache_events)")
+            }
+        self.assertIn("cache_namespace", entry_columns)
+        self.assertIn("cache_namespace", event_columns)
+
     def test_reopen_removes_known_crash_orphans_and_temp_files(self) -> None:
         cache = self._cache(capacity_bytes=64)
         stored = cache.put(
@@ -122,6 +187,44 @@ class FullFlowArtifactCacheTest(unittest.TestCase):
             "different cache content",
         ):
             cache.put(**{**arguments, "payload": b"digest-two"})
+        self.assertEqual(1, cache.health()["entry_count"])
+
+    def test_run_namespaces_isolate_identical_artifact_identity(self) -> None:
+        cache = self._cache(capacity_bytes=64)
+        payload = b"namespaced-frame-bundle"
+        digest = hashlib.sha256(payload).hexdigest()
+
+        self.assertIsNone(cache.lookup(
+            cache_namespace="run-first",
+            object_id="video-1",
+            representation_id="sampled_frame_bundle",
+            expected_sha256=digest,
+        ))
+        cache.put(
+            cache_namespace="run-first",
+            request_id="store-first",
+            object_id="video-1",
+            representation_id="sampled_frame_bundle",
+            payload=payload,
+            expected_sha256=digest,
+        )
+        first = cache.lookup(
+            cache_namespace="run-first",
+            object_id="video-1",
+            representation_id="sampled_frame_bundle",
+            expected_sha256=digest,
+        )
+        second = cache.lookup(
+            cache_namespace="run-second",
+            object_id="video-1",
+            representation_id="sampled_frame_bundle",
+            expected_sha256=digest,
+        )
+
+        self.assertIsNotNone(first)
+        assert first is not None
+        self.assertEqual("run-first", first.cache_namespace)
+        self.assertIsNone(second)
         self.assertEqual(1, cache.health()["entry_count"])
 
     def test_lru_eviction_uses_real_payload_capacity(self) -> None:
@@ -251,11 +354,13 @@ class FullFlowArtifactCacheTest(unittest.TestCase):
         with _serving(server):
             self.assertEqual("ok", client.health()["status"])
             self.assertIsNone(client.get(
+                cache_namespace="formal-case-r0",
                 object_id="video",
                 representation_id="sampled_frame_bundle",
                 expected_sha256=digest,
             ))
             stored = client.put(
+                cache_namespace="formal-case-r0",
                 request_id="cache-store-http-1",
                 object_id="video",
                 representation_id="sampled_frame_bundle",
@@ -263,19 +368,29 @@ class FullFlowArtifactCacheTest(unittest.TestCase):
                 expected_sha256=digest,
             )
             artifact = client.get(
+                cache_namespace="formal-case-r0",
+                object_id="video",
+                representation_id="sampled_frame_bundle",
+                expected_sha256=digest,
+            )
+            isolated = client.get(
+                cache_namespace="formal-case-r1",
                 object_id="video",
                 representation_id="sampled_frame_bundle",
                 expected_sha256=digest,
             )
 
         self.assertEqual("STORED", stored["status"])
+        self.assertEqual("formal-case-r0", stored["cache_namespace"])
         self.assertIsNotNone(artifact)
         assert artifact is not None
         self.assertEqual(payload, artifact.payload)
         self.assertEqual(digest, artifact.content_sha256)
         self.assertEqual("N7", artifact.node_id)
+        self.assertEqual("formal-case-r0", artifact.cache_namespace)
+        self.assertIsNone(isolated)
         self.assertEqual(
-            ["MISS", "STORE", "HIT"],
+            ["MISS", "STORE", "HIT", "MISS"],
             [event["event_kind"] for event in cache.events()],
         )
 

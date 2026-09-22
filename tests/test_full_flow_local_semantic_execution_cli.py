@@ -128,6 +128,8 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
             "verify-simulator-full-flow-local-semantic-smokes",
             "run-simulator-full-flow-semantic-smokes",
             "verify-simulator-full-flow-semantic-smokes",
+            "run-simulator-rsi-exam-formal-trace-collection",
+            "verify-simulator-rsi-exam-formal-trace-collection",
             "run-simulator-full-flow-local-semantic-matrix",
             "verify-simulator-full-flow-local-semantic-matrix",
         }.issubset(commands))

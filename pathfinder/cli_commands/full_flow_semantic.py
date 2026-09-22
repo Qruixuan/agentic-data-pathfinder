@@ -43,6 +43,8 @@ COMMAND_NAMES = frozenset({
     "verify-simulator-full-flow-local-semantic-smokes",
     "run-simulator-full-flow-semantic-smokes",
     "verify-simulator-full-flow-semantic-smokes",
+    "run-simulator-rsi-exam-formal-trace-collection",
+    "verify-simulator-rsi-exam-formal-trace-collection",
     "run-simulator-full-flow-local-semantic-matrix",
     "verify-simulator-full-flow-local-semantic-matrix",
     "serve-simulator-full-flow-semantic-route",
@@ -426,6 +428,48 @@ def register_full_flow_semantic_commands(
     semantic_smoke_verify.add_argument("--one-case-plan-dir", type=Path)
     add_multi_host_semantic_smoke_sources(semantic_smoke_verify)
     _add_compact(semantic_smoke_verify)
+
+    formal_collection_run = subcommands.add_parser(
+        "run-simulator-rsi-exam-formal-trace-collection",
+        help=(
+            "run or resume frozen RSI-Exam one-case plans serially with "
+            "one cache namespace per case and repetition"
+        ),
+    )
+    add_multi_host_semantic_smoke_sources(formal_collection_run)
+    _add_required_path(formal_collection_run, "--collection-plan-dir")
+    formal_collection_run.add_argument(
+        "--one-case-plan-dir",
+        type=Path,
+        action="append",
+        required=True,
+    )
+    formal_collection_run.add_argument("--collection-id", required=True)
+    _add_required_path(formal_collection_run, "--output-dir")
+    formal_collection_run.add_argument("--flowmesh-base-url")
+    formal_collection_run.add_argument(
+        "--task-timeout", type=int, default=900
+    )
+    formal_collection_run.add_argument(
+        "--poll-interval", type=positive_finite_float, default=2.0
+    )
+    _add_compact(formal_collection_run)
+
+    formal_collection_verify = subcommands.add_parser(
+        "verify-simulator-rsi-exam-formal-trace-collection",
+        help="verify every completed ten-path unit in a formal collection",
+    )
+    add_multi_host_semantic_smoke_sources(formal_collection_verify)
+    _add_required_path(formal_collection_verify, "--collection-plan-dir")
+    formal_collection_verify.add_argument(
+        "--one-case-plan-dir",
+        type=Path,
+        action="append",
+        required=True,
+    )
+    formal_collection_verify.add_argument("--collection-id", required=True)
+    _add_required_path(formal_collection_verify, "--collection-dir")
+    _add_compact(formal_collection_verify)
 
     def add_local_semantic_matrix_gate_sources(
         command: argparse.ArgumentParser,
@@ -989,6 +1033,105 @@ def dispatch_full_flow_semantic_command(
                 if args.one_case_plan_dir is None
                 else {"one_case_plan_dir": args.one_case_plan_dir}
             ),
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "run-simulator-rsi-exam-formal-trace-collection":
+        from ..rsi_exam.formal_trace_collection import (
+            run_formal_trace_collection,
+        )
+        from ..simulator.full_flow_local_semantic_smoke import (
+            run_full_flow_semantic_smokes,
+            verify_full_flow_semantic_smokes,
+        )
+
+        n4_live_gate_sources = load_n4_live_gate_sources(
+            args.n4_live_gate_sources
+        )
+
+        def execute_unit(unit, target):
+            with local_semantic_flowmesh_executor(
+                args.local_semantic_admission_dir,
+                run_id=unit.run_id,
+                flowmesh_base_url=args.flowmesh_base_url,
+                task_timeout_seconds=args.task_timeout,
+                poll_interval_seconds=args.poll_interval,
+            ) as executor:
+                return run_full_flow_semantic_smokes(
+                    args.local_semantic_admission_dir,
+                    args.n4_serve_gate_dir,
+                    args.deployment_binding_dir,
+                    args.logical_plan_dir,
+                    args.scenario,
+                    args.container_plan_dir,
+                    args.artifact_binding_dir,
+                    run_id=unit.run_id,
+                    executor=executor,
+                    output_dir=target,
+                    n4_live_gate_sources=n4_live_gate_sources,
+                    one_case_plan_dir=unit.one_case_plan_dir,
+                )
+
+        def verify_unit(unit, target):
+            return verify_full_flow_semantic_smokes(
+                target,
+                local_semantic_admission_dir=(
+                    args.local_semantic_admission_dir
+                ),
+                n4_serve_gate_dir=args.n4_serve_gate_dir,
+                deployment_binding_dir=args.deployment_binding_dir,
+                logical_route_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                artifact_binding_dir=args.artifact_binding_dir,
+                n4_live_gate_sources=n4_live_gate_sources,
+                one_case_plan_dir=unit.one_case_plan_dir,
+            )
+
+        payload = run_formal_trace_collection(
+            args.collection_plan_dir,
+            args.one_case_plan_dir,
+            local_semantic_admission_dir=args.local_semantic_admission_dir,
+            collection_id=args.collection_id,
+            output_dir=args.output_dir,
+            execute_unit=execute_unit,
+            verify_unit=verify_unit,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "verify-simulator-rsi-exam-formal-trace-collection":
+        from ..rsi_exam.formal_trace_collection import (
+            verify_formal_trace_collection,
+        )
+        from ..simulator.full_flow_local_semantic_smoke import (
+            verify_full_flow_semantic_smokes,
+        )
+
+        n4_live_gate_sources = load_n4_live_gate_sources(
+            args.n4_live_gate_sources
+        )
+
+        def verify_unit(unit, target):
+            return verify_full_flow_semantic_smokes(
+                target,
+                local_semantic_admission_dir=(
+                    args.local_semantic_admission_dir
+                ),
+                n4_serve_gate_dir=args.n4_serve_gate_dir,
+                deployment_binding_dir=args.deployment_binding_dir,
+                logical_route_dir=args.logical_plan_dir,
+                scenario_path=args.scenario,
+                container_plan_dir=args.container_plan_dir,
+                artifact_binding_dir=args.artifact_binding_dir,
+                n4_live_gate_sources=n4_live_gate_sources,
+                one_case_plan_dir=unit.one_case_plan_dir,
+            )
+
+        payload = verify_formal_trace_collection(
+            args.collection_dir,
+            collection_plan_dir=args.collection_plan_dir,
+            one_case_plan_dirs=args.one_case_plan_dir,
+            local_semantic_admission_dir=args.local_semantic_admission_dir,
+            collection_id=args.collection_id,
+            verify_unit=verify_unit,
         )
         return print_payload(payload, compact=args.compact)
     if args.command == "run-simulator-full-flow-local-semantic-matrix":

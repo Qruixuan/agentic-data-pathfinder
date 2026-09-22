@@ -443,95 +443,146 @@ def _representative_smokes(
     trials: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     _require(bool(trials), "semantic trials are empty")
-    representative_workload_id = str(min(
-        trials,
-        key=lambda row: int(row["order_index"]),
-    )["workload_id"])
     by_cell = {
         (row["workload_id"], row["design_id"], row["repetition"]): row
         for row in trials
     }
-    selections = [
+    shape = [
         (
             "n7-raw",
-            (representative_workload_id, "D0", 0),
+            "D0",
+            0,
             "raw",
             "N7",
-            None,
             None,
         ),
         (
             "n7-indexed-raw",
-            (representative_workload_id, "D1", 0),
+            "D1",
+            0,
             "indexed-raw",
             "N7",
-            None,
             None,
         ),
         (
             "n7-remote-derived",
-            (representative_workload_id, "D2", 0),
+            "D2",
+            0,
             "remote-derived",
             "N7",
-            None,
             None,
         ),
         (
             "n7-cache-miss",
-            (representative_workload_id, "D3", 0),
+            "D3",
+            0,
             "local-cache-derived",
             "N7",
             "miss",
-            None,
         ),
         (
             "n7-cache-hit",
-            (representative_workload_id, "D3", 1),
+            "D3",
+            1,
             "local-cache-derived",
             "N7",
             "hit",
-            (representative_workload_id, "D3", 0),
         ),
         (
             "n8-raw",
-            (representative_workload_id, "D4", 0),
+            "D4",
+            0,
             "raw",
             "N8",
-            None,
             None,
         ),
         (
             "n8-indexed-raw",
-            (representative_workload_id, "D5", 0),
+            "D5",
+            0,
             "indexed-raw",
             "N8",
-            None,
             None,
         ),
         (
             "n8-remote-derived",
-            (representative_workload_id, "D6", 0),
+            "D6",
+            0,
             "remote-derived",
             "N8",
-            None,
             None,
         ),
         (
             "n8-cache-miss",
-            (representative_workload_id, "D7", 0),
+            "D7",
+            0,
             "local-cache-derived",
             "N8",
             "miss",
-            None,
         ),
         (
             "n8-cache-hit",
-            (representative_workload_id, "D7", 1),
+            "D7",
+            1,
             "local-cache-derived",
             "N8",
             "hit",
-            (representative_workload_id, "D7", 0),
         ),
+    ]
+    workload_first_order: dict[str, int] = {}
+    for trial in trials:
+        workload = str(trial["workload_id"])
+        workload_first_order[workload] = min(
+            workload_first_order.get(workload, int(trial["order_index"])),
+            int(trial["order_index"]),
+        )
+    compatible = []
+    for workload in workload_first_order:
+        if all(
+            (workload, design, repetition) in by_cell
+            and by_cell[(workload, design, repetition)]["route_family"]
+            == expected_family
+            and by_cell[(workload, design, repetition)]["executor_node_id"]
+            == expected_executor
+            for (
+                _case_id,
+                design,
+                repetition,
+                expected_family,
+                expected_executor,
+                _branch,
+            ) in shape
+        ):
+            compatible.append(workload)
+    _require(
+        bool(compatible),
+        "no workload supports the representative ten-path smoke shape",
+    )
+    representative_workload_id = min(
+        compatible,
+        key=lambda workload: (workload_first_order[workload], workload),
+    )
+    selections = [
+        (
+            case_id,
+            (representative_workload_id, design, repetition),
+            expected_family,
+            expected_executor,
+            branch,
+            (
+                (representative_workload_id, design, 0)
+                if branch == "hit"
+                else None
+            ),
+        )
+        for (
+            case_id,
+            design,
+            repetition,
+            expected_family,
+            expected_executor,
+            branch,
+        ) in shape
     ]
     rows: list[dict[str, Any]] = []
     for (
