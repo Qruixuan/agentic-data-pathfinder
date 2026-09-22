@@ -9,6 +9,8 @@ from pathlib import Path
 
 from pathfinder.rsi_exam.collection_plan import freeze_collection_plan
 from pathfinder.rsi_exam.formal_foundation import (
+    FormalFoundationError,
+    _correct_option_id,
     build_formal_runtime_foundation,
     verify_formal_runtime_foundation,
 )
@@ -440,6 +442,48 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
             and row["cache_reuse_scope"] == "canonical-window-content-v1"
             for row in rows
         ))
+
+    def test_pilot_substring_label_maps_to_one_complete_option(self) -> None:
+        task = {
+            "workload_id": "causal-fixture",
+            "answer_options": [
+                {"option_id": "A", "text": "first"},
+                {"option_id": "B", "text": "second"},
+            ],
+        }
+        pilot = {
+            "id": "causal-fixture",
+            "question": (
+                "why did it happen? Answer with the best option text: "
+                "the person enters the parked vehicle; "
+                "the person walks past the vehicle."
+            ),
+            "accepted_answer_substrings": ["ENTERS the parked vehicle!"],
+        }
+        self.assertEqual("A", _correct_option_id(task, pilot))
+
+    def test_ambiguous_pilot_substring_label_fails_closed(self) -> None:
+        task = {
+            "workload_id": "causal-fixture",
+            "answer_options": [
+                {"option_id": "A", "text": "first"},
+                {"option_id": "B", "text": "second"},
+            ],
+        }
+        pilot = {
+            "id": "causal-fixture",
+            "question": (
+                "why did it happen? Answer with the best option text: "
+                "the person enters the parked vehicle; "
+                "the person walks past the vehicle."
+            ),
+            "accepted_answer_substrings": ["the person"],
+        }
+        with self.assertRaisesRegex(
+            FormalFoundationError,
+            "does not identify exactly one option",
+        ):
+            _correct_option_id(task, pilot)
 
 
 if __name__ == "__main__":

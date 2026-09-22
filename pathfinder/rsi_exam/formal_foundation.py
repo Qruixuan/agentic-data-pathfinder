@@ -332,6 +332,25 @@ def _correct_option_id(
         for index, option in enumerate(pilot_options)
         if option in accepted_values
     ]
+    if not matches:
+        # ``accepted_answer_substrings`` is a legacy scoring contract, not a
+        # guarantee that one entry repeats the complete option verbatim.
+        # Resolve it with the same direction its name declares: after generic
+        # case/punctuation/whitespace normalization, an accepted phrase must
+        # occur inside exactly one full option.  Never use fuzzy similarity or
+        # break a tie by order; ambiguous labels remain fail-closed.
+        normalize = lambda value: " ".join(
+            re.findall(r"[a-z0-9]+", str(value).casefold())
+        )
+        normalized_options = [normalize(option) for option in pilot_options]
+        normalized_accepted = {
+            normalize(value) for value in accepted_values if normalize(value)
+        }
+        matches = [
+            index
+            for index, option in enumerate(normalized_options)
+            if any(value in option for value in normalized_accepted)
+        ]
     _require(len(matches) == 1, "pilot label does not identify exactly one option")
     return str(public_options[matches[0]]["option_id"])
 
