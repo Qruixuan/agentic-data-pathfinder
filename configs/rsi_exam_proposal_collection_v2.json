@@ -1,0 +1,42 @@
+{
+  "cohort_id": "pathfinder-rsi-exam-proposal-multicase-v2",
+  "collection_repetitions": 3,
+  "max_direct_video_bytes": 7000000,
+  "schema_version": "pathfinder.rsi-exam-cohort-spec/v1alpha2",
+  "selection_seed": "pathfinder-rsi-exam-proposal-20260922-v1",
+  "split_stratum_targets": {
+    "development": {
+      "causal": 1,
+      "descriptive": 1,
+      "temporal": 1
+    },
+    "test": {
+      "causal": 1,
+      "descriptive": 1,
+      "temporal": 1
+    },
+    "train": {
+      "causal": 2,
+      "descriptive": 2,
+      "temporal": 2
+    }
+  },
+  "stratum_by_workload": {
+    "causal-nextqa-val-3462517143-q2": "causal",
+    "causal-nextqa-val-4260763967-q4": "causal",
+    "causal-nextqa-val-4882821564-q1": "causal",
+    "causal-nextqa-val-5026660202-q8": "causal",
+    "causal-nextqa-val-8132842161-q2": "causal",
+    "causal-nextqa-val-9088819598-q1": "causal",
+    "descriptive-nextqa-val-4130504920-q4": "descriptive",
+    "descriptive-nextqa-val-4942054721-q7": "descriptive",
+    "descriptive-nextqa-val-5840177726-q3": "descriptive",
+    "descriptive-nextqa-val-8547321641-q7": "descriptive",
+    "temporal-nextqa-val-2834146886-q8": "temporal",
+    "temporal-nextqa-val-2976913210-q6": "temporal",
+    "temporal-nextqa-val-3441428429-q10": "temporal",
+    "temporal-nextqa-val-5296635780-q7": "temporal",
+    "temporal-nextqa-val-5735711594-q5": "temporal",
+    "temporal-nextqa-val-6356067859-q6": "temporal"
+  }
+}

@@ -85,6 +85,7 @@ class OfflineReplayCliTest(unittest.TestCase):
         audit.assert_called_once_with(
             Path("public-tasks.json"),
             Path("cohort-spec.json"),
+            None,
         )
 
         with mock.patch(
@@ -108,6 +109,7 @@ class OfflineReplayCliTest(unittest.TestCase):
             Path("cohort-spec.json"),
             builder_commit="7" * 40,
             output_dir=Path("plan"),
+            raw_candidate_bindings=None,
         )
 
         with mock.patch(
@@ -131,6 +133,7 @@ class OfflineReplayCliTest(unittest.TestCase):
             public_task_set=Path("public-tasks.json"),
             cohort_spec=Path("cohort-spec.json"),
             builder_commit="7" * 40,
+            raw_candidate_bindings=None,
         )
 
     def test_blocked_collection_audit_returns_nonzero(self) -> None:

@@ -32,9 +32,18 @@ from .offline_replay import (
 )
 
 
-COLLECTION_SPEC_SCHEMA_VERSION = "pathfinder.rsi-exam-cohort-spec/v1alpha1"
+COLLECTION_SPEC_SCHEMA_VERSION = "pathfinder.rsi-exam-cohort-spec/v1alpha2"
+LEGACY_COLLECTION_SPEC_SCHEMA_VERSION = (
+    "pathfinder.rsi-exam-cohort-spec/v1alpha1"
+)
 COLLECTION_PLAN_SCHEMA_VERSION = (
+    "pathfinder.rsi-exam-trace-collection-plan/v1alpha2"
+)
+LEGACY_COLLECTION_PLAN_SCHEMA_VERSION = (
     "pathfinder.rsi-exam-trace-collection-plan/v1alpha1"
+)
+RAW_BINDINGS_SCHEMA_VERSION = (
+    "pathfinder.simulator-raw-cold-bindings/v1alpha1"
 )
 PUBLIC_TASK_SET_SCHEMA_VERSION = "pathfinder.public-task-set/v1alpha1"
 MANIFEST_NAME = "collection-manifest.json"
@@ -189,21 +198,26 @@ def _validate_public_task_set(value: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
+    schema_version = value.get("schema_version")
+    supported = {
+        LEGACY_COLLECTION_SPEC_SCHEMA_VERSION,
+        COLLECTION_SPEC_SCHEMA_VERSION,
+    }
+    _require(schema_version in supported, "unsupported cohort-spec schema")
+    allowed = {
+        "cohort_id",
+        "collection_repetitions",
+        "schema_version",
+        "selection_seed",
+        "split_stratum_targets",
+        "stratum_by_workload",
+    }
+    if schema_version == COLLECTION_SPEC_SCHEMA_VERSION:
+        allowed.add("max_direct_video_bytes")
     _allowed_keys(
         value,
-        {
-            "cohort_id",
-            "collection_repetitions",
-            "schema_version",
-            "selection_seed",
-            "split_stratum_targets",
-            "stratum_by_workload",
-        },
+        allowed,
         "cohort spec",
-    )
-    _require(
-        value.get("schema_version") == COLLECTION_SPEC_SCHEMA_VERSION,
-        "unsupported cohort-spec schema",
     )
     cohort_id = _nonempty_string(value.get("cohort_id"), "cohort_id")
     _require("/" not in cohort_id and "\\" not in cohort_id, "cohort_id is invalid")
@@ -240,13 +254,63 @@ def _validate_spec(value: Mapping[str, Any]) -> dict[str, Any]:
         target_strata <= set(normalized_mapping.values()),
         "split targets name unmapped strata",
     )
+    maximum = None
+    if schema_version == COLLECTION_SPEC_SCHEMA_VERSION:
+        maximum = _positive_integer(
+            value.get("max_direct_video_bytes"),
+            "max_direct_video_bytes",
+        )
     return {
+        "schema_version": schema_version,
         "cohort_id": cohort_id,
         "selection_seed": seed,
         "collection_repetitions": repetitions,
         "stratum_by_workload": normalized_mapping,
         "split_stratum_targets": normalized_targets,
+        "max_direct_video_bytes": maximum,
     }
+
+
+def _validate_raw_candidate_bindings(
+    value: Mapping[str, Any],
+) -> dict[str, int]:
+    _allowed_keys(
+        value,
+        {
+            "catalog_version",
+            "credentials_recorded",
+            "dataset_id",
+            "dataset_revision",
+            "objects",
+            "package_id",
+            "plan_ids",
+            "schema_version",
+        },
+        "raw candidate bindings",
+    )
+    _require(
+        value.get("schema_version") == RAW_BINDINGS_SCHEMA_VERSION,
+        "unsupported raw candidate bindings schema",
+    )
+    _require(
+        value.get("credentials_recorded") is False,
+        "raw candidate bindings record credentials",
+    )
+    objects = value.get("objects")
+    _require(isinstance(objects, list) and bool(objects), "raw candidates missing")
+    sizes: dict[str, int] = {}
+    for index, row in enumerate(objects):
+        _require(isinstance(row, dict), f"raw candidate {index} is invalid")
+        object_id = _nonempty_string(
+            row.get("object_id"), f"raw candidate {index} object_id"
+        )
+        size = _positive_integer(
+            row.get("artifact_size_bytes"),
+            f"raw candidate {index} artifact_size_bytes",
+        )
+        _require(object_id not in sizes, "raw candidate object is duplicated")
+        sizes[object_id] = size
+    return sizes
 
 
 def _stable_rank(seed: str, *parts: str) -> str:
@@ -257,6 +321,7 @@ def _stable_rank(seed: str, *parts: str) -> str:
 def _eligible_tasks(
     tasks: Sequence[Mapping[str, Any]],
     spec: Mapping[str, Any],
+    raw_sizes: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     mapping = spec["stratum_by_workload"]
     result: list[dict[str, Any]] = []
@@ -264,6 +329,12 @@ def _eligible_tasks(
         stratum = mapping.get(task["workload_id"])
         if stratum is None:
             continue
+        maximum = spec.get("max_direct_video_bytes")
+        if maximum is not None:
+            _require(raw_sizes is not None, "raw candidate bindings are required")
+            size = raw_sizes.get(task["object_id"])
+            if size is None or size > maximum:
+                continue
         result.append({**task, "stratum": stratum})
     return result
 
@@ -271,8 +342,9 @@ def _eligible_tasks(
 def _candidate_summary(
     tasks: Sequence[Mapping[str, Any]],
     spec: Mapping[str, Any],
+    raw_sizes: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    eligible = _eligible_tasks(tasks, spec)
+    eligible = _eligible_tasks(tasks, spec, raw_sizes)
     candidates_by_stratum: dict[str, set[str]] = defaultdict(set)
     for task in eligible:
         candidates_by_stratum[task["stratum"]].add(task["object_id"])
@@ -305,6 +377,7 @@ def _candidate_summary(
 def audit_collection_candidates(
     public_task_set: str | Path,
     cohort_spec: str | Path,
+    raw_candidate_bindings: str | Path | None = None,
 ) -> dict[str, Any]:
     """Return an outcome-blind readiness audit without freezing a plan."""
 
@@ -312,11 +385,23 @@ def audit_collection_candidates(
     _, spec_raw, spec_value = _strict_file(cohort_spec, "cohort spec")
     tasks = _validate_public_task_set(task_value)
     spec = _validate_spec(spec_value)
-    summary = _candidate_summary(tasks, spec)
+    raw_sha256 = None
+    raw_sizes = None
+    if raw_candidate_bindings is not None:
+        _, raw_bytes, raw_value = _strict_file(
+            raw_candidate_bindings, "raw candidate bindings"
+        )
+        raw_sizes = _validate_raw_candidate_bindings(raw_value)
+        raw_sha256 = _sha256(raw_bytes)
+    _require(
+        (spec["max_direct_video_bytes"] is None) == (raw_sizes is None),
+        "raw candidate bindings must accompany max_direct_video_bytes",
+    )
+    summary = _candidate_summary(tasks, spec, raw_sizes)
     assignment_satisfied = False
     if summary["minimum_count_gate_satisfied"]:
         try:
-            _select_cases(tasks, spec)
+            _select_cases(tasks, spec, raw_sizes)
         except OfflineReplayError:
             assignment_satisfied = False
         else:
@@ -334,6 +419,8 @@ def audit_collection_candidates(
         "cohort_id": spec["cohort_id"],
         "public_task_set_sha256": _sha256(task_raw),
         "cohort_spec_sha256": _sha256(spec_raw),
+        "raw_candidate_bindings_sha256": raw_sha256,
+        "max_direct_video_bytes": spec["max_direct_video_bytes"],
         **summary,
         "video_disjoint_assignment_satisfied": assignment_satisfied,
         "task_outcomes_read": False,
@@ -359,8 +446,9 @@ def _slots(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
 def _select_cases(
     tasks: Sequence[Mapping[str, Any]],
     spec: Mapping[str, Any],
+    raw_sizes: Mapping[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    eligible = _eligible_tasks(tasks, spec)
+    eligible = _eligible_tasks(tasks, spec, raw_sizes)
     by_stratum_object: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for task in eligible:
         by_stratum_object[(task["stratum"], task["object_id"])].append(dict(task))
@@ -443,6 +531,11 @@ def _select_cases(
             "public_task_sha256": task["public_task_sha256"],
             "question_sha256": task["question_sha256"],
             "answer_option_count": task["answer_option_count"],
+            **(
+                {"raw_video_size_bytes": raw_sizes[object_id]}
+                if raw_sizes is not None
+                else {}
+            ),
         })
     return sorted(selected, key=lambda row: row["case_id"])
 
@@ -508,6 +601,8 @@ def _derive_documents(
     task_value: Mapping[str, Any],
     spec_raw: bytes,
     spec_value: Mapping[str, Any],
+    raw_bindings_raw: bytes | None = None,
+    raw_bindings_value: Mapping[str, Any] | None = None,
     *,
     builder_commit: str,
 ) -> dict[str, bytes]:
@@ -517,12 +612,21 @@ def _derive_documents(
     )
     tasks = _validate_public_task_set(task_value)
     spec = _validate_spec(spec_value)
-    summary = _candidate_summary(tasks, spec)
+    raw_sizes = (
+        None
+        if raw_bindings_value is None
+        else _validate_raw_candidate_bindings(raw_bindings_value)
+    )
+    _require(
+        (spec["max_direct_video_bytes"] is None) == (raw_sizes is None),
+        "raw candidate bindings must accompany max_direct_video_bytes",
+    )
+    summary = _candidate_summary(tasks, spec, raw_sizes)
     _require(
         summary["minimum_count_gate_satisfied"],
         "public candidate pool does not meet minimum stratum counts",
     )
-    cases = _select_cases(tasks, spec)
+    cases = _select_cases(tasks, spec, raw_sizes)
     operations = _collection_operations(cases, spec["collection_repetitions"])
     split_manifest = {
         case["object_id"]: case["split"]
@@ -540,7 +644,11 @@ def _derive_documents(
         if counts:
             actual_counts[split] = dict(sorted(counts.items()))
     manifest = {
-        "schema_version": COLLECTION_PLAN_SCHEMA_VERSION,
+        "schema_version": (
+            COLLECTION_PLAN_SCHEMA_VERSION
+            if spec["schema_version"] == COLLECTION_SPEC_SCHEMA_VERSION
+            else LEGACY_COLLECTION_PLAN_SCHEMA_VERSION
+        ),
         "cohort_id": spec["cohort_id"],
         "builder_source_commit": builder_commit,
         "selection_algorithm": "seeded-video-disjoint-bipartite-matching-v1",
@@ -564,6 +672,12 @@ def _derive_documents(
         "execution_authorized": False,
         "eligible_for_scientific_claims": False,
     }
+    if raw_bindings_raw is not None:
+        manifest.update({
+            "raw_candidate_bindings_sha256": _sha256(raw_bindings_raw),
+            "max_direct_video_bytes": spec["max_direct_video_bytes"],
+            "direct_video_feasibility_checked": True,
+        })
     documents = {
         MANIFEST_NAME: _json_bytes(manifest),
         CASES_NAME: _jsonl_bytes(cases),
@@ -581,16 +695,25 @@ def freeze_collection_plan(
     *,
     builder_commit: str,
     output_dir: str | Path,
+    raw_candidate_bindings: str | Path | None = None,
 ) -> dict[str, Any]:
     """Freeze an outcome-blind, video-disjoint trace collection plan."""
 
     _, task_raw, task_value = _strict_file(public_task_set, "public task set")
     _, spec_raw, spec_value = _strict_file(cohort_spec, "cohort spec")
+    raw_bindings_raw = None
+    raw_bindings_value = None
+    if raw_candidate_bindings is not None:
+        _, raw_bindings_raw, raw_bindings_value = _strict_file(
+            raw_candidate_bindings, "raw candidate bindings"
+        )
     documents = _derive_documents(
         task_raw,
         task_value,
         spec_raw,
         spec_value,
+        raw_bindings_raw,
+        raw_bindings_value,
         builder_commit=builder_commit,
     )
     target = Path(output_dir).resolve()
@@ -605,6 +728,7 @@ def freeze_collection_plan(
             public_task_set=public_task_set,
             cohort_spec=cohort_spec,
             builder_commit=builder_commit,
+            raw_candidate_bindings=raw_candidate_bindings,
         )
         os.replace(staging, target)
     finally:
@@ -664,7 +788,10 @@ def _verify_internal_documents(
     _require(cases_raw == _jsonl_bytes(cases), "selected cases are not canonical")
     _require(operations_raw == _jsonl_bytes(operations), "operations are not canonical")
     _require(
-        manifest.get("schema_version") == COLLECTION_PLAN_SCHEMA_VERSION,
+        manifest.get("schema_version") in {
+            COLLECTION_PLAN_SCHEMA_VERSION,
+            LEGACY_COLLECTION_PLAN_SCHEMA_VERSION,
+        },
         "unsupported plan schema",
     )
     _require(
@@ -712,6 +839,24 @@ def _verify_internal_documents(
         "task_class_id",
         "workload_id",
     }
+    if manifest["schema_version"] == COLLECTION_PLAN_SCHEMA_VERSION:
+        case_fields.add("raw_video_size_bytes")
+        _positive_integer(
+            manifest.get("max_direct_video_bytes"),
+            "manifest max_direct_video_bytes",
+        )
+        _require(
+            manifest.get("direct_video_feasibility_checked") is True,
+            "direct-video feasibility was not checked",
+        )
+        _require(
+            re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(manifest.get("raw_candidate_bindings_sha256")),
+            )
+            is not None,
+            "raw candidate bindings digest is invalid",
+        )
     for case in cases:
         _require(set(case) == case_fields, "selected case fields differ")
         _require(
@@ -731,6 +876,15 @@ def _verify_internal_documents(
             _require(
                 re.fullmatch(r"[0-9a-f]{64}", str(case.get(field))) is not None,
                 f"case {field} is invalid",
+            )
+        if manifest["schema_version"] == COLLECTION_PLAN_SCHEMA_VERSION:
+            size = _positive_integer(
+                case.get("raw_video_size_bytes"),
+                "case raw_video_size_bytes",
+            )
+            _require(
+                size <= manifest["max_direct_video_bytes"],
+                "selected case exceeds direct-video byte limit",
             )
     operation_ids = [row.get("operation_id") for row in operations]
     _require(
@@ -828,6 +982,7 @@ def verify_collection_plan(
     public_task_set: str | Path | None = None,
     cohort_spec: str | Path | None = None,
     builder_commit: str | None = None,
+    raw_candidate_bindings: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify a collection plan and optionally rebuild it from public sources."""
 
@@ -835,7 +990,11 @@ def verify_collection_plan(
     _require(root.is_dir(), "collection plan directory is missing")
     entries = _verify_checksum_directory(root)
     package = _verify_internal_documents(root, entries)
-    source_bound = public_task_set is not None or cohort_spec is not None
+    source_bound = (
+        public_task_set is not None
+        or cohort_spec is not None
+        or raw_candidate_bindings is not None
+    )
     _require(
         (public_task_set is None) == (cohort_spec is None),
         "both public_task_set and cohort_spec are required for source verification",
@@ -852,11 +1011,19 @@ def verify_collection_plan(
     if source_bound:
         _, task_raw, task_value = _strict_file(public_task_set, "public task set")
         _, spec_raw, spec_value = _strict_file(cohort_spec, "cohort spec")
+        raw_bindings_raw = None
+        raw_bindings_value = None
+        if raw_candidate_bindings is not None:
+            _, raw_bindings_raw, raw_bindings_value = _strict_file(
+                raw_candidate_bindings, "raw candidate bindings"
+            )
         expected = _derive_documents(
             task_raw,
             task_value,
             spec_raw,
             spec_value,
+            raw_bindings_raw,
+            raw_bindings_value,
             builder_commit=builder_commit,
         )
         for name in PLAN_FILES:

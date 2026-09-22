@@ -92,7 +92,93 @@ def _inputs(root: Path) -> tuple[Path, Path]:
     return task_path, spec_path
 
 
+def _raw_bindings(root: Path, sizes: dict[str, int]) -> Path:
+    path = root / "raw-bindings.json"
+    _write_json(path, {
+        "catalog_version": "fixture-catalog-v1",
+        "credentials_recorded": False,
+        "dataset_id": "fixture",
+        "dataset_revision": "fixture-v1",
+        "objects": [
+            {
+                "artifact_path": f"/fixture/{object_id}.mp4",
+                "artifact_sha256": hashlib.sha256(
+                    object_id.encode("utf-8")
+                ).hexdigest(),
+                "artifact_size_bytes": size,
+                "object_id": object_id,
+                "source_object_id": object_id,
+            }
+            for object_id, size in sorted(sizes.items())
+        ],
+        "package_id": "fixture-raw-candidates-v1",
+        "plan_ids": ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7"],
+        "schema_version": "pathfinder.simulator-raw-cold-bindings/v1alpha1",
+    })
+    return path
+
+
 class CollectionPlanTest(unittest.TestCase):
+    def test_v2_filters_oversized_raw_video_before_seeded_selection(self) -> None:
+        with TemporaryDirectory() as name:
+            root = Path(name)
+            task_path, spec_path = _inputs(root)
+            tasks = _task_set()
+            tasks["tasks"].extend([
+                _task("video-causal-replacement", "causal", 90),
+                _task("video-temporal-replacement", "temporal", 91),
+            ])
+            _write_json(task_path, tasks)
+            spec = _spec()
+            spec["schema_version"] = "pathfinder.rsi-exam-cohort-spec/v1alpha2"
+            spec["max_direct_video_bytes"] = 7_000_000
+            _write_json(spec_path, spec)
+            sizes = {
+                task["object_id"]: 1_000_000 for task in tasks["tasks"]
+            }
+            oversized = "video-causal-0"
+            sizes[oversized] = 9_000_000
+            bindings = _raw_bindings(root, sizes)
+
+            audit = audit_collection_candidates(
+                task_path,
+                spec_path,
+                bindings,
+            )
+            self.assertEqual("READY_FOR_OUTCOME_BLIND_SELECTION", audit["status"])
+            self.assertEqual(7_000_000, audit["max_direct_video_bytes"])
+            self.assertRegex(audit["raw_candidate_bindings_sha256"], r"^[0-9a-f]{64}$")
+
+            plan = root / "plan-v2"
+            freeze_collection_plan(
+                task_path,
+                spec_path,
+                builder_commit=BUILDER_COMMIT,
+                output_dir=plan,
+                raw_candidate_bindings=bindings,
+            )
+            verified = verify_collection_plan(
+                plan,
+                public_task_set=task_path,
+                cohort_spec=spec_path,
+                builder_commit=BUILDER_COMMIT,
+                raw_candidate_bindings=bindings,
+            )
+            self.assertTrue(verified["source_binding_checked"])
+            manifest = json.loads((plan / MANIFEST_NAME).read_text("utf-8"))
+            self.assertEqual(
+                "pathfinder.rsi-exam-trace-collection-plan/v1alpha2",
+                manifest["schema_version"],
+            )
+            cases = [
+                json.loads(line)
+                for line in (plan / CASES_NAME).read_text("utf-8").splitlines()
+            ]
+            self.assertNotIn(oversized, {row["object_id"] for row in cases})
+            self.assertTrue(
+                all(row["raw_video_size_bytes"] <= 7_000_000 for row in cases)
+            )
+
     def test_freeze_is_outcome_blind_video_disjoint_and_source_bound(self) -> None:
         with TemporaryDirectory() as name:
             root = Path(name)

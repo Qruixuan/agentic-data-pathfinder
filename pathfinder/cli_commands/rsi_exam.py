@@ -44,6 +44,7 @@ def register_rsi_exam_commands(
     )
     audit.add_argument("--public-task-set", type=Path, required=True)
     audit.add_argument("--cohort-spec", type=Path, required=True)
+    audit.add_argument("--raw-candidate-bindings", type=Path)
     add_compact(audit)
 
     freeze = subcommands.add_parser(
@@ -52,6 +53,7 @@ def register_rsi_exam_commands(
     )
     freeze.add_argument("--public-task-set", type=Path, required=True)
     freeze.add_argument("--cohort-spec", type=Path, required=True)
+    freeze.add_argument("--raw-candidate-bindings", type=Path)
     freeze.add_argument("--builder-commit", required=True)
     freeze.add_argument("--output-dir", type=Path, required=True)
     add_compact(freeze)
@@ -63,6 +65,7 @@ def register_rsi_exam_commands(
     verify_plan.add_argument("--plan-dir", type=Path, required=True)
     verify_plan.add_argument("--public-task-set", type=Path)
     verify_plan.add_argument("--cohort-spec", type=Path)
+    verify_plan.add_argument("--raw-candidate-bindings", type=Path)
     verify_plan.add_argument("--builder-commit")
     add_compact(verify_plan)
 
@@ -252,6 +255,7 @@ def dispatch_rsi_exam_command(
         payload = audit_collection_candidates(
             args.public_task_set,
             args.cohort_spec,
+            args.raw_candidate_bindings,
         )
         printed = print_payload(payload, compact=args.compact)
         if payload["status"] != "READY_FOR_OUTCOME_BLIND_SELECTION":
@@ -265,6 +269,7 @@ def dispatch_rsi_exam_command(
             args.cohort_spec,
             builder_commit=args.builder_commit,
             output_dir=args.output_dir,
+            raw_candidate_bindings=args.raw_candidate_bindings,
         )
         return print_payload(payload, compact=args.compact)
     if args.command == "verify-rsi-exam-trace-collection-plan":
@@ -275,6 +280,7 @@ def dispatch_rsi_exam_command(
             public_task_set=args.public_task_set,
             cohort_spec=args.cohort_spec,
             builder_commit=args.builder_commit,
+            raw_candidate_bindings=args.raw_candidate_bindings,
         )
         return print_payload(payload, compact=args.compact)
     if args.command == "prepare-rsi-exam-formal-temporal-index":
