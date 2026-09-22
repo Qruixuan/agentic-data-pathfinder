@@ -374,6 +374,73 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
                 transport=transport,
             )
 
+    def test_caption_cache_reuses_unchanged_windows_across_preparations(
+        self,
+    ) -> None:
+        first_output = self.root / "captions-first"
+        cache = self.root / "shared-caption-cache"
+        first = materialize_formal_temporal_captions(
+            self.prep,
+            output_dir=first_output,
+            cache_dir=cache,
+            package_id="formal-index-test-captions-first",
+            model_id="caption-model",
+            base_url="https://provider.invalid/v1",
+            api_key="not-recorded-test-key",
+            transport=self._caption_transport,
+        )
+        self.assertGreater(first["provider_request_count_this_run"], 0)
+
+        # A collection-level preparation digest changes when an unrelated
+        # cohort member changes.  Simulate a cache produced under that prior
+        # package while leaving every per-window identity intact.
+        legacy_preparation_sha256 = "1" * 64
+        for path in (cache / "validated").glob("*/*.json"):
+            entry = json.loads(path.read_text(encoding="utf-8"))
+            entry["cache_schema_version"] = (
+                "pathfinder.full-flow-fine-caption-cache/v1alpha1"
+            )
+            entry["segmentation_package_sha256"] = (
+                legacy_preparation_sha256
+            )
+            _write_json(path, entry)
+
+        def no_transport(request, timeout):
+            del request, timeout
+            self.fail("an unchanged content-bound window reached the provider")
+
+        second_output = self.root / "captions-second"
+        second = materialize_formal_temporal_captions(
+            self.prep,
+            output_dir=second_output,
+            cache_dir=cache,
+            package_id="formal-index-test-captions-second",
+            model_id="caption-model",
+            base_url="https://provider.invalid/v1",
+            api_key="not-recorded-test-key",
+            transport=no_transport,
+        )
+        self.assertEqual(0, second["provider_request_count_this_run"])
+        self.assertEqual(
+            second["caption_count"],
+            second["validated_caption_reuse_count"],
+        )
+        current_preparation_sha256 = verify_formal_temporal_index_preparation(
+            self.prep
+        )["preparation_sha256"]
+        rows = [
+            json.loads(line)
+            for line in (second_output / "fine-captions.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ]
+        self.assertTrue(all(
+            row["segmentation_package_sha256"] == current_preparation_sha256
+            and row["cache_schema_version"].endswith("/v1alpha2")
+            and row["cache_reuse_scope"] == "canonical-window-content-v1"
+            for row in rows
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

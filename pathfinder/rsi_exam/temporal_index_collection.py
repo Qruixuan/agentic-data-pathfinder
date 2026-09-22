@@ -96,6 +96,12 @@ DEFAULT_CAPTION_FRAME_COUNT = 24
 DEFAULT_RUNTIME_FRAME_COUNT = 10
 DEFAULT_JPEG_MAX_DIMENSION = 768
 DEFAULT_EMBEDDING_DIMENSION = 1024
+FORMAL_CAPTION_CACHE_SCHEMA_VERSION = (
+    "pathfinder.rsi-exam-formal-temporal-caption-cache/v1alpha2"
+)
+LEGACY_CAPTION_CACHE_SCHEMA_VERSION = (
+    "pathfinder.full-flow-fine-caption-cache/v1alpha1"
+)
 
 
 class FormalTemporalIndexError(RuntimeError):
@@ -445,12 +451,60 @@ def _load_valid_caption(
             prompt_sha256=CAPTION_PROMPT_SHA256,
             segmentation_package_sha256=preparation_sha256,
         )
+        # The preparation digest binds the complete collection.  It must not
+        # invalidate an unchanged window merely because another object enters
+        # or leaves the cohort.  Reuse is instead authorized by the complete
+        # canonical window descriptor, its exact frame identities, the model,
+        # prompt, and response schema.  The request digest is retained and
+        # validated as an identity, but is not itself the reuse key: adding a
+        # provider-side JSON-mode hint changes those bytes without changing
+        # the caption contract or any of the image/prompt inputs.
+        content_keys = set(expected) - {
+            "cache_schema_version",
+            "segmentation_package_sha256",
+        }
         _require(
-            all(entry.get(key) == value for key, value in expected.items()),
+            entry.get("cache_schema_version") in {
+                LEGACY_CAPTION_CACHE_SCHEMA_VERSION,
+                FORMAL_CAPTION_CACHE_SCHEMA_VERSION,
+            }
+            and all(
+                entry.get(key) == expected[key] for key in content_keys
+            ),
             "caption cache binding differs",
         )
-        validate_structured_caption(entry.get("structured_caption"))
-        return entry
+        caption = validate_structured_caption(entry.get("structured_caption"))
+        request_input_sha256 = entry.get("request_input_sha256")
+        _require(
+            isinstance(request_input_sha256, str)
+            and len(request_input_sha256) == 64
+            and all(
+                character in "0123456789abcdef"
+                for character in request_input_sha256
+            ),
+            "caption cache request identity is invalid",
+        )
+        _require(
+            entry.get("caption_sha256") == _sha256(_canonical(caption))
+            and entry.get("search_text_sha256")
+            == _sha256(caption_search_text(caption).encode("utf-8")),
+            "caption cache content identity differs",
+        )
+        response_sha256 = entry.get("response_sha256")
+        _require(
+            isinstance(response_sha256, str)
+            and len(response_sha256) == 64
+            and all(character in "0123456789abcdef" for character in response_sha256),
+            "caption cache response identity is invalid",
+        )
+        normalized = dict(entry)
+        normalized.update(expected)
+        normalized.update({
+            "cache_schema_version": FORMAL_CAPTION_CACHE_SCHEMA_VERSION,
+            "cache_reuse_scope": "canonical-window-content-v1",
+            "structured_caption": caption,
+        })
+        return normalized
     except (FormalTemporalIndexError, ValueError, KeyError, OSError):
         return None
 
@@ -611,6 +665,8 @@ def materialize_formal_temporal_captions(
                 segmentation_package_sha256=prep["preparation_sha256"],
             ))
             entry.update({
+                "cache_schema_version": FORMAL_CAPTION_CACHE_SCHEMA_VERSION,
+                "cache_reuse_scope": "canonical-window-content-v1",
                 "ordinal": window["ordinal"],
                 "object_id": window["object_id"],
                 "start_seconds": window["start_seconds"],
