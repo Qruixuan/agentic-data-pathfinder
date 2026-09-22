@@ -1,0 +1,22 @@
+{
+  "cohort_id": "pathfinder-rsi-exam-three-case-collection-fixture-v1",
+  "collection_repetitions": 1,
+  "schema_version": "pathfinder.rsi-exam-cohort-spec/v1alpha1",
+  "selection_seed": "pathfinder-rsi-exam-three-case-fixture-20260922-v1",
+  "split_stratum_targets": {
+    "development": {
+      "descriptive": 1
+    },
+    "test": {
+      "temporal": 1
+    },
+    "train": {
+      "causal": 1
+    }
+  },
+  "stratum_by_workload": {
+    "smoke-causal": "causal",
+    "smoke-descriptive": "descriptive",
+    "smoke-temporal": "temporal"
+  }
+}

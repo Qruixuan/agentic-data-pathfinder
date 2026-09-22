@@ -329,6 +329,52 @@ class OfflineReplayPackageTest(unittest.TestCase):
             self.assertIn(first_draw["task_success"], {True, False})
             self.assertIn(second_draw["task_success"], {True, False})
 
+    def test_multiple_objects_bind_video_disjoint_splits(self) -> None:
+        with TemporaryDirectory() as name:
+            root = Path(name)
+            first = _accounting()
+            second = _accounting()
+            second_object = "nextqa-val-second-video"
+            second["object_id"] = second_object
+            second["run_id"] = "offline-replay-second-object-run-v1"
+            sources = [
+                _write_accounting(root, first, name="accounting-a"),
+                _write_accounting(root, second, name="accounting-b"),
+            ]
+            split_manifest = root / "splits.json"
+            split_manifest.write_bytes(
+                (
+                    json.dumps(
+                        {OBJECT_ID: "train", second_object: "test"},
+                        sort_keys=True,
+                        indent=2,
+                    )
+                    + "\n"
+                ).encode("utf-8")
+            )
+            package = root / "replay"
+            build_offline_replay_package(
+                sources,
+                output_dir=package,
+                source_commit=SOURCE_COMMIT,
+                builder_commit=SOURCE_COMMIT,
+                package_id="offline-replay-multicase-v1",
+                split_manifest=split_manifest,
+            )
+            verified = verify_offline_replay_package(
+                package,
+                source_accounting_dirs=sources,
+            )
+            self.assertEqual(2, verified["case_count"])
+            loaded = load_offline_replay_package(package)
+            splits = {
+                row["object_id"]: row["split"] for row in loaded["cases"]
+            }
+            self.assertEqual(
+                {OBJECT_ID: "train", second_object: "test"},
+                splits,
+            )
+
 
 class OfflineReplayStateTest(unittest.TestCase):
     def test_cache_miss_transitions_to_exact_cache_hit(self) -> None:

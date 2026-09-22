@@ -155,3 +155,54 @@ held-out videos while deciding when to build an index, when to reuse it, when
 to warm or read a cache, and which representation and placement satisfy a
 quality constraint at the lowest measured cost.  Users need only the replay
 package and this repository; they do not need Pathfinder's live deployment.
+
+## Freeze the multi-case collection before running it
+
+The proposal cohort is defined in
+`configs/rsi_exam_proposal_collection_v1.json`. It requests 12 distinct
+videos: causal, temporal, and descriptive each contribute two train, one
+development, and one test case. Every selected case is collected three times
+over the same ten measured action/state cells (D0--D7, with separate D3/D7
+cache miss and hit observations).
+
+Selection is deterministic from public task metadata and a frozen seed. A
+video can appear in only one split. The planner does not accept task outcomes,
+predictions, hidden labels, runtime evidence, or credentials as inputs.
+
+Audit a candidate pool before freezing anything:
+
+```powershell
+python -P -m pathfinder audit-rsi-exam-trace-collection-candidates `
+  --public-task-set PUBLIC_TASKS.json `
+  --cohort-spec configs/rsi_exam_proposal_collection_v1.json
+```
+
+The formal plan fails closed until all three strata have four distinct public
+video candidates. Once the audit is ready, use the exact commit and a clean
+Git archive as required by `EXPERIMENT_OPERATIONS_RUNBOOK.md`:
+
+```powershell
+$Commit = (git rev-parse HEAD).Trim()
+
+python -P -m pathfinder freeze-rsi-exam-trace-collection-plan `
+  --public-task-set PUBLIC_TASKS.json `
+  --cohort-spec configs/rsi_exam_proposal_collection_v1.json `
+  --builder-commit $Commit `
+  --output-dir NEW_IMMUTABLE_PLAN_DIR
+
+python -P -m pathfinder verify-rsi-exam-trace-collection-plan `
+  --plan-dir NEW_IMMUTABLE_PLAN_DIR `
+  --public-task-set PUBLIC_TASKS.json `
+  --cohort-spec configs/rsi_exam_proposal_collection_v1.json `
+  --builder-commit $Commit
+```
+
+The resulting plan is still marked `execution_authorized: false`. Before
+each live collection, the operator must complete the runbook gates, create a
+fresh run identity and cache state, and bind the case-specific index and
+representations. The plan never authorizes a FlowMesh submission by itself.
+
+`configs/rsi_exam_three_case_collection_fixture_v1.json` is a smaller
+conformance-only specification for the three currently available proposal
+strata. It checks the planner but is not a substitute for the 12-video
+proposal cohort.

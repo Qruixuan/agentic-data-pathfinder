@@ -9,6 +9,9 @@ from ._common import PayloadPrinter, add_compact
 
 
 COMMAND_NAMES = frozenset({
+    "audit-rsi-exam-trace-collection-candidates",
+    "freeze-rsi-exam-trace-collection-plan",
+    "verify-rsi-exam-trace-collection-plan",
     "build-rsi-exam-offline-replay",
     "verify-rsi-exam-offline-replay",
     "run-rsi-exam-offline-replay",
@@ -27,6 +30,34 @@ def register_rsi_exam_commands(
     subcommands: argparse._SubParsersAction,
 ) -> None:
     """Register package, verification, and exact-replay commands."""
+
+    audit = subcommands.add_parser(
+        "audit-rsi-exam-trace-collection-candidates",
+        help="audit public candidates without reading task outcomes",
+    )
+    audit.add_argument("--public-task-set", type=Path, required=True)
+    audit.add_argument("--cohort-spec", type=Path, required=True)
+    add_compact(audit)
+
+    freeze = subcommands.add_parser(
+        "freeze-rsi-exam-trace-collection-plan",
+        help="freeze an outcome-blind, video-disjoint trace collection plan",
+    )
+    freeze.add_argument("--public-task-set", type=Path, required=True)
+    freeze.add_argument("--cohort-spec", type=Path, required=True)
+    freeze.add_argument("--builder-commit", required=True)
+    freeze.add_argument("--output-dir", type=Path, required=True)
+    add_compact(freeze)
+
+    verify_plan = subcommands.add_parser(
+        "verify-rsi-exam-trace-collection-plan",
+        help="verify a frozen trace collection plan",
+    )
+    verify_plan.add_argument("--plan-dir", type=Path, required=True)
+    verify_plan.add_argument("--public-task-set", type=Path)
+    verify_plan.add_argument("--cohort-spec", type=Path)
+    verify_plan.add_argument("--builder-commit")
+    add_compact(verify_plan)
 
     build = subcommands.add_parser(
         "build-rsi-exam-offline-replay",
@@ -111,6 +142,34 @@ def dispatch_rsi_exam_command(
 
     if args.command not in COMMAND_NAMES:
         return None
+    if args.command == "audit-rsi-exam-trace-collection-candidates":
+        from ..rsi_exam.collection_plan import audit_collection_candidates
+
+        payload = audit_collection_candidates(
+            args.public_task_set,
+            args.cohort_spec,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "freeze-rsi-exam-trace-collection-plan":
+        from ..rsi_exam.collection_plan import freeze_collection_plan
+
+        payload = freeze_collection_plan(
+            args.public_task_set,
+            args.cohort_spec,
+            builder_commit=args.builder_commit,
+            output_dir=args.output_dir,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "verify-rsi-exam-trace-collection-plan":
+        from ..rsi_exam.collection_plan import verify_collection_plan
+
+        payload = verify_collection_plan(
+            args.plan_dir,
+            public_task_set=args.public_task_set,
+            cohort_spec=args.cohort_spec,
+            builder_commit=args.builder_commit,
+        )
+        return print_payload(payload, compact=args.compact)
     if args.command == "build-rsi-exam-offline-replay":
         from ..rsi_exam.offline_replay import build_offline_replay_package
 

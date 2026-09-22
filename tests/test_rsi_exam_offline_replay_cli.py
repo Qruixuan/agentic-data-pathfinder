@@ -68,6 +68,71 @@ class OfflineReplayCliTest(unittest.TestCase):
             source_accounting_dirs=[Path("accounting-a")],
         )
 
+    def test_collection_plan_commands_are_wired(self) -> None:
+        with mock.patch(
+            "pathfinder.rsi_exam.collection_plan.audit_collection_candidates",
+            return_value={"status": "READY_FOR_OUTCOME_BLIND_SELECTION"},
+        ) as audit:
+            status, payload = self._invoke([
+                "audit-rsi-exam-trace-collection-candidates",
+                "--public-task-set",
+                "public-tasks.json",
+                "--cohort-spec",
+                "cohort-spec.json",
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("READY_FOR_OUTCOME_BLIND_SELECTION", payload["status"])
+        audit.assert_called_once_with(
+            Path("public-tasks.json"),
+            Path("cohort-spec.json"),
+        )
+
+        with mock.patch(
+            "pathfinder.rsi_exam.collection_plan.freeze_collection_plan",
+            return_value={"status": "FROZEN_OUTCOME_BLIND_COLLECTION_PLAN"},
+        ) as freeze:
+            status, _ = self._invoke([
+                "freeze-rsi-exam-trace-collection-plan",
+                "--public-task-set",
+                "public-tasks.json",
+                "--cohort-spec",
+                "cohort-spec.json",
+                "--builder-commit",
+                "7" * 40,
+                "--output-dir",
+                "plan",
+            ])
+        self.assertEqual(0, status)
+        freeze.assert_called_once_with(
+            Path("public-tasks.json"),
+            Path("cohort-spec.json"),
+            builder_commit="7" * 40,
+            output_dir=Path("plan"),
+        )
+
+        with mock.patch(
+            "pathfinder.rsi_exam.collection_plan.verify_collection_plan",
+            return_value={"status": "VERIFIED_OUTCOME_BLIND_COLLECTION_PLAN"},
+        ) as verify:
+            status, _ = self._invoke([
+                "verify-rsi-exam-trace-collection-plan",
+                "--plan-dir",
+                "plan",
+                "--public-task-set",
+                "public-tasks.json",
+                "--cohort-spec",
+                "cohort-spec.json",
+                "--builder-commit",
+                "7" * 40,
+            ])
+        self.assertEqual(0, status)
+        verify.assert_called_once_with(
+            Path("plan"),
+            public_task_set=Path("public-tasks.json"),
+            cohort_spec=Path("cohort-spec.json"),
+            builder_commit="7" * 40,
+        )
+
     def test_run_and_compare_commands_are_wired(self) -> None:
         with mock.patch(
             "pathfinder.rsi_exam.offline_replay.run_offline_replay_policy",
