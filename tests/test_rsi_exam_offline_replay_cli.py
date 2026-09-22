@@ -133,6 +133,24 @@ class OfflineReplayCliTest(unittest.TestCase):
             builder_commit="7" * 40,
         )
 
+    def test_blocked_collection_audit_returns_nonzero(self) -> None:
+        with mock.patch(
+            "pathfinder.rsi_exam.collection_plan.audit_collection_candidates",
+            return_value={"status": "BLOCKED_INSUFFICIENT_PUBLIC_CANDIDATES"},
+        ):
+            status, payload = self._invoke([
+                "audit-rsi-exam-trace-collection-candidates",
+                "--public-task-set",
+                "public-tasks.json",
+                "--cohort-spec",
+                "cohort-spec.json",
+            ])
+        self.assertEqual(2, status)
+        self.assertEqual(
+            "BLOCKED_INSUFFICIENT_PUBLIC_CANDIDATES",
+            payload["status"],
+        )
+
     def test_run_and_compare_commands_are_wired(self) -> None:
         with mock.patch(
             "pathfinder.rsi_exam.offline_replay.run_offline_replay_policy",

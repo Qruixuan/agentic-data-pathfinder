@@ -149,7 +149,10 @@ def dispatch_rsi_exam_command(
             args.public_task_set,
             args.cohort_spec,
         )
-        return print_payload(payload, compact=args.compact)
+        printed = print_payload(payload, compact=args.compact)
+        if payload["status"] != "READY_FOR_OUTCOME_BLIND_SELECTION":
+            return 2
+        return printed
     if args.command == "freeze-rsi-exam-trace-collection-plan":
         from ..rsi_exam.collection_plan import freeze_collection_plan
 
