@@ -19,6 +19,8 @@ COMMAND_NAMES = frozenset({
     "verify-rsi-exam-formal-temporal-caption-package",
     "build-rsi-exam-formal-runtime-foundation",
     "verify-rsi-exam-formal-runtime-foundation",
+    "freeze-rsi-exam-formal-accounting",
+    "verify-rsi-exam-formal-accounting",
     "build-rsi-exam-offline-replay",
     "verify-rsi-exam-offline-replay",
     "run-rsi-exam-offline-replay",
@@ -165,6 +167,34 @@ def register_rsi_exam_commands(
     )
     verify_foundation.add_argument("--foundation-dir", type=Path, required=True)
     add_compact(verify_foundation)
+
+    accounting = subcommands.add_parser(
+        "freeze-rsi-exam-formal-accounting",
+        help="freeze public replay accounting from a formal collection",
+    )
+    accounting.add_argument("--collection-dir", type=Path, required=True)
+    accounting.add_argument(
+        "--runtime-frame-manifest-root", type=Path, required=True
+    )
+    accounting.add_argument("--source-commit", required=True)
+    accounting.add_argument("--output-dir", type=Path, required=True)
+    add_compact(accounting)
+
+    verify_accounting = subcommands.add_parser(
+        "verify-rsi-exam-formal-accounting",
+        help="reproduce and verify public formal accounting",
+    )
+    verify_accounting.add_argument(
+        "--accounting-root", type=Path, required=True
+    )
+    verify_accounting.add_argument(
+        "--collection-dir", type=Path, required=True
+    )
+    verify_accounting.add_argument(
+        "--runtime-frame-manifest-root", type=Path, required=True
+    )
+    verify_accounting.add_argument("--source-commit", required=True)
+    add_compact(verify_accounting)
 
     build = subcommands.add_parser(
         "build-rsi-exam-offline-replay",
@@ -388,6 +418,26 @@ def dispatch_rsi_exam_command(
         )
 
         payload = verify_formal_runtime_foundation(args.foundation_dir)
+        return print_payload(payload, compact=args.compact)
+    if args.command == "freeze-rsi-exam-formal-accounting":
+        from ..rsi_exam.formal_accounting import freeze_formal_accounting
+
+        payload = freeze_formal_accounting(
+            args.collection_dir,
+            args.runtime_frame_manifest_root,
+            source_commit=args.source_commit,
+            output_dir=args.output_dir,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "verify-rsi-exam-formal-accounting":
+        from ..rsi_exam.formal_accounting import verify_formal_accounting
+
+        payload = verify_formal_accounting(
+            args.accounting_root,
+            collection_dir=args.collection_dir,
+            runtime_frame_manifest_root=args.runtime_frame_manifest_root,
+            source_commit=args.source_commit,
+        )
         return print_payload(payload, compact=args.compact)
     if args.command == "build-rsi-exam-offline-replay":
         from ..rsi_exam.offline_replay import build_offline_replay_package

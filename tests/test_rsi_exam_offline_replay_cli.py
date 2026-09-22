@@ -68,6 +68,55 @@ class OfflineReplayCliTest(unittest.TestCase):
             source_accounting_dirs=[Path("accounting-a")],
         )
 
+    def test_formal_accounting_commands_are_wired(self) -> None:
+        with mock.patch(
+            "pathfinder.rsi_exam.formal_accounting.freeze_formal_accounting",
+            return_value={"status": "VERIFIED_FORMAL_ACCOUNTING"},
+        ) as freeze:
+            status, payload = self._invoke([
+                "freeze-rsi-exam-formal-accounting",
+                "--collection-dir",
+                "collection",
+                "--runtime-frame-manifest-root",
+                "runtime-frames",
+                "--source-commit",
+                "5" * 40,
+                "--output-dir",
+                "accounting",
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("VERIFIED_FORMAL_ACCOUNTING", payload["status"])
+        freeze.assert_called_once_with(
+            Path("collection"),
+            Path("runtime-frames"),
+            source_commit="5" * 40,
+            output_dir=Path("accounting"),
+        )
+
+        with mock.patch(
+            "pathfinder.rsi_exam.formal_accounting.verify_formal_accounting",
+            return_value={"status": "VERIFIED_FORMAL_ACCOUNTING"},
+        ) as verify:
+            status, payload = self._invoke([
+                "verify-rsi-exam-formal-accounting",
+                "--accounting-root",
+                "accounting",
+                "--collection-dir",
+                "collection",
+                "--runtime-frame-manifest-root",
+                "runtime-frames",
+                "--source-commit",
+                "5" * 40,
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("VERIFIED_FORMAL_ACCOUNTING", payload["status"])
+        verify.assert_called_once_with(
+            Path("accounting"),
+            collection_dir=Path("collection"),
+            runtime_frame_manifest_root=Path("runtime-frames"),
+            source_commit="5" * 40,
+        )
+
     def test_collection_plan_commands_are_wired(self) -> None:
         with mock.patch(
             "pathfinder.rsi_exam.collection_plan.audit_collection_candidates",
