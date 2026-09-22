@@ -394,11 +394,6 @@ def _formal_scenario(
             for workload_class, template_id in design["route_templates"].items()
             if workload_class in workload_classes
         }
-        if (
-            "W1" in workload_classes
-            and str(design["design_id"]) in {"D1", "D5"}
-        ):
-            design["route_templates"]["W1"] = "raw-indexed"
     return scenario
 
 

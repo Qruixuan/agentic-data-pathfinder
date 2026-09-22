@@ -353,20 +353,6 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
             )
         )
         self.assertNotIn("pilot_config_sha256", foundation_manifest)
-        scenario = json.loads(
-            (foundation / "scenario.json").read_text(encoding="utf-8")
-        )
-        by_design = {
-            row["design_id"]: row for row in scenario["designs"]
-        }
-        self.assertEqual(
-            "raw-indexed",
-            by_design["D1"]["route_templates"]["W1"],
-        )
-        self.assertEqual(
-            "raw-indexed",
-            by_design["D5"]["route_templates"]["W1"],
-        )
 
     def test_text_embedding_v4_batch_limit_fails_before_transport(self) -> None:
         def transport(request, timeout):
