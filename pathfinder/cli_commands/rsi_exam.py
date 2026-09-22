@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 
 from ._common import PayloadPrinter, add_compact
+from ..rsi_exam.offline_replay import BASELINE_POLICY_NAMES
 
 
 COMMAND_NAMES = frozenset({
@@ -25,6 +26,10 @@ COMMAND_NAMES = frozenset({
     "verify-rsi-exam-offline-replay",
     "run-rsi-exam-offline-replay",
     "compare-rsi-exam-offline-replay-baselines",
+    "build-rsi-exam-offline-replay-v2",
+    "verify-rsi-exam-offline-replay-v2",
+    "run-rsi-exam-offline-replay-v2",
+    "compare-rsi-exam-offline-replay-v2-baselines",
 })
 
 
@@ -269,6 +274,55 @@ def register_rsi_exam_commands(
     compare.add_argument("--case-id")
     add_compact(compare)
 
+    build_v2 = subcommands.add_parser(
+        "build-rsi-exam-offline-replay-v2",
+        help="freeze cold-materialization costs beside verified v1 outcomes",
+    )
+    build_v2.add_argument("--v1-package-dir", type=Path, required=True)
+    build_v2.add_argument("--n4-package-dir", type=Path, required=True)
+    build_v2.add_argument("--preparation-dir", type=Path)
+    build_v2.add_argument("--caption-dir", type=Path)
+    build_v2.add_argument("--builder-commit", required=True)
+    build_v2.add_argument("--package-id", required=True)
+    build_v2.add_argument("--output-dir", type=Path, required=True)
+    add_compact(build_v2)
+
+    verify_v2 = subcommands.add_parser(
+        "verify-rsi-exam-offline-replay-v2",
+        help="verify a materialization-aware replay package",
+    )
+    verify_v2.add_argument("--package-dir", type=Path, required=True)
+    verify_v2.add_argument("--v1-package-dir", type=Path)
+    verify_v2.add_argument("--n4-package-dir", type=Path)
+    add_compact(verify_v2)
+
+    run_v2 = subcommands.add_parser(
+        "run-rsi-exam-offline-replay-v2",
+        help="run a built-in policy with cold materialization accounting",
+    )
+    run_v2.add_argument("--package-dir", type=Path, required=True)
+    run_v2.add_argument("--policy", choices=BASELINE_POLICY_NAMES, required=True)
+    run_v2.add_argument("--mode", choices=(
+        "independent-query", "shared-dataset-sequence",
+    ), required=True)
+    run_v2.add_argument("--queries", type=_positive_integer, default=1)
+    run_v2.add_argument("--seed", type=int, default=0)
+    run_v2.add_argument("--case-id")
+    add_compact(run_v2)
+
+    compare_v2 = subcommands.add_parser(
+        "compare-rsi-exam-offline-replay-v2-baselines",
+        help="compare quality and known-byte proxies, not dollar cost",
+    )
+    compare_v2.add_argument("--package-dir", type=Path, required=True)
+    compare_v2.add_argument("--mode", choices=(
+        "independent-query", "shared-dataset-sequence",
+    ), required=True)
+    compare_v2.add_argument("--queries", type=_positive_integer, default=1)
+    compare_v2.add_argument("--seed", type=int, default=0)
+    compare_v2.add_argument("--case-id")
+    add_compact(compare_v2)
+
 
 def dispatch_rsi_exam_command(
     args: argparse.Namespace,
@@ -469,6 +523,46 @@ def dispatch_rsi_exam_command(
             query_count=args.queries,
             seed=args.seed,
             case_id=args.case_id,
+        )
+        return print_payload(payload, compact=args.compact)
+
+    if args.command == "build-rsi-exam-offline-replay-v2":
+        from ..rsi_exam.offline_replay_v2 import build_offline_replay_v2
+
+        payload = build_offline_replay_v2(
+            args.v1_package_dir,
+            n4_package_dir=args.n4_package_dir,
+            preparation_dir=args.preparation_dir,
+            caption_dir=args.caption_dir,
+            output_dir=args.output_dir,
+            package_id=args.package_id,
+            builder_commit=args.builder_commit,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "verify-rsi-exam-offline-replay-v2":
+        from ..rsi_exam.offline_replay_v2 import verify_offline_replay_v2
+
+        payload = verify_offline_replay_v2(
+            args.package_dir, source_v1_dir=args.v1_package_dir,
+            source_n4_dir=args.n4_package_dir,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "run-rsi-exam-offline-replay-v2":
+        from ..rsi_exam.offline_replay_v2 import run_offline_replay_v2
+
+        payload = run_offline_replay_v2(
+            args.package_dir, policy_name=args.policy, mode=args.mode,
+            query_count=args.queries, seed=args.seed, case_id=args.case_id,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "compare-rsi-exam-offline-replay-v2-baselines":
+        from ..rsi_exam.offline_replay_v2 import (
+            compare_offline_replay_v2_baselines,
+        )
+
+        payload = compare_offline_replay_v2_baselines(
+            args.package_dir, mode=args.mode, query_count=args.queries,
+            seed=args.seed, case_id=args.case_id,
         )
         return print_payload(payload, compact=args.compact)
 

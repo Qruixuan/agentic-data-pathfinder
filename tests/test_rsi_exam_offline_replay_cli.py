@@ -254,6 +254,74 @@ class OfflineReplayCliTest(unittest.TestCase):
             case_id=None,
         )
 
+    def test_materialization_aware_v2_commands_are_wired(self) -> None:
+        with mock.patch(
+            "pathfinder.rsi_exam.offline_replay_v2.build_offline_replay_v2",
+            return_value={"status": "FROZEN_MATERIALIZATION_AWARE_REPLAY"},
+        ) as build:
+            status, _ = self._invoke([
+                "build-rsi-exam-offline-replay-v2",
+                "--v1-package-dir", "old",
+                "--n4-package-dir", "n4",
+                "--builder-commit", "5" * 40,
+                "--package-id", "new-v2",
+                "--output-dir", "new",
+            ])
+        self.assertEqual(0, status)
+        build.assert_called_once_with(
+            Path("old"), n4_package_dir=Path("n4"),
+            preparation_dir=None, caption_dir=None,
+            output_dir=Path("new"), package_id="new-v2",
+            builder_commit="5" * 40,
+        )
+
+        with mock.patch(
+            "pathfinder.rsi_exam.offline_replay_v2.verify_offline_replay_v2",
+            return_value={"status": "VERIFIED_MATERIALIZATION_AWARE_REPLAY"},
+        ) as verify:
+            status, _ = self._invoke([
+                "verify-rsi-exam-offline-replay-v2",
+                "--package-dir", "new",
+                "--v1-package-dir", "old",
+                "--n4-package-dir", "n4",
+            ])
+        self.assertEqual(0, status)
+        verify.assert_called_once_with(
+            Path("new"), source_v1_dir=Path("old"),
+            source_n4_dir=Path("n4"),
+        )
+
+        with mock.patch(
+            "pathfinder.rsi_exam.offline_replay_v2.run_offline_replay_v2",
+            return_value={"status": "COMPLETE"},
+        ) as run:
+            status, _ = self._invoke([
+                "run-rsi-exam-offline-replay-v2",
+                "--package-dir", "new", "--policy", "always-derived",
+                "--mode", "shared-dataset-sequence", "--queries", "2",
+            ])
+        self.assertEqual(0, status)
+        run.assert_called_once_with(
+            Path("new"), policy_name="always-derived",
+            mode="shared-dataset-sequence", query_count=2,
+            seed=0, case_id=None,
+        )
+
+        with mock.patch(
+            "pathfinder.rsi_exam.offline_replay_v2."
+            "compare_offline_replay_v2_baselines",
+            return_value={"status": "COMPLETE"},
+        ) as compare:
+            status, _ = self._invoke([
+                "compare-rsi-exam-offline-replay-v2-baselines",
+                "--package-dir", "new", "--mode", "independent-query",
+            ])
+        self.assertEqual(0, status)
+        compare.assert_called_once_with(
+            Path("new"), mode="independent-query",
+            query_count=1, seed=0, case_id=None,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
