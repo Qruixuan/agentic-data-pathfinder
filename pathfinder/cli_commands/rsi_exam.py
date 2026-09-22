@@ -17,6 +17,8 @@ COMMAND_NAMES = frozenset({
     "finalize-rsi-exam-formal-temporal-index",
     "verify-rsi-exam-formal-temporal-index-preparation",
     "verify-rsi-exam-formal-temporal-caption-package",
+    "build-rsi-exam-formal-runtime-foundation",
+    "verify-rsi-exam-formal-runtime-foundation",
     "build-rsi-exam-offline-replay",
     "verify-rsi-exam-offline-replay",
     "run-rsi-exam-offline-replay",
@@ -134,6 +136,32 @@ def register_rsi_exam_commands(
                                 required=True)
     finalize_index.add_argument("--output-dir", type=Path, required=True)
     add_compact(finalize_index)
+
+    foundation = subcommands.add_parser(
+        "build-rsi-exam-formal-runtime-foundation",
+        help="freeze N1/N2/N4 and scenario inputs for formal trace collection",
+    )
+    foundation.add_argument("--collection-plan-dir", type=Path, required=True)
+    foundation.add_argument("--public-task-set", type=Path, required=True)
+    foundation.add_argument("--pilot-config", type=Path, required=True)
+    foundation.add_argument("--n3-raw-package-dir", type=Path, required=True)
+    foundation.add_argument("--n3-indexed-package-dir", type=Path, required=True)
+    foundation.add_argument("--temporal-index-dir", type=Path, required=True)
+    foundation.add_argument("--preparation-dir", type=Path, required=True)
+    foundation.add_argument("--caption-dir", type=Path, required=True)
+    foundation.add_argument("--base-scenario", type=Path, required=True)
+    foundation.add_argument("--package-id", required=True)
+    foundation.add_argument("--source-commit", required=True)
+    foundation.add_argument("--expected-model", required=True)
+    foundation.add_argument("--output-dir", type=Path, required=True)
+    add_compact(foundation)
+
+    verify_foundation = subcommands.add_parser(
+        "verify-rsi-exam-formal-runtime-foundation",
+        help="verify the complete N1/N2/N4 formal runtime foundation",
+    )
+    verify_foundation.add_argument("--foundation-dir", type=Path, required=True)
+    add_compact(verify_foundation)
 
     build = subcommands.add_parser(
         "build-rsi-exam-offline-replay",
@@ -326,6 +354,34 @@ def dispatch_rsi_exam_command(
             jpeg_max_dimension=args.jpeg_max_dimension,
             timeout_seconds=args.timeout_seconds,
         )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "build-rsi-exam-formal-runtime-foundation":
+        from ..rsi_exam.formal_foundation import (
+            build_formal_runtime_foundation,
+        )
+
+        payload = build_formal_runtime_foundation(
+            args.collection_plan_dir,
+            args.public_task_set,
+            args.pilot_config,
+            args.n3_raw_package_dir,
+            args.n3_indexed_package_dir,
+            args.temporal_index_dir,
+            args.preparation_dir,
+            args.caption_dir,
+            args.base_scenario,
+            output_dir=args.output_dir,
+            package_id=args.package_id,
+            source_commit=args.source_commit,
+            expected_model=args.expected_model,
+        )
+        return print_payload(payload, compact=args.compact)
+    if args.command == "verify-rsi-exam-formal-runtime-foundation":
+        from ..rsi_exam.formal_foundation import (
+            verify_formal_runtime_foundation,
+        )
+
+        payload = verify_formal_runtime_foundation(args.foundation_dir)
         return print_payload(payload, compact=args.compact)
     if args.command == "build-rsi-exam-offline-replay":
         from ..rsi_exam.offline_replay import build_offline_replay_package

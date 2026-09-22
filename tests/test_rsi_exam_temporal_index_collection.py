@@ -8,6 +8,10 @@ import unittest
 from pathlib import Path
 
 from pathfinder.rsi_exam.collection_plan import freeze_collection_plan
+from pathfinder.rsi_exam.formal_foundation import (
+    build_formal_runtime_foundation,
+    verify_formal_runtime_foundation,
+)
 from pathfinder.rsi_exam.temporal_index_collection import (
     FormalTemporalIndexError,
     _embedding_batches,
@@ -300,6 +304,52 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
                 "*/runtime-frame-manifest.json"
             ))),
         )
+
+        pilot = self.root / "pilot.json"
+        public_tasks = json.loads(self.tasks.read_text(encoding="utf-8"))["tasks"]
+        _write_json(pilot, {
+            "schema_version": "fixture/v1",
+            "workloads": [
+                {
+                    "id": row["workload_id"],
+                    "object_id": row["object_id"],
+                    "question": row["question"],
+                    "accepted_answer_substrings": ["first"],
+                }
+                for row in public_tasks
+            ],
+        })
+        repository = Path(__file__).resolve().parents[1]
+        foundation = self.root / "foundation"
+        built = build_formal_runtime_foundation(
+            self.plan,
+            self.tasks,
+            pilot,
+            self.raw,
+            self.root / "n3-indexed",
+            self.root / "index",
+            self.prep,
+            captions,
+            repository / "configs" / "flowmesh_infra_simulator_4x8_smoke.json",
+            output_dir=foundation,
+            package_id="formal-index-test-foundation-v1",
+            source_commit="8" * 40,
+            expected_model="fixture-model",
+        )
+        self.assertEqual(3, built["case_count"])
+        verified_foundation = verify_formal_runtime_foundation(foundation)
+        self.assertEqual(
+            "VERIFIED_RSI_EXAM_FORMAL_RUNTIME_FOUNDATION",
+            verified_foundation["status"],
+        )
+        self.assertEqual(6, verified_foundation["n4_artifact_count"])
+        self.assertTrue(verified_foundation["labels_confined_to_n1"])
+        foundation_manifest = json.loads(
+            (foundation / "formal-foundation-manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertNotIn("pilot_config_sha256", foundation_manifest)
 
     def test_text_embedding_v4_batch_limit_fails_before_transport(self) -> None:
         def transport(request, timeout):
