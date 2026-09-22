@@ -175,6 +175,60 @@ class FullFlowLogicalRoutesTest(unittest.TestCase):
             },
             summary["service_node_trial_coverage"],
         )
+
+    def test_compiles_a_frozen_subset_of_workload_classes(self) -> None:
+        scenario_path = self.root / "subset-scenario.json"
+        spec_path = self.root / "subset-container-spec.json"
+        portable = self.root / "subset-portable"
+        container = self.root / "subset-container"
+        output = self.root / "subset-logical"
+        scenario = json.loads(SCENARIO.read_text(encoding="utf-8"))
+        scenario["scenario_id"] = "full-flow-three-class-test-v1"
+        scenario["workloads"] = [
+            row for row in scenario["workloads"]
+            if row["workload_class"] != "W4"
+        ]
+        retained_objects = {
+            row["object_id"] for row in scenario["workloads"]
+        }
+        scenario["objects"] = [
+            row for row in scenario["objects"]
+            if row["object_id"] in retained_objects
+        ]
+        for design in scenario["designs"]:
+            design["route_templates"].pop("W4")
+        _write_json(scenario_path, scenario)
+        spec = json.loads(CONTAINER_SPEC.read_text(encoding="utf-8"))
+        spec["scenario_id"] = scenario["scenario_id"]
+        spec["task_executors"] = [
+            row for row in spec["task_executors"]
+            if row["task_type"] != "flowmesh.agent.video_retrieval"
+        ]
+        _write_json(spec_path, spec)
+        build_portable_execution_plan(scenario_path, output_dir=portable)
+        plan_container_backend(
+            scenario_path,
+            portable,
+            spec_path,
+            output_dir=container,
+        )
+        compile_full_flow_logical_routes(
+            scenario_path,
+            container,
+            output_dir=output,
+        )
+        verified = verify_full_flow_logical_routes(
+            output,
+            scenario_path,
+            container,
+        )
+        self.assertEqual(48, verified["trial_count"])
+        self.assertEqual(24, verified["matrix_cell_count"])
+        plan = json.loads((output / PLAN_NAME).read_text(encoding="utf-8"))
+        self.assertEqual(
+            ["W1", "W2", "W3"],
+            plan["matrix_dimensions"]["workload_classes"],
+        )
         self.assertEqual(
             sorted(
                 (

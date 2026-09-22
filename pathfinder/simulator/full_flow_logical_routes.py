@@ -828,21 +828,15 @@ def _validate_scenario_shape(scenario: SimulatorScenario) -> None:
     classes = {workload.workload_class for workload in scenario.workloads}
     designs = {design.design_id for design in scenario.designs}
     _require(
-        classes == _EXPECTED_WORKLOAD_CLASSES,
-        "full-flow logical compiler requires workload classes W1 through W4",
+        bool(classes) and classes <= _EXPECTED_WORKLOAD_CLASSES,
+        "full-flow logical compiler requires a non-empty subset of workload "
+        "classes W1 through W4",
     )
     _require(
         designs == _EXPECTED_DESIGNS,
         "full-flow logical compiler requires designs D0 through D7",
     )
-    _require(
-        len(scenario.workloads) == 4,
-        "full-flow logical compiler requires four workload definitions",
-    )
-    _require(
-        scenario.repetitions == 2 and scenario.planned_trial_count == 64,
-        "full-flow logical compiler requires the frozen 4x8x2 matrix",
-    )
+    _require(scenario.repetitions >= 1, "scenario repetitions must be positive")
     for value, label in (
         (scenario.scenario_id, "scenario_id"),
         *(
@@ -855,7 +849,7 @@ def _validate_scenario_shape(scenario: SimulatorScenario) -> None:
         _identifier(value, label)
     for design in scenario.designs:
         _require(
-            set(design.route_templates) == _EXPECTED_WORKLOAD_CLASSES,
+            set(design.route_templates) == classes,
             f"{design.design_id} does not bind every workload class",
         )
         _require(
@@ -1402,7 +1396,9 @@ def _documents(
         "source_bindings": source_bindings,
         "source_binding_sha256": source_binding_sha256,
         "matrix_dimensions": {
-            "workload_classes": sorted(_EXPECTED_WORKLOAD_CLASSES),
+            "workload_classes": sorted({
+                workload.workload_class for workload in scenario.workloads
+            }),
             "design_ids": sorted(_EXPECTED_DESIGNS),
             "repetitions": scenario.repetitions,
             "trial_count": len(trial_rows),
@@ -1787,7 +1783,19 @@ def _verify_published(root: Path) -> dict[str, Any]:
         root / COVERAGE_NAME,
         "logical route coverage",
     )
-    _require(len(coverage_rows) == 32, "logical route coverage is not 4x8")
+    dimensions = _mapping(plan.get("matrix_dimensions"), "matrix dimensions")
+    workload_classes = dimensions.get("workload_classes")
+    _require(
+        isinstance(workload_classes, list)
+        and bool(workload_classes)
+        and workload_classes == sorted(set(workload_classes))
+        and set(workload_classes) <= _EXPECTED_WORKLOAD_CLASSES,
+        "logical route workload-class dimensions are invalid",
+    )
+    _require(
+        len(coverage_rows) == len(workload_classes) * len(_EXPECTED_DESIGNS),
+        "logical route coverage dimensions disagree",
+    )
     coverage_keys = {
         (row.get("workload_class"), row.get("design_id"))
         for row in coverage_rows
@@ -1796,7 +1804,7 @@ def _verify_published(root: Path) -> dict[str, Any]:
         coverage_keys
         == {
             (workload_class, design_id)
-            for workload_class in _EXPECTED_WORKLOAD_CLASSES
+            for workload_class in workload_classes
             for design_id in _EXPECTED_DESIGNS
         },
         "logical route coverage cells changed",
@@ -1840,7 +1848,7 @@ def compile_full_flow_logical_routes(
     output_dir: str | Path,
     compiler_id: str = "full-flow-logical-route-compiler-v1",
 ) -> dict[str, Any]:
-    """Compile a frozen 4x8 container plan into endpoint-free routes."""
+    """Compile a frozen workload-by-design plan into endpoint-free routes."""
 
     scenario = load_simulator_scenario(scenario_path)
     container_root = Path(container_plan_dir).resolve()
