@@ -302,6 +302,61 @@ class N3MultiPolicyIndexedDataPlaneTest(unittest.TestCase):
             report["selection_policies"],
         )
 
+    def test_exact_catalog_resolves_multi_policy_temporal_projections(
+        self,
+    ) -> None:
+        policies = {
+            "nextqa-val-111": self._policy(0.1, 0.4),
+            "nextqa-val-222": self._policy(0.6, 0.9),
+        }
+        indexed = self.root / "indexed-for-catalog"
+        build_n3_indexed_data_plane_package(
+            self.raw,
+            output_dir=indexed,
+            package_id="n3-indexed-multi-policy-catalog-v1",
+            policies=policies,
+            sampler=_Sampler(),
+        )
+        selections = self.root / "selections"
+        built = build_full_flow_exact_range_catalog(
+            indexed,
+            catalog_id="multi-policy-real-selections-v1",
+            output_dir=selections,
+        )
+        self.assertEqual("FROZEN_EXACT_TEMPORAL_SELECTIONS", built["status"])
+        verified = verify_full_flow_exact_range_catalog(selections, indexed)
+        self.assertTrue(verified["source_side_projection_executed"])
+
+        manifest = json.loads(
+            (indexed / PACKAGE_MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+        raw_rows = {
+            row["object_id"]: row
+            for row in manifest["objects"]
+            if row["representation_id"] == "raw_video"
+        }
+        catalog = ExactFullObjectRangeCatalog(selections, indexed)
+        for object_id, policy in policies.items():
+            row = raw_rows[object_id]
+            selection = catalog.resolve(ArtifactIdentity(
+                object_id=object_id,
+                representation_id="raw_video",
+                artifact_sha256=row["artifact_sha256"],
+                artifact_size_bytes=row["artifact_size_bytes"],
+                object_catalog_version=row["catalog_version"],
+            ))
+            self.assertIsInstance(selection, ExactTemporalFrameSelection)
+            self.assertEqual(
+                (
+                    policy.temporal_start_fraction,
+                    policy.temporal_end_fraction,
+                ),
+                (
+                    selection.temporal_start_fraction,
+                    selection.temporal_end_fraction,
+                ),
+            )
+
     def test_policy_manifest_requires_exact_canonical_documents(self) -> None:
         path = self.root / "policies.json"
         document = {

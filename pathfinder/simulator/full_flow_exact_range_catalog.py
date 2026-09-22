@@ -40,6 +40,7 @@ from .n3_indexed_data_plane import (
     INDEXED_PROVENANCE_SCHEMA_VERSION,
     INDEXED_REPRESENTATION_ID,
     N3_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+    N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION,
     verify_n3_semantic_data_plane_package,
 )
 from .raw_cold_data_plane import (
@@ -168,9 +169,10 @@ def _source_rows(n3_root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if representation == REPRESENTATION_ID
     ]
     _require(bool(raw_rows), "N3 manifest has no raw_video objects")
-    indexed_package = (
-        manifest.get("schema_version") == N3_INDEXED_DATA_PLANE_SCHEMA_VERSION
-    )
+    indexed_package = manifest.get("schema_version") in {
+        N3_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+        N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+    }
     for raw in raw_rows:
         object_id = str(raw["object_id"])
         size = _integer(
