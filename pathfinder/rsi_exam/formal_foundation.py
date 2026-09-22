@@ -304,16 +304,36 @@ def _correct_option_id(
     task: Mapping[str, Any],
     pilot_workload: Mapping[str, Any],
 ) -> str:
+    _require(
+        str(pilot_workload.get("id")) == str(task.get("workload_id")),
+        "pilot and public workload ids differ",
+    )
+    prompt = str(pilot_workload.get("question", ""))
+    marker = " Answer with the best option text: "
+    _, separator, option_text = prompt.partition(marker)
+    _require(separator == marker, "pilot question option marker is missing")
+    _require(option_text.endswith("."), "pilot option list terminator is missing")
+    pilot_options = option_text[:-1].split("; ")
+    public_options = task.get("answer_options")
+    _require(isinstance(public_options, list), "public answer options are missing")
+    _require(
+        len(pilot_options) == len(public_options),
+        "pilot and public option counts differ",
+    )
+    _require(
+        len(set(pilot_options)) == len(pilot_options),
+        "pilot option text repeats",
+    )
     accepted = pilot_workload.get("accepted_answer_substrings")
     _require(isinstance(accepted, list) and bool(accepted), "pilot label is missing")
     accepted_values = {str(value) for value in accepted}
     matches = [
-        str(option["option_id"])
-        for option in task["answer_options"]
-        if str(option["text"]) in accepted_values
+        index
+        for index, option in enumerate(pilot_options)
+        if option in accepted_values
     ]
     _require(len(matches) == 1, "pilot label does not identify exactly one option")
-    return matches[0]
+    return str(public_options[matches[0]]["option_id"])
 
 
 def _formal_scenario(
@@ -515,10 +535,6 @@ def build_formal_runtime_foundation(
             object_id = str(case["object_id"])
             task = tasks[object_id]
             pilot_row = pilot_by_object[object_id]
-            _require(
-                str(pilot_row.get("question")) == str(task["question"]),
-                "pilot and public question differ",
-            )
             artifact = n4_rows[(object_id, "sampled_frame_bundle")]
             spec = {
                 "schema_version": SEMANTIC_SPEC_SCHEMA_VERSION,

@@ -313,7 +313,10 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
                 {
                     "id": row["workload_id"],
                     "object_id": row["object_id"],
-                    "question": row["question"],
+                    "question": (
+                        f"{row['question']} Answer with the best option text: "
+                        "first; second."
+                    ),
                     "accepted_answer_substrings": ["first"],
                 }
                 for row in public_tasks
