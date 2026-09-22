@@ -231,9 +231,18 @@ def _representation_id(kind: str) -> str:
     }[kind]
 
 
-def _public_action(row: Mapping[str, Any]) -> dict[str, Any]:
+def _case_action_id(row: Mapping[str, Any], *, case_id: str) -> str:
+    design_id = _as_string(row.get("design_id"), "design_id")
+    return f"{case_id}:{design_id}"
+
+
+def _public_action(
+    row: Mapping[str, Any],
+    *,
+    case_id: str,
+) -> dict[str, Any]:
     kind = _action_kind(row)
-    action_id = _as_string(row.get("design_id"), "design_id")
+    action_id = _case_action_id(row, case_id=case_id)
     node = _as_string(row.get("executor_node_id"), "executor_node_id")
     return {
         "action_id": action_id,
@@ -261,7 +270,7 @@ def _measured_outcome(
     case_id: str,
     source_run_id: str,
 ) -> dict[str, Any]:
-    action_id = _as_string(row.get("design_id"), "design_id")
+    action_id = _case_action_id(row, case_id=case_id)
     source_case_id = _as_string(row.get("case_id"), "case_id")
     branch = row.get("cache_branch")
     _require(branch in {None, "miss", "hit"}, "cache_branch is invalid")
@@ -356,7 +365,7 @@ def _case_from_accounting(
     outcomes: list[dict[str, Any]] = []
     for raw_row in rows:
         _require(isinstance(raw_row, dict), "accounting row is not an object")
-        action = _public_action(raw_row)
+        action = _public_action(raw_row, case_id=case_id)
         action_id = action["action_id"]
         existing = actions_by_id.get(action_id)
         if existing is None:

@@ -26,6 +26,10 @@ SOURCE_COMMIT = "5" * 40
 OBJECT_ID = "nextqa-val-3429509208"
 
 
+def _action_id(design_id: str, object_id: str = OBJECT_ID) -> str:
+    return f"{object_id}:{design_id}"
+
+
 def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -317,13 +321,13 @@ class OfflineReplayPackageTest(unittest.TestCase):
             )
             first_draw = evaluator.step(
                 OBJECT_ID,
-                "D2",
+                _action_id("D2"),
                 remaining_queries=1,
             )
             evaluator.reset_case(OBJECT_ID)
             second_draw = evaluator.step(
                 OBJECT_ID,
-                "D2",
+                _action_id("D2"),
                 remaining_queries=1,
             )
             self.assertIn(first_draw["task_success"], {True, False})
@@ -337,6 +341,9 @@ class OfflineReplayPackageTest(unittest.TestCase):
             second_object = "nextqa-val-second-video"
             second["object_id"] = second_object
             second["run_id"] = "offline-replay-second-object-run-v1"
+            second["rows"][2]["semantic_input_profile_id"] = (
+                "derived-digest-only-v1"
+            )
             sources = [
                 _write_accounting(root, first, name="accounting-a"),
                 _write_accounting(root, second, name="accounting-b"),
@@ -366,6 +373,7 @@ class OfflineReplayPackageTest(unittest.TestCase):
                 source_accounting_dirs=sources,
             )
             self.assertEqual(2, verified["case_count"])
+            self.assertEqual(16, verified["action_count"])
             loaded = load_offline_replay_package(package)
             splits = {
                 row["object_id"]: row["split"] for row in loaded["cases"]
@@ -374,6 +382,9 @@ class OfflineReplayPackageTest(unittest.TestCase):
                 {OBJECT_ID: "train", second_object: "test"},
                 splits,
             )
+            action_ids = {row["action_id"] for row in loaded["actions"]}
+            self.assertIn(_action_id("D2"), action_ids)
+            self.assertIn(_action_id("D2", second_object), action_ids)
 
 
 class OfflineReplayStateTest(unittest.TestCase):
@@ -384,8 +395,16 @@ class OfflineReplayStateTest(unittest.TestCase):
                 load_offline_replay_package(package),
                 mode="shared-dataset-sequence",
             )
-            miss = evaluator.step(OBJECT_ID, "D3", remaining_queries=2)
-            hit = evaluator.step(OBJECT_ID, "D3", remaining_queries=1)
+            miss = evaluator.step(
+                OBJECT_ID,
+                _action_id("D3"),
+                remaining_queries=2,
+            )
+            hit = evaluator.step(
+                OBJECT_ID,
+                _action_id("D3"),
+                remaining_queries=1,
+            )
             self.assertEqual("cache-miss", miss["state_variant"])
             self.assertEqual(727_040, miss["metrics"]["query_origin_bytes"])
             self.assertEqual("cache-hit", hit["state_variant"])
