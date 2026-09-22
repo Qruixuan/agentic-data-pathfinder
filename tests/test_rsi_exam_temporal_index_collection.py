@@ -192,6 +192,7 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
     def _caption_transport(request, timeout: float) -> bytes:
         del timeout
         body = json.loads(request.data.decode("utf-8"))
+        assert body["response_format"] == {"type": "json_object"}
         content = body["messages"][0]["content"]
         rendered = json.dumps(content).casefold()
         assert "what happened after the person moved" not in rendered

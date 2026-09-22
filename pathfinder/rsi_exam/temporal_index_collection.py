@@ -483,6 +483,7 @@ def _caption_request(
         "model": model_id,
         "messages": [{"role": "user", "content": content}],
         "temperature": 0,
+        "response_format": {"type": "json_object"},
     }
     assert_caption_request_is_question_independent(payload)
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
