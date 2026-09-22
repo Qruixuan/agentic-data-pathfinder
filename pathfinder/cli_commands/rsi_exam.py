@@ -123,7 +123,7 @@ def register_rsi_exam_commands(
     finalize_index.add_argument("--embedding-dimension", type=_positive_integer,
                                 default=1024)
     finalize_index.add_argument("--embedding-batch-size", type=_positive_integer,
-                                default=64)
+                                default=10)
     finalize_index.add_argument("--runtime-frame-count", type=_positive_integer,
                                 default=10)
     finalize_index.add_argument("--jpeg-max-dimension", type=_positive_integer,

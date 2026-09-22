@@ -9,6 +9,8 @@ from pathlib import Path
 
 from pathfinder.rsi_exam.collection_plan import freeze_collection_plan
 from pathfinder.rsi_exam.temporal_index_collection import (
+    FormalTemporalIndexError,
+    _embedding_batches,
     finalize_formal_temporal_index,
     materialize_formal_temporal_captions,
     prepare_formal_temporal_index,
@@ -298,6 +300,26 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
                 "*/runtime-frame-manifest.json"
             ))),
         )
+
+    def test_text_embedding_v4_batch_limit_fails_before_transport(self) -> None:
+        def transport(request, timeout):
+            del request, timeout
+            self.fail("oversized embedding batch reached the provider")
+
+        with self.assertRaisesRegex(
+            FormalTemporalIndexError,
+            "text-embedding-v4 limit of 10",
+        ):
+            _embedding_batches(
+                texts=[f"text-{index}" for index in range(11)],
+                model_id="text-embedding-v4",
+                dimension=8,
+                base_url="https://provider.invalid/v1",
+                api_key="not-recorded-test-key",
+                batch_size=11,
+                timeout_seconds=1.0,
+                transport=transport,
+            )
 
 
 if __name__ == "__main__":

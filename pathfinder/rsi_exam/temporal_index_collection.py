@@ -774,7 +774,15 @@ def _embedding_batches(
     transport: Transport,
 ) -> tuple[list[list[int]], list[dict[str, Any]]]:
     _require(bool(texts), "no embedding inputs were supplied")
-    _require(1 <= batch_size <= 128, "embedding batch size is invalid")
+    model_batch_limits = {
+        "text-embedding-v4": 10,
+        "qwen3.7-text-embedding": 20,
+    }
+    batch_limit = model_batch_limits.get(model_id, 128)
+    _require(
+        1 <= batch_size <= batch_limit,
+        f"embedding batch size exceeds the {model_id} limit of {batch_limit}",
+    )
     vectors: list[list[int]] = []
     receipts: list[dict[str, Any]] = []
     for offset in range(0, len(texts), batch_size):
