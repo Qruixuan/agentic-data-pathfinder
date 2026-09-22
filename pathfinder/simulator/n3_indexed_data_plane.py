@@ -61,6 +61,9 @@ from .raw_cold_data_plane import (
 N3_INDEXED_DATA_PLANE_SCHEMA_VERSION = (
     "pathfinder.simulator-n3-indexed-data-plane/v1alpha1"
 )
+N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION = (
+    "pathfinder.simulator-n3-indexed-data-plane/v1alpha2"
+)
 N3_INDEXED_DATA_PLANE_STATUS = "FROZEN_N3_INDEXED_DATA_PLANE"
 N3_INDEXED_DATA_PLANE_VERIFIED_STATUS = "VERIFIED_N3_INDEXED_DATA_PLANE"
 INDEXED_REPRESENTATION_ID = "indexed_temporal_frame_bundle"
@@ -118,6 +121,9 @@ _REPORT_KEYS = {
     "llm_called",
     "credentials_recorded",
     "eligible_for_scientific_claims",
+}
+_MULTI_POLICY_REPORT_KEYS = (_REPORT_KEYS - {"selection_policy"}) | {
+    "selection_policies"
 }
 _ROW_KEYS = {
     "object_id",
@@ -213,6 +219,58 @@ class N3TemporalSelectionPolicy:
 
 
 FrameSampler = Callable[..., tuple[Sequence[SampledImage], float]]
+
+
+def _policy_from_document(
+    document: Mapping[str, Any],
+) -> N3TemporalSelectionPolicy:
+    _require(isinstance(document, Mapping), "N3 selection policy is malformed")
+    window = document.get("temporal_window_fraction")
+    _require(
+        isinstance(window, Sequence)
+        and not isinstance(window, (str, bytes))
+        and len(window) == 2,
+        "N3 selection policy temporal window is malformed",
+    )
+    policy = N3TemporalSelectionPolicy(
+        frame_count=document.get("frame_count"),
+        jpeg_max_dimension=document.get("jpeg_max_dimension"),
+        temporal_start_fraction=window[0],
+        temporal_end_fraction=window[1],
+        sampling_method=document.get(
+            "sampling_method", UNIFORM_MIDPOINT_SAMPLING_METHOD
+        ),
+        selection_provenance=document.get("temporal_index_selection"),
+    )
+    _require(document == policy.to_dict(), "N3 indexed selection policy changed")
+    return policy
+
+
+def load_n3_temporal_selection_policy_manifest(
+    manifest_path: str | Path,
+) -> dict[str, N3TemporalSelectionPolicy]:
+    """Load a canonical, object-keyed temporal selection policy manifest."""
+
+    document = _read_json(Path(manifest_path), "N3 selection policy manifest")
+    _require(
+        document.get("schema_version")
+        == "pathfinder.n3-temporal-selection-policy-manifest/v1alpha1",
+        "N3 selection policy manifest schema changed",
+    )
+    _require(
+        set(document) == {"schema_version", "policies"},
+        "N3 selection policy manifest fields changed",
+    )
+    policies = document.get("policies")
+    _require(
+        isinstance(policies, Mapping) and bool(policies),
+        "N3 selection policy manifest is empty",
+    )
+    result: dict[str, N3TemporalSelectionPolicy] = {}
+    for object_id, value in sorted(policies.items()):
+        identifier = _identifier(object_id, "selection policy object_id")
+        result[identifier] = _policy_from_document(value)
+    return result
 
 
 def _require(condition: object, message: str) -> None:
@@ -457,6 +515,7 @@ def build_n3_indexed_data_plane_package(
     output_dir: str | Path,
     package_id: str,
     policy: N3TemporalSelectionPolicy = N3TemporalSelectionPolicy(),
+    policies: Mapping[str, N3TemporalSelectionPolicy] | None = None,
     sampler: FrameSampler = sample_video,
 ) -> dict[str, Any]:
     """Upgrade one verified raw package with real N3 temporal projections."""
@@ -466,7 +525,29 @@ def build_n3_indexed_data_plane_package(
     _identifier(package_id, "package_id")
     raw_report = _read_json(source_root / PACKAGE_MANIFEST_NAME, "raw package")
     raw_rows = [dict(row) for row in raw_report["objects"]]
-    policy_document = policy.to_dict()
+    object_ids = {str(row["object_id"]) for row in raw_rows}
+    if policies is None:
+        policy_by_object = {object_id: policy for object_id in object_ids}
+        policy_document = policy.to_dict()
+        policy_documents = None
+    else:
+        _require(
+            set(policies) == object_ids,
+            "object-specific N3 policies must exactly cover the raw package",
+        )
+        _require(
+            all(
+                isinstance(value, N3TemporalSelectionPolicy)
+                for value in policies.values()
+            ),
+            "object-specific N3 policies are malformed",
+        )
+        policy_by_object = dict(policies)
+        policy_document = None
+        policy_documents = {
+            object_id: policy_by_object[object_id].to_dict()
+            for object_id in sorted(object_ids)
+        }
     target = Path(output_dir).resolve()
     _require(not target.exists(), f"output directory already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -477,6 +558,8 @@ def build_n3_indexed_data_plane_package(
         rows: list[dict[str, Any]] = []
         for raw_row in raw_rows:
             object_id = str(raw_row["object_id"])
+            object_policy = policy_by_object[object_id]
+            object_policy_document = object_policy.to_dict()
             raw_relative = str(raw_row["artifact_package_path"])
             raw_source = source_root / Path(*PurePosixPath(raw_relative).parts)
             raw_target = stage / Path(*PurePosixPath(raw_relative).parts)
@@ -487,7 +570,7 @@ def build_n3_indexed_data_plane_package(
             artifact, embedded, duration = _bundle(
                 raw_source,
                 raw_row,
-                policy,
+                object_policy,
                 sampler,
             )
             indexed_relative = (
@@ -512,9 +595,9 @@ def build_n3_indexed_data_plane_package(
                         "artifact_size_bytes"
                     ],
                     "source_artifact_sha256": raw_row["artifact_sha256"],
-                    "selection_policy": policy_document,
+                    "selection_policy": object_policy_document,
                     "selection_policy_sha256": _sha256(
-                        _canonical(policy_document)
+                        _canonical(object_policy_document)
                     ),
                     "embedded_manifest_sha256": embedded_sha,
                     "source_duration_seconds": duration,
@@ -539,7 +622,11 @@ def build_n3_indexed_data_plane_package(
             ),
         }
         report = {
-            "schema_version": N3_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+            "schema_version": (
+                N3_INDEXED_DATA_PLANE_SCHEMA_VERSION
+                if policies is None
+                else N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION
+            ),
             "status": N3_INDEXED_DATA_PLANE_STATUS,
             "package_id": package_id,
             "catalog_version": catalog_version,
@@ -548,7 +635,6 @@ def build_n3_indexed_data_plane_package(
             "artifact_bytes": sum(row["artifact_size_bytes"] for row in rows),
             "objects": rows,
             "source_raw_package_binding": source_binding,
-            "selection_policy": policy_document,
             "portable_data_agent_contract_complete": True,
             "deployment_binding_required": True,
             "runtime_execution_verified": False,
@@ -557,6 +643,10 @@ def build_n3_indexed_data_plane_package(
             "credentials_recorded": False,
             "eligible_for_scientific_claims": False,
         }
+        if policies is None:
+            report["selection_policy"] = policy_document
+        else:
+            report["selection_policies"] = policy_documents
         documents = {
             DATA_AGENT_MANIFEST_PATH: _pretty(agent_manifest),
             OBJECT_CATALOG_PATH: _pretty(object_catalog),
@@ -586,9 +676,21 @@ def verify_n3_indexed_data_plane_package(
     root = Path(package_dir).resolve()
     _require(root.is_dir(), "N3 indexed data-plane package is missing")
     report = _read_json(root / PACKAGE_MANIFEST_NAME, "N3 indexed package")
-    _require(set(report) == _REPORT_KEYS, "N3 indexed report fields changed")
+    schema_version = report.get("schema_version")
+    multi_policy = (
+        schema_version == N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION
+    )
     _require(
-        report.get("schema_version") == N3_INDEXED_DATA_PLANE_SCHEMA_VERSION
+        set(report)
+        == (_MULTI_POLICY_REPORT_KEYS if multi_policy else _REPORT_KEYS),
+        "N3 indexed report fields changed",
+    )
+    _require(
+        schema_version
+        in {
+            N3_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+            N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+        }
         and report.get("status") == N3_INDEXED_DATA_PLANE_STATUS,
         "N3 indexed report schema or status changed",
     )
@@ -596,28 +698,22 @@ def verify_n3_indexed_data_plane_package(
     catalog_version = _identifier(
         report.get("catalog_version"), "catalog_version"
     )
-    policy = N3TemporalSelectionPolicy(
-        frame_count=report["selection_policy"].get("frame_count"),
-        jpeg_max_dimension=report["selection_policy"].get(
-            "jpeg_max_dimension"
-        ),
-        temporal_start_fraction=report["selection_policy"].get(
-            "temporal_window_fraction", [None, None]
-        )[0],
-        temporal_end_fraction=report["selection_policy"].get(
-            "temporal_window_fraction", [None, None]
-        )[1],
-        sampling_method=report["selection_policy"].get(
-            "sampling_method", UNIFORM_MIDPOINT_SAMPLING_METHOD
-        ),
-        selection_provenance=report["selection_policy"].get(
-            "temporal_index_selection"
-        ),
-    )
-    _require(
-        report["selection_policy"] == policy.to_dict(),
-        "N3 indexed selection policy changed",
-    )
+    if multi_policy:
+        raw_policy_documents = report.get("selection_policies")
+        _require(
+            isinstance(raw_policy_documents, Mapping)
+            and bool(raw_policy_documents),
+            "N3 indexed object policies are empty",
+        )
+        policies = {
+            _identifier(object_id, "selection policy object_id"):
+                _policy_from_document(document)
+            for object_id, document in sorted(raw_policy_documents.items())
+        }
+        policy = None
+    else:
+        policy = _policy_from_document(report["selection_policy"])
+        policies = {}
     source_binding = report.get("source_raw_package_binding")
     _require(
         isinstance(source_binding, Mapping)
@@ -725,18 +821,29 @@ def verify_n3_indexed_data_plane_package(
                 limits=limits,
             )
             provenance = row.get("provenance")
+            object_policy = policies.get(object_id, policy)
+            _require(
+                object_policy is not None,
+                "N3 indexed projection has no object policy",
+            )
             _require(
                 isinstance(provenance, Mapping)
                 and provenance.get("schema_version")
                 == INDEXED_PROVENANCE_SCHEMA_VERSION
-                and provenance.get("selection_policy") == policy.to_dict()
+                and provenance.get("selection_policy")
+                == object_policy.to_dict()
                 and provenance.get("selection_policy_sha256")
-                == _sha256(_canonical(policy.to_dict()))
+                == _sha256(_canonical(object_policy.to_dict()))
                 and provenance.get("embedded_manifest_sha256")
                 == bundle.manifest_sha256,
                 "N3 indexed projection provenance changed",
             )
     object_ids = sorted({key[0] for key in by_key})
+    if multi_policy:
+        _require(
+            set(policies) == set(object_ids),
+            "N3 indexed object policies do not cover every object",
+        )
     _require(
         set(by_key)
         == {
@@ -806,7 +913,7 @@ def verify_n3_indexed_data_plane_package(
                 "N3 indexed Data Agent resolution changed",
             )
     return {
-        "schema_version": N3_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "status": N3_INDEXED_DATA_PLANE_VERIFIED_STATUS,
         "package_id": report["package_id"],
         "catalog_version": catalog_version,
@@ -829,7 +936,10 @@ def verify_n3_semantic_data_plane_package(
 
     root = Path(package_dir).resolve()
     document = _read_json(root / PACKAGE_MANIFEST_NAME, "N3 package manifest")
-    if document.get("schema_version") == N3_INDEXED_DATA_PLANE_SCHEMA_VERSION:
+    if document.get("schema_version") in {
+        N3_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+        N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION,
+    }:
         return verify_n3_indexed_data_plane_package(root)
     return verify_raw_cold_data_plane_package(root)
 
@@ -844,10 +954,12 @@ __all__ = [
     "INDEXED_PROVENANCE_SCHEMA_VERSION",
     "INDEXED_REPRESENTATION_ID",
     "N3_INDEXED_DATA_PLANE_SCHEMA_VERSION",
+    "N3_MULTI_POLICY_INDEXED_DATA_PLANE_SCHEMA_VERSION",
     "SOURCE_SIDE_TEMPORAL_SAMPLING_METHODS",
     "N3IndexedDataPlaneError",
     "N3TemporalSelectionPolicy",
     "build_n3_indexed_data_plane_package",
+    "load_n3_temporal_selection_policy_manifest",
     "verify_n3_indexed_data_plane_package",
     "verify_n3_semantic_data_plane_package",
 ]

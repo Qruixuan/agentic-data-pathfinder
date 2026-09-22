@@ -491,23 +491,9 @@ def _source_sha256(path: Path) -> str:
     return _sha256(path.read_bytes().replace(b"\r\n", b"\n"))
 
 
-def _n3_indexed_selection(n3_package_dir: Path) -> dict[str, Any] | None:
-    """Read the query-aware selection the N3 package actually projected.
+def _selection_from_policy(policy: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Translate one verified N3 projection policy into a model profile."""
 
-    The N3 package is the authority: it is what decoded the runtime frames, so
-    the semantic input profile is derived from its frozen policy rather than
-    from anything a trial template asserts.  A fixed-window package returns
-    ``None`` and every legacy profile is rebuilt exactly as before.
-    """
-
-    policy = _strict_json(
-        Path(n3_package_dir) / N3_MANIFEST_NAME,
-        "N3 indexed package manifest",
-    ).get("selection_policy")
-    if policy is None:
-        # Packages frozen before the policy was recorded are the fixed middle
-        # window by construction, so they keep their original profiles.
-        return None
     _require(isinstance(policy, Mapping), "N3 selection policy is malformed")
     if policy.get("sampling_method") != TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD:
         _require(
@@ -538,6 +524,57 @@ def _n3_indexed_selection(n3_package_dir: Path) -> dict[str, Any] | None:
     }
 
 
+def _n3_indexed_selections(
+    n3_package_dir: Path,
+) -> dict[str, dict[str, Any]]:
+    """Read global or object-specific query-aware selections from N3."""
+
+    package = _strict_json(
+        Path(n3_package_dir) / N3_MANIFEST_NAME,
+        "N3 indexed package manifest",
+    )
+    policies = package.get("selection_policies")
+    if policies is not None:
+        _require(
+            isinstance(policies, Mapping) and bool(policies),
+            "N3 object-specific selection policies are malformed",
+        )
+        selections: dict[str, dict[str, Any]] = {}
+        for object_id, policy in policies.items():
+            _require(
+                isinstance(object_id, str) and bool(object_id),
+                "N3 object-specific selection policy has no object ID",
+            )
+            translated = _selection_from_policy(policy)
+            if translated is not None:
+                selections[object_id] = translated
+        return selections
+    policy = package.get("selection_policy")
+    if policy is None:
+        return {}
+    translated = _selection_from_policy(policy)
+    return {} if translated is None else {"*": translated}
+
+
+def _n3_indexed_selection(n3_package_dir: Path) -> dict[str, Any] | None:
+    """Read the query-aware selection the N3 package actually projected.
+
+    The N3 package is the authority: it is what decoded the runtime frames, so
+    the semantic input profile is derived from its frozen policy rather than
+    from anything a trial template asserts.  A fixed-window package returns
+    ``None`` and every legacy profile is rebuilt exactly as before.
+    """
+
+    selections = _n3_indexed_selections(n3_package_dir)
+    if not selections:
+        return None
+    _require(
+        len(selections) == 1,
+        "object-specific N3 selections require object-aware promotion",
+    )
+    return next(iter(selections.values()))
+
+
 RUNTIME_FRAME_MANIFEST_NAME = "runtime-frame-manifest.json"
 
 
@@ -546,6 +583,7 @@ def _runtime_frame_binding(
     *,
     n3_package_dir: Path,
     indexed_selection: Mapping[str, Any] | None,
+    object_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Bind the runtime frames a query-aware projection actually delivered.
 
@@ -577,8 +615,13 @@ def _runtime_frame_binding(
         manifest.get("n3_package_id") == package.get("package_id"),
         "the runtime frame manifest belongs to a different N3 package",
     )
+    expected_policy = package.get("selection_policy")
+    if object_id is not None and isinstance(
+        package.get("selection_policies"), Mapping
+    ):
+        expected_policy = package["selection_policies"].get(object_id)
     _require(
-        manifest.get("selection_policy") == package.get("selection_policy"),
+        manifest.get("selection_policy") == expected_policy,
         "the runtime frame manifest records a different selection policy",
     )
     _require(
@@ -625,6 +668,47 @@ def _runtime_frame_binding(
         "partial_mp4_byte_range_claimed": False,
         "reduced_source_storage_io_claimed": False,
     }
+
+
+def _runtime_frame_bindings(
+    runtime_frame_manifest_dir: Path | None,
+    *,
+    n3_package_dir: Path,
+    indexed_selections: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Bind a legacy single manifest or one manifest per indexed object."""
+
+    if not indexed_selections:
+        _require(
+            runtime_frame_manifest_dir is None,
+            "a fixed-window projection has no runtime frame manifest",
+        )
+        return None
+    if set(indexed_selections) == {"*"}:
+        return _runtime_frame_binding(
+            runtime_frame_manifest_dir,
+            n3_package_dir=n3_package_dir,
+            indexed_selection=indexed_selections["*"],
+        )
+    _require(
+        runtime_frame_manifest_dir is not None,
+        "object-specific query-aware projections require runtime manifests",
+    )
+    root = Path(runtime_frame_manifest_dir).resolve()
+    bindings = {
+        object_id: _runtime_frame_binding(
+            root / object_id,
+            n3_package_dir=n3_package_dir,
+            indexed_selection=selection,
+            object_id=object_id,
+        )
+        for object_id, selection in sorted(indexed_selections.items())
+    }
+    _require(
+        all(value is not None for value in bindings.values()),
+        "object-specific runtime frame binding is incomplete",
+    )
+    return {"object_bindings": bindings}
 
 
 def _evidence_reports(
@@ -810,11 +894,11 @@ def _documents(
         artifact_binding_path=artifact_path,
         n4_package_dir=n4_package_dir,
     )
-    indexed_selection = _n3_indexed_selection(n3_package_dir)
-    runtime_frame_binding = _runtime_frame_binding(
+    indexed_selections = _n3_indexed_selections(n3_package_dir)
+    runtime_frame_binding = _runtime_frame_bindings(
         runtime_frame_manifest_dir,
         n3_package_dir=n3_package_dir,
-        indexed_selection=indexed_selection,
+        indexed_selections=indexed_selections,
     )
 
     legacy_admission = _strict_json(
@@ -880,6 +964,10 @@ def _documents(
             stages_by_trial.get(trial_key, [])
         )
         route_family = str(source["route_family"])
+        object_id = str(task.get("object_id"))
+        indexed_selection = indexed_selections.get(
+            object_id, indexed_selections.get("*")
+        )
         promoted["semantic_input_profile"] = build_semantic_input_profile(
             route_family=route_family,
             model_input_representation_ids=frontier,
@@ -898,9 +986,13 @@ def _documents(
             "source semantic trial identity changed during promotion",
         )
         promoted_trials.append(promoted)
-    _require(len(promoted_trials) == 64, "promoted matrix is not 64 trials")
     _require(
-        [row.get("order_index") for row in promoted_trials] == list(range(64)),
+        len(promoted_trials) == len(source_trials),
+        "promoted matrix trial count changed",
+    )
+    _require(
+        [row.get("order_index") for row in promoted_trials]
+        == list(range(len(promoted_trials))),
         "promoted trial order changed",
     )
 
@@ -1158,8 +1250,9 @@ def _verify_files(root: Path) -> dict[str, Any]:
     smokes = _strict_jsonl(root / SMOKES_NAME, "promoted smokes")
     inventory = _strict_json(root / INVENTORY_NAME, "adapter inventory")
     _require(
-        len(trials) == 64
-        and [row.get("order_index") for row in trials] == list(range(64))
+        bool(trials)
+        and [row.get("order_index") for row in trials]
+        == list(range(len(trials)))
         and all(
             row.get("required_runtime_adapter_ids") == []
             and row.get("flowmesh_submission_authorized") is True

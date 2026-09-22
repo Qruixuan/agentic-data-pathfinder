@@ -23,8 +23,11 @@ from pathfinder.simulator.full_flow_semantic_route_runtime import (
 )
 from pathfinder.simulator.n3_indexed_data_plane import (
     INDEXED_REPRESENTATION_ID,
+    N3IndexedDataPlaneError,
     N3TemporalSelectionPolicy,
+    TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD,
     build_n3_indexed_data_plane_package,
+    load_n3_temporal_selection_policy_manifest,
     verify_n3_indexed_data_plane_package,
     verify_n3_semantic_data_plane_package,
 )
@@ -211,6 +214,131 @@ class N3IndexedDataPlaneTest(unittest.TestCase):
             "VERIFIED_N3_INDEXED_DATA_PLANE",
             verify_n3_semantic_data_plane_package(self.indexed)["status"],
         )
+
+
+class N3MultiPolicyIndexedDataPlaneTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.raw = self.root / "raw"
+        bindings = []
+        for index, source_id in enumerate(("111", "222")):
+            payload = _mp4() + bytes([index])
+            source = self.root / f"{source_id}.mp4"
+            source.write_bytes(payload)
+            bindings.append(RawColdObjectBinding(
+                object_id=f"nextqa-val-{source_id}",
+                artifact_path=source,
+                catalog_version="multi-policy-v1",
+                plan_ids=("D1", "D5"),
+                dataset_id="nextqa",
+                dataset_revision="formal-v1",
+                source_object_id=source_id,
+                artifact_sha256=_sha256(payload),
+                artifact_size_bytes=len(payload),
+            ))
+        build_raw_cold_data_plane_package(
+            bindings,
+            output_dir=self.raw,
+            package_id="n3-raw-multi-policy-v1",
+        )
+
+    @staticmethod
+    def _policy(start: float, end: float) -> N3TemporalSelectionPolicy:
+        provenance = {
+            "action_id": "temporal-index-formal-v1",
+            "anchor_top_k": 2,
+            "anchor_window_ordinals": [1, 2],
+            "expansion_basis": "timestamp",
+            "fallback_used": False,
+            "max_selected_windows": 4,
+            "merged_intervals_seconds": [[start * 40.0, end * 40.0]],
+            "public_question_sha256": "1" * 64,
+            "relation": "none",
+            "selected_window_ordinals": [1, 2],
+            "temporal_index_package_sha256": "2" * 64,
+        }
+        return N3TemporalSelectionPolicy(
+            frame_count=2,
+            temporal_start_fraction=start,
+            temporal_end_fraction=end,
+            sampling_method=TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD,
+            selection_provenance=provenance,
+        )
+
+    def test_object_specific_policies_are_frozen_and_verified(self) -> None:
+        policies = {
+            "nextqa-val-111": self._policy(0.1, 0.4),
+            "nextqa-val-222": self._policy(0.6, 0.9),
+        }
+        sampler = _Sampler()
+        output = self.root / "indexed"
+        build_n3_indexed_data_plane_package(
+            self.raw,
+            output_dir=output,
+            package_id="n3-indexed-multi-policy-v1",
+            policies=policies,
+            sampler=sampler,
+        )
+        verified = verify_n3_indexed_data_plane_package(output)
+        self.assertEqual(
+            "pathfinder.simulator-n3-indexed-data-plane/v1alpha2",
+            verified["schema_version"],
+        )
+        self.assertEqual(
+            [(2, 768, 0.1, 0.4), (2, 768, 0.6, 0.9)],
+            sampler.calls,
+        )
+        report = json.loads(
+            (output / PACKAGE_MANIFEST_NAME).read_text(encoding="utf-8")
+        )
+        self.assertNotIn("selection_policy", report)
+        self.assertEqual(
+            {
+                object_id: policy.to_dict()
+                for object_id, policy in policies.items()
+            },
+            report["selection_policies"],
+        )
+
+    def test_policy_manifest_requires_exact_canonical_documents(self) -> None:
+        path = self.root / "policies.json"
+        document = {
+            "schema_version": (
+                "pathfinder.n3-temporal-selection-policy-manifest/v1alpha1"
+            ),
+            "policies": {
+                "nextqa-val-111": self._policy(0.1, 0.4).to_dict(),
+            },
+        }
+        path.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        loaded = load_n3_temporal_selection_policy_manifest(path)
+        self.assertEqual(document["policies"]["nextqa-val-111"],
+                         loaded["nextqa-val-111"].to_dict())
+
+        document["policies"]["nextqa-val-111"]["extra"] = True
+        path.write_text(
+            json.dumps(document, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        with self.assertRaises(N3IndexedDataPlaneError):
+            load_n3_temporal_selection_policy_manifest(path)
+
+    def test_policy_keys_must_exactly_cover_raw_objects(self) -> None:
+        with self.assertRaisesRegex(N3IndexedDataPlaneError, "exactly cover"):
+            build_n3_indexed_data_plane_package(
+                self.raw,
+                output_dir=self.root / "invalid",
+                package_id="n3-indexed-invalid-v1",
+                policies={"nextqa-val-111": self._policy(0.1, 0.4)},
+                sampler=_Sampler(),
+            )
 
 
 if __name__ == "__main__":

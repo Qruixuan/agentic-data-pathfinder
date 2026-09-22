@@ -15,7 +15,9 @@ from pathlib import Path
 from pathfinder.simulator.full_flow_local_semantic_admission import (
     FullFlowLocalSemanticAdmissionError,
     _n3_indexed_selection,
+    _n3_indexed_selections,
     _runtime_frame_binding,
+    _runtime_frame_bindings,
 )
 from pathfinder.simulator.full_flow_semantic_input_profiles import (
     QUERY_AWARE_TEMPORAL_INDEX_SELECTION,
@@ -119,6 +121,31 @@ class QueryAwareBindingTest(unittest.TestCase):
         with self.assertRaises(FullFlowLocalSemanticAdmissionError):
             _n3_indexed_selection(self._package(policy=policy))
 
+    def test_object_specific_selections_remain_distinct(self) -> None:
+        directory = self._next("multi-pkg")
+        other = dict(POLICY, temporal_window_fraction=[0.1, 0.5])
+        (directory / "raw-cold-data-plane.json").write_text(
+            json.dumps({
+                "package_id": "n3-query-aware-multi-v1",
+                "selection_policies": {
+                    "nextqa-val-111": POLICY,
+                    "nextqa-val-222": other,
+                },
+            }),
+            encoding="utf-8",
+        )
+        selections = _n3_indexed_selections(directory)
+        self.assertEqual((0.4, 1.0), selections["nextqa-val-111"][
+            "indexed_temporal_window_fraction"
+        ])
+        self.assertEqual((0.1, 0.5), selections["nextqa-val-222"][
+            "indexed_temporal_window_fraction"
+        ])
+        with self.assertRaisesRegex(
+            FullFlowLocalSemanticAdmissionError, "object-aware"
+        ):
+            _n3_indexed_selection(directory)
+
     # --- the sibling manifest must be bound -------------------------------
     def _bind(self, package, manifest_dir, selection=None):
         if selection is None:
@@ -190,6 +217,46 @@ class QueryAwareBindingTest(unittest.TestCase):
                     FullFlowLocalSemanticAdmissionError, "byte-range reduction"
                 ):
                     self._bind(package, self._manifest_dir(**{flag: True}))
+
+    def test_object_specific_runtime_manifests_are_bound_by_object(self) -> None:
+        package = self._next("multi-pkg")
+        other_policy = dict(POLICY, temporal_window_fraction=[0.1, 0.5])
+        (package / "raw-cold-data-plane.json").write_text(
+            json.dumps({
+                "package_id": "n3-query-aware-test-v1",
+                "selection_policies": {
+                    "nextqa-val-111": POLICY,
+                    "nextqa-val-222": other_policy,
+                },
+            }),
+            encoding="utf-8",
+        )
+        root = self._next("multi-rfm")
+        for object_id, policy in (
+            ("nextqa-val-111", POLICY),
+            ("nextqa-val-222", other_policy),
+        ):
+            directory = root / object_id
+            directory.mkdir()
+            (directory / "runtime-frame-manifest.json").write_text(
+                json.dumps({
+                    **MANIFEST,
+                    "object_id": object_id,
+                    "selection_policy": policy,
+                }),
+                encoding="utf-8",
+            )
+            (directory / "SHA256SUMS").write_text("x\n", encoding="utf-8")
+        selections = _n3_indexed_selections(package)
+        binding = _runtime_frame_bindings(
+            root,
+            n3_package_dir=package,
+            indexed_selections=selections,
+        )
+        self.assertEqual(
+            {"nextqa-val-111", "nextqa-val-222"},
+            set(binding["object_bindings"]),
+        )
 
 
 if __name__ == "__main__":

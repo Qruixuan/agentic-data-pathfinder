@@ -2262,6 +2262,14 @@ def _parser() -> argparse.ArgumentParser:
     n3_indexed_build.add_argument(
         "--temporal-end-fraction", type=float, default=0.75
     )
+    n3_indexed_build.add_argument(
+        "--selection-policy-manifest",
+        type=Path,
+        help=(
+            "canonical object-keyed policy manifest; when supplied, the "
+            "scalar frame/window flags are ignored"
+        ),
+    )
     n3_indexed_build.add_argument("--output-dir", type=Path, required=True)
     n3_indexed_build.add_argument("--compact", action="store_true")
 
@@ -4614,8 +4622,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             from .simulator.n3_indexed_data_plane import (
                 N3TemporalSelectionPolicy,
                 build_n3_indexed_data_plane_package,
+                load_n3_temporal_selection_policy_manifest,
             )
 
+            policies = (
+                None
+                if args.selection_policy_manifest is None
+                else load_n3_temporal_selection_policy_manifest(
+                    args.selection_policy_manifest
+                )
+            )
             payload = build_n3_indexed_data_plane_package(
                 args.source_raw_package_dir,
                 output_dir=args.output_dir,
@@ -4626,6 +4642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     temporal_start_fraction=args.temporal_start_fraction,
                     temporal_end_fraction=args.temporal_end_fraction,
                 ),
+                policies=policies,
             )
             return _print_payload(payload, compact=args.compact)
         if args.command == "verify-simulator-n3-indexed-data-plane":
