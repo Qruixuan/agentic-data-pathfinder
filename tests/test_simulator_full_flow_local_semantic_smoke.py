@@ -590,6 +590,73 @@ class LocalSemanticSmokeTest(unittest.TestCase):
         self.assertTrue(report["coordinator_origins_verified"])
         self.assertEqual(report["receipt_sha256"], verified["receipt_sha256"])
 
+    def test_multi_host_wrapper_accepts_verified_preprovisioned_n4(self) -> None:
+        deployment = self.root / "multi-host-preprovisioned"
+        deployment.mkdir()
+        (deployment / "full-flow-deployment-binding.json").write_text(
+            json.dumps({
+                "deployment_id": "multi-host-v1",
+                "network_binding": {"mode": "physical-private-network"},
+                "service_bindings": [
+                    {
+                        "service_contract_id": "N7.execution-compute",
+                        "base_url": "http://10.70.0.17:8780",
+                    },
+                    {
+                        "service_contract_id": "N8.execution-compute",
+                        "base_url": "http://10.70.0.18:8780",
+                    },
+                ],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        output = self.root / "multi-host-preprovisioned-smoke"
+        executor = RecordingExecutor()
+        source_kwargs = {
+            "compose_overlay_dir": self.root / "compose-overlay",
+            "service_bootstrap_dir": self.root / "service-bootstrap",
+            "provisioning_catalog_dir": self.root / "provisioning",
+            "n4_package_dir": self.root / "n4-package",
+        }
+        with mock.patch(
+            "pathfinder.simulator.full_flow_local_semantic_smoke."
+            "verify_full_flow_deployment_binding",
+            return_value={
+                "status": "VERIFIED",
+                "backend": "multi-host-private-network",
+                "deployment_id": "multi-host-v1",
+                "binding_sha256": "8" * 64,
+            },
+        ):
+            report = run_full_flow_semantic_smokes(
+                self.source,
+                self.n4_gate,
+                deployment,
+                self.root / "logical",
+                self.root / "scenario.json",
+                self.root / "container-plan",
+                self.root / "artifact-bindings",
+                run_id="multi-host-preprovisioned-v1",
+                executor=executor,
+                output_dir=output,
+                **source_kwargs,
+            )
+            verified = verify_full_flow_semantic_smokes(
+                output,
+                local_semantic_admission_dir=self.source,
+                n4_serve_gate_dir=self.n4_gate,
+                deployment_binding_dir=deployment,
+                logical_route_dir=self.root / "logical",
+                scenario_path=self.root / "scenario.json",
+                container_plan_dir=self.root / "container-plan",
+                artifact_binding_dir=self.root / "artifact-bindings",
+                **source_kwargs,
+            )
+
+        self.assertEqual(list(CASES), [case for case, _ in executor.calls])
+        self.assertEqual("preprovisioned-snapshot", report["n4_serve_gate_kind"])
+        self.assertEqual(report["receipt_sha256"], verified["receipt_sha256"])
+
     def test_multi_host_wrapper_rejects_coordinator_drift(self) -> None:
         deployment = self.root / "drifted-deployment"
         deployment.mkdir()

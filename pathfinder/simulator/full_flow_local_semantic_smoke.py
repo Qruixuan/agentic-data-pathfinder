@@ -1262,7 +1262,11 @@ def run_full_flow_semantic_smokes(
     run_id: str,
     executor: SemanticTrialExecutor,
     output_dir: str | Path,
-    n4_live_gate_sources: N4LiveServeGateSources,
+    n4_live_gate_sources: N4LiveServeGateSources | None = None,
+    compose_overlay_dir: str | Path | None = None,
+    service_bootstrap_dir: str | Path | None = None,
+    provisioning_catalog_dir: str | Path | None = None,
+    n4_package_dir: str | Path | None = None,
     one_case_plan_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run the same source-bound ten cases on a multi-host deployment."""
@@ -1274,22 +1278,43 @@ def run_full_flow_semantic_smokes(
         scenario_path=scenario_path,
         container_plan_dir=container_plan_dir,
     )
-    _require(
-        n4_live_gate_sources is not None,
-        "multi-host semantic smoke requires a live N4 serve gate",
-    )
+    if n4_live_gate_sources is None:
+        _require(
+            all(
+                value is not None
+                for value in (
+                    compose_overlay_dir,
+                    service_bootstrap_dir,
+                    provisioning_catalog_dir,
+                    n4_package_dir,
+                )
+            ),
+            "multi-host preprovisioned N4 gate sources are incomplete",
+        )
     report = run_full_flow_local_semantic_smokes(
         local_semantic_admission_dir,
         n4_serve_gate_dir,
-        deployment_binding_dir,
-        deployment_binding_dir,
+        (
+            deployment_binding_dir
+            if compose_overlay_dir is None
+            else compose_overlay_dir
+        ),
+        (
+            deployment_binding_dir
+            if service_bootstrap_dir is None
+            else service_bootstrap_dir
+        ),
         deployment_binding_dir,
         logical_route_dir,
         scenario_path,
         container_plan_dir,
+        (
+            artifact_binding_dir
+            if provisioning_catalog_dir is None
+            else provisioning_catalog_dir
+        ),
         artifact_binding_dir,
-        artifact_binding_dir,
-        artifact_binding_dir,
+        artifact_binding_dir if n4_package_dir is None else n4_package_dir,
         run_id=run_id,
         executor=executor,
         output_dir=output_dir,
@@ -1309,7 +1334,11 @@ def verify_full_flow_semantic_smokes(
     scenario_path: str | Path,
     container_plan_dir: str | Path,
     artifact_binding_dir: str | Path,
-    n4_live_gate_sources: N4LiveServeGateSources,
+    n4_live_gate_sources: N4LiveServeGateSources | None = None,
+    compose_overlay_dir: str | Path | None = None,
+    service_bootstrap_dir: str | Path | None = None,
+    provisioning_catalog_dir: str | Path | None = None,
+    n4_package_dir: str | Path | None = None,
     one_case_plan_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Verify a ten-case receipt against its multi-host deployment."""
@@ -1321,23 +1350,48 @@ def verify_full_flow_semantic_smokes(
         scenario_path=scenario_path,
         container_plan_dir=container_plan_dir,
     )
-    _require(
-        n4_live_gate_sources is not None,
-        "multi-host semantic smoke requires a live N4 serve gate",
-    )
+    if n4_live_gate_sources is None:
+        _require(
+            all(
+                value is not None
+                for value in (
+                    compose_overlay_dir,
+                    service_bootstrap_dir,
+                    provisioning_catalog_dir,
+                    n4_package_dir,
+                )
+            ),
+            "multi-host preprovisioned N4 gate sources are incomplete",
+        )
     report = verify_full_flow_local_semantic_smokes(
         smoke_dir,
         local_semantic_admission_dir=local_semantic_admission_dir,
         n4_serve_gate_dir=n4_serve_gate_dir,
-        compose_overlay_dir=deployment_binding_dir,
-        service_bootstrap_dir=deployment_binding_dir,
+        compose_overlay_dir=(
+            deployment_binding_dir
+            if compose_overlay_dir is None
+            else compose_overlay_dir
+        ),
+        service_bootstrap_dir=(
+            deployment_binding_dir
+            if service_bootstrap_dir is None
+            else service_bootstrap_dir
+        ),
         deployment_binding_dir=deployment_binding_dir,
         logical_route_dir=logical_route_dir,
         scenario_path=scenario_path,
         container_plan_dir=container_plan_dir,
-        provisioning_catalog_dir=artifact_binding_dir,
+        provisioning_catalog_dir=(
+            artifact_binding_dir
+            if provisioning_catalog_dir is None
+            else provisioning_catalog_dir
+        ),
         artifact_binding_dir=artifact_binding_dir,
-        n4_package_dir=artifact_binding_dir,
+        n4_package_dir=(
+            artifact_binding_dir
+            if n4_package_dir is None
+            else n4_package_dir
+        ),
         n4_live_gate_sources=n4_live_gate_sources,
         one_case_plan_dir=one_case_plan_dir,
     )

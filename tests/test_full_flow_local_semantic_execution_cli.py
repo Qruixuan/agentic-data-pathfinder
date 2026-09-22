@@ -277,6 +277,64 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
                 verify.call_args.kwargs["deployment_binding_dir"],
             )
 
+    def test_multi_host_smoke_forwards_preprovisioned_gate_sources(self) -> None:
+        sources = [
+            "--local-semantic-admission-dir",
+            "local-admission",
+            "--n4-serve-gate-dir",
+            "n4-gate",
+            "--deployment-binding-dir",
+            "multi-host-deployment",
+            "--logical-plan-dir",
+            "logical-routes",
+            "--scenario",
+            "scenario.json",
+            "--container-plan-dir",
+            "container-plan",
+            "--artifact-binding-dir",
+            "artifact-bindings",
+            "--compose-overlay-dir",
+            "compose-overlay",
+            "--service-bootstrap-dir",
+            "service-bootstrap",
+            "--provisioning-catalog-dir",
+            "provisioning-catalog",
+            "--n4-package-dir",
+            "n4-package",
+        ]
+        context = mock.MagicMock()
+        context.__enter__.return_value = object()
+        context.__exit__.return_value = False
+        with (
+            mock.patch(
+                "pathfinder.cli._local_semantic_flowmesh_executor",
+                return_value=context,
+            ),
+            mock.patch(
+                "pathfinder.simulator.full_flow_local_semantic_smoke."
+                "run_full_flow_semantic_smokes",
+                return_value={"status": "VERIFIED"},
+            ) as run,
+        ):
+            status, payload = self._invoke([
+                "run-simulator-full-flow-semantic-smokes",
+                *sources,
+                "--run-id",
+                "preprovisioned-v1",
+                "--output-dir",
+                "smokes",
+            ])
+        self.assertEqual(0, status)
+        self.assertEqual("VERIFIED", payload["status"])
+        self.assertIsNone(run.call_args.kwargs["n4_live_gate_sources"])
+        self.assertEqual(
+            Path("compose-overlay"),
+            run.call_args.kwargs["compose_overlay_dir"],
+        )
+        self.assertEqual(
+            Path("n4-package"), run.call_args.kwargs["n4_package_dir"]
+        )
+
     def test_live_smoke_refuses_a_bare_boolean_instead_of_n4_gate_sources(
         self,
     ) -> None:

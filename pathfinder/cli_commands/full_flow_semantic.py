@@ -398,7 +398,14 @@ def register_full_flow_semantic_commands(
         _add_required_path(command, "--scenario")
         _add_required_path(command, "--container-plan-dir")
         _add_required_path(command, "--artifact-binding-dir")
-        _add_required_path(command, "--n4-live-gate-sources")
+        command.add_argument("--n4-live-gate-sources", type=Path)
+        for flag in (
+            "compose-overlay-dir",
+            "service-bootstrap-dir",
+            "provisioning-catalog-dir",
+            "n4-package-dir",
+        ):
+            command.add_argument("--" + flag, type=Path)
 
     semantic_smoke_run = subcommands.add_parser(
         "run-simulator-full-flow-semantic-smokes",
@@ -984,6 +991,16 @@ def dispatch_full_flow_semantic_command(
         n4_live_gate_sources = load_n4_live_gate_sources(
             args.n4_live_gate_sources
         )
+        preprovisioned_gate_sources = {
+            name: value
+            for name, value in {
+                "compose_overlay_dir": args.compose_overlay_dir,
+                "service_bootstrap_dir": args.service_bootstrap_dir,
+                "provisioning_catalog_dir": args.provisioning_catalog_dir,
+                "n4_package_dir": args.n4_package_dir,
+            }.items()
+            if value is not None
+        }
         with local_semantic_flowmesh_executor(
             args.local_semantic_admission_dir,
             run_id=args.run_id,
@@ -1003,6 +1020,7 @@ def dispatch_full_flow_semantic_command(
                 executor=executor,
                 output_dir=args.output_dir,
                 n4_live_gate_sources=n4_live_gate_sources,
+                **preprovisioned_gate_sources,
                 **(
                     {}
                     if args.one_case_plan_dir is None
@@ -1018,6 +1036,16 @@ def dispatch_full_flow_semantic_command(
         n4_live_gate_sources = load_n4_live_gate_sources(
             args.n4_live_gate_sources
         )
+        preprovisioned_gate_sources = {
+            name: value
+            for name, value in {
+                "compose_overlay_dir": args.compose_overlay_dir,
+                "service_bootstrap_dir": args.service_bootstrap_dir,
+                "provisioning_catalog_dir": args.provisioning_catalog_dir,
+                "n4_package_dir": args.n4_package_dir,
+            }.items()
+            if value is not None
+        }
         payload = verify_full_flow_semantic_smokes(
             args.smoke_dir,
             local_semantic_admission_dir=args.local_semantic_admission_dir,
@@ -1028,6 +1056,7 @@ def dispatch_full_flow_semantic_command(
             container_plan_dir=args.container_plan_dir,
             artifact_binding_dir=args.artifact_binding_dir,
             n4_live_gate_sources=n4_live_gate_sources,
+            **preprovisioned_gate_sources,
             **(
                 {}
                 if args.one_case_plan_dir is None
@@ -1047,6 +1076,16 @@ def dispatch_full_flow_semantic_command(
         n4_live_gate_sources = load_n4_live_gate_sources(
             args.n4_live_gate_sources
         )
+        preprovisioned_gate_sources = {
+            name: value
+            for name, value in {
+                "compose_overlay_dir": args.compose_overlay_dir,
+                "service_bootstrap_dir": args.service_bootstrap_dir,
+                "provisioning_catalog_dir": args.provisioning_catalog_dir,
+                "n4_package_dir": args.n4_package_dir,
+            }.items()
+            if value is not None
+        }
 
         def execute_unit(unit, target):
             with local_semantic_flowmesh_executor(
@@ -1068,6 +1107,7 @@ def dispatch_full_flow_semantic_command(
                     executor=executor,
                     output_dir=target,
                     n4_live_gate_sources=n4_live_gate_sources,
+                    **preprovisioned_gate_sources,
                     one_case_plan_dir=unit.one_case_plan_dir,
                 )
 
@@ -1084,6 +1124,7 @@ def dispatch_full_flow_semantic_command(
                 container_plan_dir=args.container_plan_dir,
                 artifact_binding_dir=args.artifact_binding_dir,
                 n4_live_gate_sources=n4_live_gate_sources,
+                **preprovisioned_gate_sources,
                 one_case_plan_dir=unit.one_case_plan_dir,
             )
 
@@ -1108,6 +1149,16 @@ def dispatch_full_flow_semantic_command(
         n4_live_gate_sources = load_n4_live_gate_sources(
             args.n4_live_gate_sources
         )
+        preprovisioned_gate_sources = {
+            name: value
+            for name, value in {
+                "compose_overlay_dir": args.compose_overlay_dir,
+                "service_bootstrap_dir": args.service_bootstrap_dir,
+                "provisioning_catalog_dir": args.provisioning_catalog_dir,
+                "n4_package_dir": args.n4_package_dir,
+            }.items()
+            if value is not None
+        }
 
         def verify_unit(unit, target):
             return verify_full_flow_semantic_smokes(
@@ -1122,6 +1173,7 @@ def dispatch_full_flow_semantic_command(
                 container_plan_dir=args.container_plan_dir,
                 artifact_binding_dir=args.artifact_binding_dir,
                 n4_live_gate_sources=n4_live_gate_sources,
+                **preprovisioned_gate_sources,
                 one_case_plan_dir=unit.one_case_plan_dir,
             )
 
