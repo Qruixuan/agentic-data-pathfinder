@@ -21,6 +21,10 @@ from .cli_commands.full_flow_w4 import (
     dispatch_full_flow_w4_command,
     register_full_flow_w4_commands,
 )
+from .cli_commands.rsi_exam import (
+    dispatch_rsi_exam_command,
+    register_rsi_exam_commands,
+)
 from .config import ConfigError, load_config
 from .experiment import run_pilot, run_session
 from .telemetry import JsonlTelemetryStore
@@ -2218,6 +2222,7 @@ def _parser() -> argparse.ArgumentParser:
         subcommands,
         positive_finite_float=_positive_finite_float,
     )
+    register_rsi_exam_commands(subcommands)
 
     n3_raw_build = subcommands.add_parser(
         "build-simulator-n3-raw-data-plane",
@@ -4582,6 +4587,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if full_flow_deployment_status is not None:
             return full_flow_deployment_status
+        rsi_exam_status = dispatch_rsi_exam_command(
+            args,
+            print_payload=_print_payload,
+        )
+        if rsi_exam_status is not None:
+            return rsi_exam_status
         if args.command == "build-simulator-n3-raw-data-plane":
             from .simulator.raw_cold_data_plane import (
                 build_raw_cold_data_plane_package_from_manifest,
