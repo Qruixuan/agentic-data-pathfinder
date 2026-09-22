@@ -337,8 +337,8 @@ def _normalise_artifact_bindings(
                 _identifier(representation_id, "representation_id")
             )
     _require(
-        len(expected_representations) == 4,
-        "logical route package does not contain four artifact objects",
+        bool(expected_representations),
+        "logical route package does not contain artifact objects",
     )
 
     by_logical_object: dict[str, dict[str, Any]] = {}
@@ -509,8 +509,8 @@ def _normalise_public_tasks(
             f"logical workload maps to multiple objects: {workload_id}",
         )
     _require(
-        len(expected_workloads) == 4,
-        "logical route package does not contain four workloads",
+        bool(expected_workloads),
+        "logical route package does not contain workloads",
     )
 
     by_workload: dict[str, dict[str, Any]] = {}
@@ -611,8 +611,16 @@ def _load_verified_logical_source(
         verified.get("plan_sha256") == plan.get("plan_sha256"),
         "logical route verification returned a different plan digest",
     )
-    _require(len(trials) == 64, "logical route package is not 64 trials")
-    _require(len(stages) > 64, "logical route stage graph is incomplete")
+    dimensions = plan.get("matrix_dimensions")
+    _require(isinstance(dimensions, Mapping), "matrix dimensions are invalid")
+    trial_count = dimensions.get("trial_count")
+    _require(
+        isinstance(trial_count, int)
+        and trial_count > 0
+        and len(trials) == trial_count,
+        "logical route trial count disagrees with its dimensions",
+    )
+    _require(len(stages) > len(trials), "logical route stage graph is incomplete")
     _assert_public_endpoint_free([plan, catalog, stages, trials], "logical source")
     return plan, catalog, stages, trials
 
@@ -826,6 +834,14 @@ def _semantic_documents(
         TRIALS_NAME: _sha256(trial_bytes),
     }
     route_counts = Counter(row["route_family"] for row in semantic_trials)
+    logical_dimensions = logical_plan.get("matrix_dimensions")
+    _require(
+        isinstance(logical_dimensions, Mapping),
+        "logical matrix dimensions are invalid",
+    )
+    workload_classes = logical_dimensions["workload_classes"]
+    design_ids = logical_dimensions["design_ids"]
+    repetitions = logical_dimensions["repetitions"]
     plan: dict[str, Any] = {
         "schema_version": SEMANTIC_MATRIX_PLAN_SCHEMA_VERSION,
         "status": "FROZEN_ENDPOINT_FREE_SEMANTIC_MATRIX",
@@ -836,10 +852,10 @@ def _semantic_documents(
         "source_bindings": source_bindings,
         "source_binding_sha256": _sha256(_canonical_bytes(source_bindings)),
         "matrix_dimensions": {
-            "workload_classes": sorted(_WORKLOAD_CLASSES),
-            "design_ids": sorted(_DESIGN_IDS),
-            "repetitions": 2,
-            "matrix_cell_count": 32,
+            "workload_classes": workload_classes,
+            "design_ids": design_ids,
+            "repetitions": repetitions,
+            "matrix_cell_count": len(workload_classes) * len(design_ids),
             "trial_count": len(semantic_trials),
         },
         "coverage_summary": {
@@ -1028,13 +1044,29 @@ def _verify_published(root: Path) -> dict[str, Any]:
         "semantic matrix source binding digest mismatch",
     )
     dimensions = plan.get("matrix_dimensions")
+    workload_classes = (
+        dimensions.get("workload_classes")
+        if isinstance(dimensions, dict)
+        else None
+    )
+    design_ids = (
+        dimensions.get("design_ids")
+        if isinstance(dimensions, dict)
+        else None
+    )
     _require(
         isinstance(dimensions, dict)
-        and dimensions.get("workload_classes") == sorted(_WORKLOAD_CLASSES)
-        and dimensions.get("design_ids") == sorted(_DESIGN_IDS)
-        and dimensions.get("repetitions") == 2
-        and dimensions.get("matrix_cell_count") == 32
-        and dimensions.get("trial_count") == 64,
+        and isinstance(workload_classes, list)
+        and bool(workload_classes)
+        and workload_classes == sorted(set(workload_classes))
+        and set(workload_classes) <= _WORKLOAD_CLASSES
+        and design_ids == sorted(_DESIGN_IDS)
+        and isinstance(dimensions.get("repetitions"), int)
+        and dimensions["repetitions"] > 0
+        and dimensions.get("matrix_cell_count")
+        == len(workload_classes) * len(design_ids)
+        and isinstance(dimensions.get("trial_count"), int)
+        and dimensions["trial_count"] > 0,
         "semantic matrix dimensions changed",
     )
     boundary = plan.get("execution_boundary")
@@ -1224,7 +1256,10 @@ def _verify_published(root: Path) -> dict[str, Any]:
                 )
             seen.add(row["stage_key"])
 
-    _require(len(trials) == 64, "semantic trial count changed")
+    _require(
+        len(trials) == dimensions["trial_count"],
+        "semantic trial count changed",
+    )
     trial_keys: set[str] = set()
     cells: set[tuple[str, str]] = set()
     route_counts: Counter[str] = Counter()
@@ -1309,10 +1344,10 @@ def _verify_published(root: Path) -> dict[str, Any]:
         cells
         == {
             (workload_class, design_id)
-            for workload_class in _WORKLOAD_CLASSES
+            for workload_class in workload_classes
             for design_id in _DESIGN_IDS
         },
-        "semantic matrix 4x8 coverage changed",
+        "semantic matrix workload-by-design coverage changed",
     )
     _require(
         set(route_counts) == _ROUTE_FAMILIES
@@ -1436,8 +1471,8 @@ def verify_full_flow_semantic_matrix(
         "artifact_binding_set_id": plan["artifact_binding_set_id"],
         "plan_sha256": plan["plan_sha256"],
         "source_binding_sha256": plan["source_binding_sha256"],
-        "matrix_cell_count": 32,
-        "trial_count": 64,
+        "matrix_cell_count": plan["matrix_dimensions"]["matrix_cell_count"],
+        "trial_count": plan["matrix_dimensions"]["trial_count"],
         "semantic_stage_count": plan["coverage_summary"][
             "semantic_stage_count"
         ],

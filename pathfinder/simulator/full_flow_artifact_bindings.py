@@ -290,10 +290,11 @@ def _documents(
             required_representations[logical_object_id].add(
                 _identifier(representation_id, "representation_id")
             )
-    _require(len(expected) == 4, "logical route package must contain four workloads")
+    _require(bool(expected), "logical route package must contain workloads")
     _require(
-        len({item["logical_object_id"] for item in expected.values()}) == 4,
-        "logical workloads must map one-to-one to four logical objects",
+        len({item["logical_object_id"] for item in expected.values()})
+        == len(expected),
+        "logical workloads must map one-to-one to logical objects",
     )
 
     tasks = public.get("tasks")
@@ -315,7 +316,7 @@ def _documents(
         expected[workload_id]["artifact_object_id"] = object_id
     _require(
         set(public_by_workload) == set(expected),
-        "public task plane does not exactly cover the four logical workloads",
+        "public task plane does not exactly cover the logical workloads",
     )
 
     artifacts = _artifact_rows(n3_report, n4_report)

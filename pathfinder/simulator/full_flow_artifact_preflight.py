@@ -294,7 +294,18 @@ def _verify_source(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "semantic admission schema or status changed",
     )
     trials = _strict_jsonl(root / SOURCE_TRIALS_NAME, "bound semantic trials")
-    _require(len(trials) == 64, "semantic admission does not contain 64 trials")
+    dimensions = admission.get("matrix_dimensions")
+    expected_trial_count = (
+        dimensions.get("trial_count")
+        if isinstance(dimensions, Mapping)
+        else 64
+    )
+    _require(
+        isinstance(expected_trial_count, int)
+        and expected_trial_count > 0
+        and len(trials) == expected_trial_count,
+        "semantic admission trial count disagrees with its dimensions",
+    )
     return admission, trials
 
 

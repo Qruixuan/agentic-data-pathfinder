@@ -1444,7 +1444,7 @@ def verify_full_flow_local_semantic_runtime_package(
         "public_task_set_sha256": admission["public_oracle_binding"][
             "public_task_set_sha256"
         ],
-        "trial_count": 64,
+        "trial_count": admission["matrix_dimensions"]["trial_count"],
         "representative_smoke_count": len(_SMOKE_CASES),
         "n1_private_package_read": False,
         "source_binding_checked_offline": False,
@@ -1557,7 +1557,7 @@ def promote_full_flow_local_semantic_execution_admission(
         "promotion_id": admission["promotion_id"],
         "admission_sha256": admission["admission_sha256"],
         "semantics_mode": admission["semantics_mode"],
-        "trial_count": 64,
+        "trial_count": admission["matrix_dimensions"]["trial_count"],
         "representative_smoke_count": len(_SMOKE_CASES),
         "trial_templates_authorized": True,
         "full_matrix_runtime_gate_satisfied": False,
@@ -1626,7 +1626,7 @@ def verify_full_flow_local_semantic_execution_admission(
         "promotion_id": admission["promotion_id"],
         "admission_sha256": admission["admission_sha256"],
         "semantics_mode": admission["semantics_mode"],
-        "trial_count": 64,
+        "trial_count": admission["matrix_dimensions"]["trial_count"],
         "representative_smoke_count": len(_SMOKE_CASES),
         "source_binding_checked": True,
         "legacy_admission_unchanged": True,

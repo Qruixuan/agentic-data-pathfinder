@@ -442,15 +442,27 @@ def _trial_gap_ids(trial: Mapping[str, Any]) -> list[str]:
 def _representative_smokes(
     trials: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    _require(bool(trials), "semantic trials are empty")
+    representative_workload_id = str(min(
+        trials,
+        key=lambda row: int(row["order_index"]),
+    )["workload_id"])
     by_cell = {
-        (row["workload_class"], row["design_id"], row["repetition"]): row
+        (row["workload_id"], row["design_id"], row["repetition"]): row
         for row in trials
     }
     selections = [
-        ("n7-raw", ("W4", "D0", 0), "raw", "N7", None, None),
+        (
+            "n7-raw",
+            (representative_workload_id, "D0", 0),
+            "raw",
+            "N7",
+            None,
+            None,
+        ),
         (
             "n7-indexed-raw",
-            ("W4", "D1", 0),
+            (representative_workload_id, "D1", 0),
             "indexed-raw",
             "N7",
             None,
@@ -458,7 +470,7 @@ def _representative_smokes(
         ),
         (
             "n7-remote-derived",
-            ("W4", "D2", 0),
+            (representative_workload_id, "D2", 0),
             "remote-derived",
             "N7",
             None,
@@ -466,7 +478,7 @@ def _representative_smokes(
         ),
         (
             "n7-cache-miss",
-            ("W4", "D3", 0),
+            (representative_workload_id, "D3", 0),
             "local-cache-derived",
             "N7",
             "miss",
@@ -474,16 +486,23 @@ def _representative_smokes(
         ),
         (
             "n7-cache-hit",
-            ("W4", "D3", 1),
+            (representative_workload_id, "D3", 1),
             "local-cache-derived",
             "N7",
             "hit",
-            ("W4", "D3", 0),
+            (representative_workload_id, "D3", 0),
         ),
-        ("n8-raw", ("W4", "D4", 0), "raw", "N8", None, None),
+        (
+            "n8-raw",
+            (representative_workload_id, "D4", 0),
+            "raw",
+            "N8",
+            None,
+            None,
+        ),
         (
             "n8-indexed-raw",
-            ("W4", "D5", 0),
+            (representative_workload_id, "D5", 0),
             "indexed-raw",
             "N8",
             None,
@@ -491,7 +510,7 @@ def _representative_smokes(
         ),
         (
             "n8-remote-derived",
-            ("W4", "D6", 0),
+            (representative_workload_id, "D6", 0),
             "remote-derived",
             "N8",
             None,
@@ -499,7 +518,7 @@ def _representative_smokes(
         ),
         (
             "n8-cache-miss",
-            ("W4", "D7", 0),
+            (representative_workload_id, "D7", 0),
             "local-cache-derived",
             "N8",
             "miss",
@@ -507,11 +526,11 @@ def _representative_smokes(
         ),
         (
             "n8-cache-hit",
-            ("W4", "D7", 1),
+            (representative_workload_id, "D7", 1),
             "local-cache-derived",
             "N8",
             "hit",
-            ("W4", "D7", 0),
+            (representative_workload_id, "D7", 0),
         ),
     ]
     rows: list[dict[str, Any]] = []
@@ -540,6 +559,7 @@ def _representative_smokes(
             "schema_version": SMOKE_SELECTION_SCHEMA_VERSION,
             "case_id": case_id,
             "trial_key": trial["trial_key"],
+            "workload_id": trial["workload_id"],
             "workload_class": trial["workload_class"],
             "design_id": trial["design_id"],
             "repetition": trial["repetition"],
@@ -768,9 +788,22 @@ def _documents(
         }
         bound_trials.append(row)
 
-    _require(len(bound_trials) == 64, "bound semantic matrix is not 64 trials")
+    workload_ids = sorted({row["workload_id"] for row in bound_trials})
+    design_ids = sorted({row["design_id"] for row in bound_trials})
+    repetitions = sorted({row["repetition"] for row in bound_trials})
+    expected_trial_count = (
+        len(workload_ids) * len(design_ids) * len(repetitions)
+    )
     _require(
-        [row["order_index"] for row in bound_trials] == list(range(64)),
+        bool(workload_ids)
+        and design_ids == [f"D{index}" for index in range(8)]
+        and repetitions == list(range(len(repetitions)))
+        and len(bound_trials) == expected_trial_count,
+        "bound semantic matrix is not a complete workload-design-repetition grid",
+    )
+    _require(
+        [row["order_index"] for row in bound_trials]
+        == list(range(expected_trial_count)),
         "bound semantic trials are not in frozen order",
     )
     smokes = _representative_smokes(bound_trials)
@@ -855,11 +888,11 @@ def _documents(
         "source_bindings": source_bindings,
         "source_binding_sha256": _sha256(_canonical_bytes(source_bindings)),
         "matrix_dimensions": {
-            "workload_count": 4,
-            "design_count": 8,
-            "repetitions": 2,
-            "matrix_cell_count": 32,
-            "trial_count": 64,
+            "workload_count": len(workload_ids),
+            "design_count": len(design_ids),
+            "repetitions": len(repetitions),
+            "matrix_cell_count": len(workload_ids) * len(design_ids),
+            "trial_count": len(bound_trials),
             "semantic_stage_count": len(bound_stages),
         },
         "route_family_trial_counts": dict(sorted(Counter(
@@ -962,7 +995,14 @@ def _verify_files(root: Path) -> dict[str, Any]:
     stages = _read_jsonl(root / STAGES_NAME, "bound semantic stages")
     smokes = _read_jsonl(root / SMOKES_NAME, "semantic smoke selection")
     gaps = _read_json(root / GAPS_NAME, "semantic runtime gaps")
-    _require(len(trials) == 64, "semantic execution trial count changed")
+    dimensions = admission.get("matrix_dimensions")
+    _require(
+        isinstance(dimensions, dict)
+        and isinstance(dimensions.get("trial_count"), int)
+        and dimensions["trial_count"] > 0
+        and len(trials) == dimensions["trial_count"],
+        "semantic execution trial count changed",
+    )
     _require(len(smokes) == 10, "semantic smoke selection count changed")
     _require(
         {row.get("case_id") for row in smokes}
@@ -1078,7 +1118,7 @@ def freeze_full_flow_semantic_execution_admission(
         "status": admission["status"],
         "admission_id": admission["admission_id"],
         "admission_sha256": admission["admission_sha256"],
-        "trial_count": 64,
+        "trial_count": admission["matrix_dimensions"]["trial_count"],
         "semantic_stage_count": admission["matrix_dimensions"][
             "semantic_stage_count"
         ],
@@ -1145,7 +1185,7 @@ def verify_full_flow_semantic_execution_admission(
         "status": "VERIFIED_BLOCKED",
         "admission_id": admission["admission_id"],
         "admission_sha256": admission["admission_sha256"],
-        "trial_count": 64,
+        "trial_count": admission["matrix_dimensions"]["trial_count"],
         "semantic_stage_count": admission["matrix_dimensions"][
             "semantic_stage_count"
         ],
