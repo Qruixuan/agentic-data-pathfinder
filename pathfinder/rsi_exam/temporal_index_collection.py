@@ -417,6 +417,17 @@ def _raw_cache_path(
     )
 
 
+def _next_raw_attempt(cache_root: Path, window: Mapping[str, Any]) -> int:
+    directory = cache_root / "raw" / str(window["object_id"])
+    prefix = f"{int(window['ordinal']):02d}.attempt-"
+    attempts = []
+    for path in directory.glob(prefix + "*.json"):
+        suffix = path.stem.removeprefix(prefix)
+        if suffix.isdigit():
+            attempts.append(int(suffix))
+    return max(attempts, default=0) + 1
+
+
 def _load_valid_caption(
     path: Path,
     *,
@@ -551,7 +562,9 @@ def materialize_formal_temporal_captions(
         request_count = 0
         failure_count = 0
         usage = None
-        for attempt in range(1, max_attempts_per_window + 1):
+        first_attempt = _next_raw_attempt(cache_root, window)
+        for offset in range(max_attempts_per_window):
+            attempt = first_attempt + offset
             request = urllib.request.Request(
                 base_url.rstrip("/") + "/chat/completions",
                 data=body,

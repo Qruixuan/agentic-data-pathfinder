@@ -235,10 +235,14 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
         self.assertGreaterEqual(verified["window_count"], 6)
 
         captions = self.root / "captions"
+        cache = self.root / "cache"
+        prior = cache / "raw" / "video-causal" / "00.attempt-01.json"
+        prior.parent.mkdir(parents=True)
+        prior.write_text("{}\n", encoding="utf-8", newline="\n")
         receipt = materialize_formal_temporal_captions(
             self.prep,
             output_dir=captions,
-            cache_dir=self.root / "cache",
+            cache_dir=cache,
             package_id="formal-index-test-captions-v1",
             model_id="caption-model",
             base_url="https://provider.invalid/v1",
@@ -249,6 +253,10 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
         self.assertEqual(receipt["caption_count"], receipt[
             "provider_request_count_this_run"
         ])
+        self.assertTrue(
+            (cache / "raw" / "video-causal" / "00.attempt-02.json").is_file()
+        )
+        self.assertTrue(prior.is_file())
         self.assertEqual(
             "VERIFIED_QUESTION_INDEPENDENT_TEMPORAL_CAPTIONS",
             verify_formal_temporal_caption_package(captions, self.prep)[
