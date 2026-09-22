@@ -1265,6 +1265,7 @@ def run_full_flow_semantic_smokes(
     n4_live_gate_sources: N4LiveServeGateSources | None = None,
     compose_overlay_dir: str | Path | None = None,
     service_bootstrap_dir: str | Path | None = None,
+    n4_gate_deployment_binding_dir: str | Path | None = None,
     provisioning_catalog_dir: str | Path | None = None,
     n4_package_dir: str | Path | None = None,
     one_case_plan_dir: str | Path | None = None,
@@ -1304,7 +1305,11 @@ def run_full_flow_semantic_smokes(
             if service_bootstrap_dir is None
             else service_bootstrap_dir
         ),
-        deployment_binding_dir,
+        (
+            deployment_binding_dir
+            if n4_gate_deployment_binding_dir is None
+            else n4_gate_deployment_binding_dir
+        ),
         logical_route_dir,
         scenario_path,
         container_plan_dir,
@@ -1337,6 +1342,7 @@ def verify_full_flow_semantic_smokes(
     n4_live_gate_sources: N4LiveServeGateSources | None = None,
     compose_overlay_dir: str | Path | None = None,
     service_bootstrap_dir: str | Path | None = None,
+    n4_gate_deployment_binding_dir: str | Path | None = None,
     provisioning_catalog_dir: str | Path | None = None,
     n4_package_dir: str | Path | None = None,
     one_case_plan_dir: str | Path | None = None,
@@ -1377,7 +1383,11 @@ def verify_full_flow_semantic_smokes(
             if service_bootstrap_dir is None
             else service_bootstrap_dir
         ),
-        deployment_binding_dir=deployment_binding_dir,
+        deployment_binding_dir=(
+            deployment_binding_dir
+            if n4_gate_deployment_binding_dir is None
+            else n4_gate_deployment_binding_dir
+        ),
         logical_route_dir=logical_route_dir,
         scenario_path=scenario_path,
         container_plan_dir=container_plan_dir,

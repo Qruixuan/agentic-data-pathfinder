@@ -297,6 +297,8 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
             "compose-overlay",
             "--service-bootstrap-dir",
             "service-bootstrap",
+            "--n4-gate-deployment-binding-dir",
+            "n4-gate-deployment",
             "--provisioning-catalog-dir",
             "provisioning-catalog",
             "--n4-package-dir",
@@ -333,6 +335,10 @@ class FullFlowLocalSemanticExecutionCliTest(unittest.TestCase):
         )
         self.assertEqual(
             Path("n4-package"), run.call_args.kwargs["n4_package_dir"]
+        )
+        self.assertEqual(
+            Path("n4-gate-deployment"),
+            run.call_args.kwargs["n4_gate_deployment_binding_dir"],
         )
 
     def test_live_smoke_refuses_a_bare_boolean_instead_of_n4_gate_sources(

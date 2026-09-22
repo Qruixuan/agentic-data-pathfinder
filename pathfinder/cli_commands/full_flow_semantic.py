@@ -402,6 +402,7 @@ def register_full_flow_semantic_commands(
         for flag in (
             "compose-overlay-dir",
             "service-bootstrap-dir",
+            "n4-gate-deployment-binding-dir",
             "provisioning-catalog-dir",
             "n4-package-dir",
         ):
@@ -996,6 +997,9 @@ def dispatch_full_flow_semantic_command(
             for name, value in {
                 "compose_overlay_dir": args.compose_overlay_dir,
                 "service_bootstrap_dir": args.service_bootstrap_dir,
+                "n4_gate_deployment_binding_dir": (
+                    args.n4_gate_deployment_binding_dir
+                ),
                 "provisioning_catalog_dir": args.provisioning_catalog_dir,
                 "n4_package_dir": args.n4_package_dir,
             }.items()
@@ -1041,6 +1045,9 @@ def dispatch_full_flow_semantic_command(
             for name, value in {
                 "compose_overlay_dir": args.compose_overlay_dir,
                 "service_bootstrap_dir": args.service_bootstrap_dir,
+                "n4_gate_deployment_binding_dir": (
+                    args.n4_gate_deployment_binding_dir
+                ),
                 "provisioning_catalog_dir": args.provisioning_catalog_dir,
                 "n4_package_dir": args.n4_package_dir,
             }.items()
@@ -1081,6 +1088,9 @@ def dispatch_full_flow_semantic_command(
             for name, value in {
                 "compose_overlay_dir": args.compose_overlay_dir,
                 "service_bootstrap_dir": args.service_bootstrap_dir,
+                "n4_gate_deployment_binding_dir": (
+                    args.n4_gate_deployment_binding_dir
+                ),
                 "provisioning_catalog_dir": args.provisioning_catalog_dir,
                 "n4_package_dir": args.n4_package_dir,
             }.items()
@@ -1154,6 +1164,9 @@ def dispatch_full_flow_semantic_command(
             for name, value in {
                 "compose_overlay_dir": args.compose_overlay_dir,
                 "service_bootstrap_dir": args.service_bootstrap_dir,
+                "n4_gate_deployment_binding_dir": (
+                    args.n4_gate_deployment_binding_dir
+                ),
                 "provisioning_catalog_dir": args.provisioning_catalog_dir,
                 "n4_package_dir": args.n4_package_dir,
             }.items()

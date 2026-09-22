@@ -615,6 +615,9 @@ class LocalSemanticSmokeTest(unittest.TestCase):
         source_kwargs = {
             "compose_overlay_dir": self.root / "compose-overlay",
             "service_bootstrap_dir": self.root / "service-bootstrap",
+            "n4_gate_deployment_binding_dir": (
+                self.root / "n4-gate-deployment"
+            ),
             "provisioning_catalog_dir": self.root / "provisioning",
             "n4_package_dir": self.root / "n4-package",
         }
@@ -656,6 +659,11 @@ class LocalSemanticSmokeTest(unittest.TestCase):
         self.assertEqual(list(CASES), [case for case, _ in executor.calls])
         self.assertEqual("preprovisioned-snapshot", report["n4_serve_gate_kind"])
         self.assertEqual(report["receipt_sha256"], verified["receipt_sha256"])
+        for call in self.n4_verifier_mock.call_args_list[-2:]:
+            self.assertEqual(
+                self.root / "n4-gate-deployment",
+                call.kwargs["deployment_binding_dir"],
+            )
 
     def test_multi_host_wrapper_rejects_coordinator_drift(self) -> None:
         deployment = self.root / "drifted-deployment"
