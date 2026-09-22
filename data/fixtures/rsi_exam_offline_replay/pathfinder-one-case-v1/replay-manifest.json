@@ -1,0 +1,73 @@
+{
+  "action_count": 8,
+  "builder_source_commit": "34ba05f15febeb167271d7c9e696ecd4331a7f42",
+  "case_count": 1,
+  "claim_boundaries": {
+    "causal_quality_claimed": false,
+    "conformance_fixture": true,
+    "eligible_for_scientific_claims": false,
+    "general_accuracy_claimed": false,
+    "general_latency_claimed": false,
+    "gpu_performance_claimed": false,
+    "reduced_source_storage_io_claimed": false
+  },
+  "credentials_recorded": false,
+  "experiment_source_commit": "59cf0ce8ff2bbee21dfc3f79bd08c3647384f657",
+  "hidden_label_values_included": false,
+  "hidden_outcomes_exposed_to_policy": false,
+  "included_baselines": [
+    "always-direct-video",
+    "always-indexed",
+    "always-derived",
+    "myopic-cost-first",
+    "amortization-aware",
+    "random-seeded"
+  ],
+  "objective": {
+    "cost_order": [
+      "total_source_bytes",
+      "total_model_input_bytes"
+    ],
+    "kind": "lexicographic-quality-then-bytes-v1",
+    "quality_constraint": "per-case minimum_success_rate",
+    "weights": null
+  },
+  "outcome_count": 10,
+  "outcome_sampling": {
+    "current_fixture": "single-observation-exact-replay",
+    "future_repetitions": "seeded-empirical-sampling",
+    "interpolation_allowed": false
+  },
+  "package_id": "pathfinder-rsi-exam-one-case-v1",
+  "runtime_requirements": {
+    "docker": false,
+    "flowmesh": false,
+    "llm": false,
+    "network": false,
+    "source_video": false,
+    "upcloud": false
+  },
+  "schema_version": "pathfinder.rsi-exam-offline-replay/v1alpha1",
+  "source_bindings": [
+    {
+      "accounting_schema_version": "pathfinder.temporal-index-v2-accounting/v1",
+      "accounting_sha256": "281092bcd4fbd1003b68d96e7f186aa08452168cef9cd5cb5608f47b5c354af8",
+      "case_id": "nextqa-val-3429509208",
+      "object_id": "nextqa-val-3429509208",
+      "run_id": "upcloud-temporal-index-v2-20260919t183037z-99c4f3df",
+      "source_sha256s_sha256": "964306446d4cb0090d5f9a9b9ba2914382d553734d8f1e1b5c8fa0d24f074f65"
+    }
+  ],
+  "splits": {
+    "development": [],
+    "fixture": [
+      "nextqa-val-3429509208"
+    ],
+    "test": [],
+    "train": []
+  },
+  "supported_modes": [
+    "independent-query",
+    "shared-dataset-sequence"
+  ]
+}
