@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextvars
 import hashlib
 import hmac
 import http.client
@@ -373,6 +374,46 @@ def _semantic_provider_token_usage(
         "cached_input_units": cached,
         "output_units": output_units,
         "total_units": input_units + output_units,
+    }
+
+
+_PROVIDER_REQUEST_UUID = re.compile(
+    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+)
+_PROVIDER_COMPLETION_ID = re.compile(r"chatcmpl-[A-Za-z0-9-]{8,120}")
+
+
+def _provider_id_digest(
+    value: Any, *, completion: bool, api_key: str,
+) -> str | None:
+    """Retain only a digest of a provider-shaped identifier, never a key."""
+    pattern = (
+        _PROVIDER_COMPLETION_ID if completion else _PROVIDER_REQUEST_UUID
+    )
+    if not isinstance(value, str) or value == api_key:
+        return None
+    if pattern.fullmatch(value) is None:
+        return None
+    return hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+def _provider_header_id_digests(
+    headers: Any, *, api_key: str,
+) -> dict[str, str | None]:
+    get = getattr(headers, "get", None)
+    if not callable(get):
+        return {
+            "header_request_id_sha256": None,
+            "header_dashscope_request_id_sha256": None,
+        }
+    return {
+        "header_request_id_sha256": _provider_id_digest(
+            get("X-Request-Id"), completion=False, api_key=api_key,
+        ),
+        "header_dashscope_request_id_sha256": _provider_id_digest(
+            get("X-DashScope-RequestId"),
+            completion=False, api_key=api_key,
+        ),
     }
 
 
@@ -1019,6 +1060,12 @@ class ContainerNodeRuntime:
         self._semantic_requests_in_flight: set[str] = set()
         self._semantic_results: dict[str, dict[str, Any]] = {}
         self._semantic_usage_journal_error_count = 0
+        self._semantic_provider_attempts: contextvars.ContextVar[
+            list[dict[str, Any]] | None
+        ] = contextvars.ContextVar(
+            f"semantic-provider-attempts-{self.runtime_epoch}",
+            default=None,
+        )
 
     def health(self) -> dict[str, Any]:
         configured = all(
@@ -1455,6 +1502,11 @@ class ContainerNodeRuntime:
                 "Accept": "application/json",
             },
         )
+        provider_attempts = (
+            self._semantic_provider_attempts.get()
+            if self.node_id == "N6" else None
+        )
+        successful_attempt: dict[str, Any] | None = None
         for attempt in range(len(_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS) + 1):
             try:
                 # This request carries the semantic provider bearer token.
@@ -1466,9 +1518,33 @@ class ContainerNodeRuntime:
                     timeout=timeout,
                 ) as response:
                     raw = response.read(_MAX_JSON_BYTES + 1)
+                    successful_attempt = {
+                        "attempt_index": attempt,
+                        "outcome": "http_response",
+                        "http_status": 200,
+                        "body_completion_id_sha256": None,
+                        "body_request_id_sha256": None,
+                        **_provider_header_id_digests(
+                            getattr(response, "headers", None),
+                            api_key=api_key,
+                        ),
+                    }
+                if provider_attempts is not None:
+                    provider_attempts.append(successful_attempt)
                 break
             except HTTPError as exc:
                 status = int(exc.code)
+                if provider_attempts is not None:
+                    provider_attempts.append({
+                        "attempt_index": attempt,
+                        "outcome": "http_error",
+                        "http_status": status,
+                        "body_completion_id_sha256": None,
+                        "body_request_id_sha256": None,
+                        **_provider_header_id_digests(
+                            exc.headers, api_key=api_key,
+                        ),
+                    })
                 provider_code, provider_type, message_sha256 = (
                     _semantic_provider_error_metadata(exc)
                 )
@@ -1486,6 +1562,16 @@ class ContainerNodeRuntime:
                         provider_message_sha256=message_sha256,
                     ) from exc
             except (URLError, TimeoutError, OSError) as exc:
+                if provider_attempts is not None:
+                    provider_attempts.append({
+                        "attempt_index": attempt,
+                        "outcome": "transport_error",
+                        "http_status": None,
+                        "body_completion_id_sha256": None,
+                        "body_request_id_sha256": None,
+                        "header_request_id_sha256": None,
+                        "header_dashscope_request_id_sha256": None,
+                    })
                 retry = attempt < len(
                     _SEMANTIC_LLM_RETRY_BACKOFF_SECONDS
                 )
@@ -1527,6 +1613,19 @@ class ContainerNodeRuntime:
         usage = _semantic_provider_token_usage(payload)
         if usage is not None and usage_sink is not None:
             usage_sink(usage)
+        if successful_attempt is not None:
+            successful_attempt["body_completion_id_sha256"] = (
+                _provider_id_digest(
+                    payload.get("id"), completion=True, api_key=api_key,
+                )
+            )
+            successful_attempt["body_request_id_sha256"] = (
+                _provider_id_digest(
+                    payload.get("request_id"),
+                    completion=False, api_key=api_key,
+                )
+            )
+            successful_attempt["outcome"] = "completed"
         return answer, reported_model
 
     def semantic_complete(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -1594,23 +1693,48 @@ class ContainerNodeRuntime:
                     break
                 self._operation_condition.wait()
 
+        provider_attempts: list[dict[str, Any]] = []
+        trace_id = uuid.uuid4().hex
+        trace_token = self._semantic_provider_attempts.set(provider_attempts)
         try:
             result = self._semantic_complete_once(request, request_sha256)
         except BaseException:
+            self._semantic_provider_attempts.reset(trace_token)
+            if provider_attempts:
+                try:
+                    self._record_semantic_provider_attempts(
+                        trace_id, request_sha256, None, provider_attempts,
+                    )
+                except (OSError, sqlite3.Error, ContainerNodeError):
+                    self._semantic_usage_journal_error_count += 1
             with self._operation_condition:
                 self._semantic_requests_in_flight.discard(request_id)
                 self._operation_condition.notify_all()
             raise
+        self._semantic_provider_attempts.reset(trace_token)
         with self._operation_condition:
             stored = dict(result)
             stored["idempotent_replay"] = False
             try:
                 self._record_semantic_provider_usage(stored)
-            except (OSError, sqlite3.Error):
+            except (OSError, sqlite3.Error, ContainerNodeError):
                 # A paid inference must not be repeated merely because the
                 # optional cost journal is unavailable. The health counter
                 # and missing row make that cost evidence incomplete.
                 self._semantic_usage_journal_error_count += 1
+            if provider_attempts:
+                try:
+                    result_sha256 = hashlib.sha256(
+                        _canonical_json_bytes(
+                            stored, "N6 semantic result",
+                        )
+                    ).hexdigest()
+                    self._record_semantic_provider_attempts(
+                        trace_id, request_sha256, result_sha256,
+                        provider_attempts,
+                    )
+                except (OSError, sqlite3.Error, ContainerNodeError):
+                    self._semantic_usage_journal_error_count += 1
             self._semantic_results[request_id] = stored
             self._semantic_requests_in_flight.discard(request_id)
             self._operation_condition.notify_all()
@@ -1679,6 +1803,92 @@ class ContainerNodeRuntime:
                     usage["cached_input_units"], usage["output_units"],
                     usage["total_units"],
                 ), "N6 provider usage journal conflicts with result")
+        finally:
+            connection.close()
+
+    def _record_semantic_provider_attempts(
+        self,
+        trace_id: str,
+        request_sha256: str,
+        result_sha256: str | None,
+        attempts: list[dict[str, Any]],
+    ) -> None:
+        """Persist hashed provider IDs and statuses outside public results."""
+        if self.node_id != "N6" or not attempts:
+            return
+        _require(
+            _SHA256.fullmatch(request_sha256) is not None
+            and (result_sha256 is None
+                 or _SHA256.fullmatch(result_sha256) is not None)
+            and re.fullmatch(r"[0-9a-f]{32}", trace_id) is not None,
+            "N6 provider trace binding is invalid",
+        )
+        fields = {
+            "attempt_index", "outcome", "http_status",
+            "body_completion_id_sha256", "body_request_id_sha256",
+            "header_request_id_sha256",
+            "header_dashscope_request_id_sha256",
+        }
+        rows = []
+        for index, attempt in enumerate(attempts):
+            _require(
+                set(attempt) == fields
+                and type(attempt["attempt_index"]) is int
+                and attempt["attempt_index"] == index
+                and attempt["outcome"] in {
+                    "completed", "http_response", "http_error",
+                    "transport_error",
+                }
+                and (
+                    attempt["http_status"] is None
+                    or (
+                        type(attempt["http_status"]) is int
+                        and 100 <= attempt["http_status"] <= 599
+                    )
+                )
+                and all(
+                    attempt[name] is None
+                    or (
+                        isinstance(attempt[name], str)
+                        and _SHA256.fullmatch(attempt[name]) is not None
+                    )
+                    for name in fields if name.endswith("_sha256")
+                ),
+                "N6 provider attempt is invalid",
+            )
+            rows.append((
+                trace_id, index, request_sha256, result_sha256,
+                attempt["outcome"], attempt["http_status"],
+                attempt["body_completion_id_sha256"],
+                attempt["body_request_id_sha256"],
+                attempt["header_request_id_sha256"],
+                attempt["header_dashscope_request_id_sha256"],
+            ))
+        path = self.state_dir / "n6-provider-trace-v1.sqlite3"
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.close(fd)
+        connection = sqlite3.connect(path)
+        try:
+            with connection:
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS n6_provider_attempts (
+                        trace_id TEXT NOT NULL,
+                        attempt_index INTEGER NOT NULL,
+                        request_sha256 TEXT NOT NULL,
+                        result_sha256 TEXT,
+                        outcome TEXT NOT NULL,
+                        http_status INTEGER,
+                        body_completion_id_sha256 TEXT,
+                        body_request_id_sha256 TEXT,
+                        header_request_id_sha256 TEXT,
+                        header_dashscope_request_id_sha256 TEXT,
+                        PRIMARY KEY (trace_id, attempt_index)
+                    )
+                """)
+                connection.executemany("""
+                    INSERT INTO n6_provider_attempts
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, rows)
         finally:
             connection.close()
 
