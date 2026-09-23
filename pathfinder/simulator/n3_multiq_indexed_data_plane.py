@@ -20,6 +20,16 @@ from ..data_agent_manifest import (
     load_data_agent_manifest,
 )
 from ..frame_bundle_ingest import FRAME_BUNDLE_MEDIA_TYPE
+from ..rsi_exam.interleaved_multiq_plan import verify_interleaved_plan
+from ..rsi_exam.temporal_index_collection import (
+    PREPARATION_MANIFEST,
+    _fraction_pair,
+    verify_formal_temporal_index_preparation,
+)
+from ..rsi_exam.temporal_index_layers import (
+    QUERY_SELECTIONS,
+    verify_temporal_query_batch,
+)
 from ..video_prep import sample_video
 from .n3_indexed_data_plane import (
     INDEXED_REPRESENTATION_ID,
@@ -374,7 +384,116 @@ def verify_n3_multiq_indexed_package(
     }
 
 
+def derive_n3_multiq_question_policies(
+    *,
+    plan_dir: str | Path,
+    public_questions: Sequence[Mapping[str, Any]],
+    public_source_sha256: str,
+    query_dir: str | Path,
+    video_index_dir: str | Path,
+    preparation_dir: str | Path,
+    caption_dir: str | Path,
+    raw_package_dir: str | Path,
+    frame_count: int = 4,
+    jpeg_max_dimension: int = 768,
+) -> list[dict[str, Any]]:
+    """Derive six task-bound N3 policies from verified, public query results.
+
+    A selection with disjoint caption windows uses its explicitly frozen
+    ``selected_span_seconds`` as a convex-hull projection.  The provenance
+    retains the exact merged intervals, so this cannot be misreported as
+    decoding only the disjoint windows or as reduced MP4 storage I/O.
+    """
+
+    plan = verify_interleaved_plan(
+        plan_dir, public_questions,
+        public_source_sha256=public_source_sha256,
+    )
+    simplified = [
+        {key: row[key] for key in ("question_id", "object_id", "question")}
+        for row in public_questions
+    ]
+    query = verify_temporal_query_batch(
+        query_dir, video_index_dir, preparation_dir, caption_dir, simplified,
+    )
+    verify_formal_temporal_index_preparation(preparation_dir)
+    verify_raw_cold_data_plane_package(raw_package_dir)
+    prep = _read_json(
+        Path(preparation_dir) / PREPARATION_MANIFEST, "preparation manifest"
+    )
+    raw = _read_json(
+        Path(raw_package_dir) / PACKAGE_MANIFEST_NAME, "raw package"
+    )
+    prep_by_object = {row["object_id"]: row for row in prep["objects"]}
+    raw_by_object = {row["object_id"]: row for row in raw["objects"]}
+    question_by_id = {row["question_id"]: row for row in public_questions}
+    selections = [json.loads(line) for line in
+                  (Path(query_dir) / QUERY_SELECTIONS)
+                  .read_text(encoding="utf-8").splitlines()]
+    _require(
+        len(selections) == plan["question_count"]
+        and {row["question_id"] for row in selections} == set(question_by_id),
+        "query selections differ from the frozen public questions",
+    )
+    result = []
+    for row in sorted(selections, key=lambda item: item["question_id"]):
+        question = question_by_id[row["question_id"]]
+        object_id = question["object_id"]
+        original = raw_by_object.get(object_id)
+        prepared = prep_by_object.get(object_id)
+        _require(
+            row["object_id"] == object_id
+            and row["question_sha256"]
+            == _sha256(question["question"].encode("utf-8"))
+            and isinstance(original, Mapping)
+            and isinstance(prepared, Mapping)
+            and prepared["source_video_sha256"]
+            == original["artifact_sha256"]
+            and prepared["source_video_size_bytes"]
+            == original["artifact_size_bytes"],
+            "query selection does not bind the N3 source and public question",
+        )
+        selection = row["selection"]
+        _require(selection["fallback_used"] is False,
+                 "query-aware N3 policy cannot use a fallback")
+        start, end = selection["selected_span_seconds"]
+        duration = float(prepared["duration_seconds"])
+        start_pair = _fraction_pair(float(start), duration, is_end=False)
+        end_pair = _fraction_pair(float(end), duration, is_end=True)
+        provenance = {
+            "action_id": selection["action_id"],
+            "anchor_top_k": selection["anchor_top_k"],
+            "anchor_window_ordinals": selection["anchor_window_ordinals"],
+            "expansion_basis": selection["expansion_basis"],
+            "fallback_used": False,
+            "max_selected_windows": selection["max_selected_windows"],
+            "merged_intervals_seconds": selection["merged_intervals_seconds"],
+            "public_question_sha256": row["question_sha256"],
+            "relation": selection["relation"],
+            "selected_window_ordinals": selection["selected_window_ordinals"],
+            "temporal_index_package_sha256": query["package_sha256"],
+        }
+        policy = N3TemporalSelectionPolicy(
+            frame_count=frame_count,
+            jpeg_max_dimension=jpeg_max_dimension,
+            temporal_start_fraction=start_pair[0] / start_pair[1],
+            temporal_end_fraction=end_pair[0] / end_pair[1],
+            sampling_method=TEMPORAL_INDEX_SELECTED_SAMPLING_METHOD,
+            selection_provenance=provenance,
+        )
+        result.append({
+            "question_id": question["question_id"],
+            "object_id": object_id,
+            "task_binding_sha256": question["public_task_sha256"],
+            "public_question_sha256": row["question_sha256"],
+            "selection_policy": policy,
+        })
+    return result
+
+
 __all__ = [
     "N3MultiQuestionPackageError", "SCHEMA",
-    "build_n3_multiq_indexed_package", "verify_n3_multiq_indexed_package",
+    "build_n3_multiq_indexed_package",
+    "derive_n3_multiq_question_policies",
+    "verify_n3_multiq_indexed_package",
 ]
