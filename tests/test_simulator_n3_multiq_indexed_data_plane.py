@@ -216,6 +216,35 @@ class N3MultiQuestionIndexedPackageTest(unittest.TestCase):
             )
             self.assertFalse(unrelated.path.is_file())
 
+    def test_unselected_raw_video_has_no_indexed_representation(self) -> None:
+        other_id = "nextqa-val-raw-only"
+        source = self.root / "source.mp4"
+        payload = source.read_bytes()
+        combined = self.root / "raw-with-unselected-video"
+        build_raw_cold_data_plane_package(
+            [RawColdObjectBinding(
+                object_id=object_id, artifact_path=source,
+                catalog_version="multiq-catalog-v3",
+                plan_ids=("legacy-plan",), dataset_id="nextqa",
+                dataset_revision="multiq-test",
+                source_object_id=object_id,
+                artifact_sha256=_sha256(payload),
+                artifact_size_bytes=len(payload),
+            ) for object_id in (self.object_id, other_id)],
+            output_dir=combined, package_id="n3-raw-with-unselected-v1",
+        )
+        package = self.root / "selected-one-of-two"
+        report = build_n3_multiq_indexed_package(
+            combined, output_dir=package,
+            package_id="n3-selected-one-of-two-v1",
+            question_policies=[self.questions[0]], sampler=self.sampler,
+        )
+        self.assertEqual(2, report["object_count"])
+        self.assertEqual(1, report["question_count"])
+        catalog = json.loads((package / "config/object-catalog.json").read_bytes())
+        self.assertNotIn(INDEXED_REPRESENTATION_ID,
+                         catalog["objects"][other_id]["representations"])
+
 
 if __name__ == "__main__":
     unittest.main()

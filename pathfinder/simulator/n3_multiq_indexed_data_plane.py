@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 from ..data_agent_manifest import (
     DATA_AGENT_MANIFEST_VERSION,
     DATA_OBJECT_CATALOG_VERSION,
+    DataAgentManifestLookupError,
     load_data_agent_manifest,
 )
 from ..frame_bundle_ingest import FRAME_BUNDLE_MEDIA_TYPE
@@ -365,11 +366,16 @@ def verify_n3_multiq_indexed_package(
         for other in report["raw_objects"]:
             if other["object_id"] == row["object_id"]:
                 continue
-            unrelated = manifest.resolve(
-                plan_id=row["plan_id"], object_id=other["object_id"],
-                representation_id=INDEXED_REPRESENTATION_ID,
-                requested_location=SOURCE_LOCATION,
-            )
+            try:
+                unrelated = manifest.resolve(
+                    plan_id=row["plan_id"], object_id=other["object_id"],
+                    representation_id=INDEXED_REPRESENTATION_ID,
+                    requested_location=SOURCE_LOCATION,
+                )
+            except DataAgentManifestLookupError:
+                # Unselected raw objects intentionally have no indexed
+                # representation.  A missing lookup is the safe outcome.
+                continue
             _require(
                 not unrelated.path.is_file(),
                 "question plan unexpectedly resolves another video's bundle",
