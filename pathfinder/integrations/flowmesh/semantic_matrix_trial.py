@@ -35,6 +35,7 @@ from ...simulator.full_flow_semantic_execution_admission import (
     BOUND_TRIAL_SCHEMA_VERSION,
 )
 from ...simulator.full_flow_semantic_route_evidence import (
+    SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION,
     SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
     SemanticRouteEvidenceValidationError,
     verify_public_semantic_route_evidence,
@@ -56,6 +57,9 @@ from .preflight import describe_pinned_worker
 SEMANTIC_ROUTE_REQUEST_SCHEMA_VERSION = (
     "pathfinder.flowmesh-semantic-route-request/v1alpha1"
 )
+SEMANTIC_ROUTE_EPISODE_REQUEST_SCHEMA_VERSION = (
+    "pathfinder.flowmesh-semantic-route-request/v1alpha2"
+)
 SEMANTIC_WORKFLOW_EVIDENCE_SCHEMA_VERSION = (
     "pathfinder.flowmesh-semantic-workflow-evidence/v1alpha1"
 )
@@ -73,6 +77,7 @@ _REQUEST_FIELDS = {
     "request_sha256",
     "credentials_recorded",
 }
+_EPISODE_REQUEST_FIELDS = _REQUEST_FIELDS | {"cache_episode_id"}
 _PRIVATE_REQUEST_KEYS = {
     "api_key",
     "authorization",
@@ -228,11 +233,24 @@ def validate_semantic_route_request(value: Mapping[str, Any]) -> dict[str, Any]:
 
     _require(isinstance(value, Mapping), "semantic route request must be an object")
     request = _copy_json(value)
-    _require(set(request) == _REQUEST_FIELDS, "semantic route request fields changed")
+    is_episode = (
+        request.get("schema_version")
+        == SEMANTIC_ROUTE_EPISODE_REQUEST_SCHEMA_VERSION
+    )
     _require(
-        request.get("schema_version") == SEMANTIC_ROUTE_REQUEST_SCHEMA_VERSION,
+        set(request) == (_EPISODE_REQUEST_FIELDS if is_episode
+                         else _REQUEST_FIELDS),
+        "semantic route request fields changed",
+    )
+    _require(
+        request.get("schema_version") in {
+            SEMANTIC_ROUTE_REQUEST_SCHEMA_VERSION,
+            SEMANTIC_ROUTE_EPISODE_REQUEST_SCHEMA_VERSION,
+        },
         "semantic route request schema changed",
     )
+    if is_episode:
+        _identifier(request.get("cache_episode_id"), "cache_episode_id")
     _identifier(request.get("run_id"), "run_id")
     _digest(request.get("idempotency_key"), "idempotency_key")
     trial = request.get("bound_trial")
@@ -247,6 +265,9 @@ def validate_semantic_route_request(value: Mapping[str, Any]) -> dict[str, Any]:
         trial.get("executor_node_id") in {"N7", "N8"},
         "semantic route coordinator must be N7 or N8",
     )
+    if is_episode:
+        _require(trial.get("route_family") == "local-cache-derived",
+                 "cache episode requires a cache route")
     _require(
         trial.get("flowmesh_execution_shape")
         == "one-api-task-to-route-coordinator",
@@ -312,17 +333,26 @@ def build_semantic_route_request(
     idempotency_key: str,
     bound_trial: Mapping[str, Any],
     bound_stages: Sequence[Mapping[str, Any]],
+    cache_episode_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the content-bound request passed through FlowMesh."""
 
     value: dict[str, Any] = {
-        "schema_version": SEMANTIC_ROUTE_REQUEST_SCHEMA_VERSION,
+        "schema_version": (
+            SEMANTIC_ROUTE_EPISODE_REQUEST_SCHEMA_VERSION
+            if cache_episode_id is not None
+            else SEMANTIC_ROUTE_REQUEST_SCHEMA_VERSION
+        ),
         "run_id": _identifier(run_id, "run_id"),
         "idempotency_key": _digest(idempotency_key, "idempotency_key"),
         "bound_trial": _copy_json(bound_trial),
         "bound_stages": _copy_json(list(bound_stages)),
         "credentials_recorded": False,
     }
+    if cache_episode_id is not None:
+        value["cache_episode_id"] = _identifier(
+            cache_episode_id, "cache_episode_id"
+        )
     value["request_sha256"] = _request_digest(value)
     return validate_semantic_route_request(value)
 
@@ -484,10 +514,15 @@ class GenericSemanticRouteRequestHandler:
 
     def execute(self, value: Mapping[str, Any]) -> dict[str, Any]:
         request = validate_semantic_route_request(value)
+        episode = (
+            {"cache_episode_id": request["cache_episode_id"]}
+            if "cache_episode_id" in request else {}
+        )
         return self._coordinator.execute(
             run_id=request["run_id"],
             bound_trial=request["bound_trial"],
             bound_stages=request["bound_stages"],
+            **episode,
         )
 
 
@@ -655,6 +690,7 @@ def _verify_route_evidence(
     run_id: str,
     bound_trial: Mapping[str, Any],
     bound_stages: Sequence[Mapping[str, Any]],
+    cache_episode_id: str | None = None,
 ) -> dict[str, Any]:
     try:
         evidence = verify_public_semantic_route_evidence(value)
@@ -663,6 +699,19 @@ def _verify_route_evidence(
             f"public route evidence failed strict validation: {exc}"
         ) from exc
     trial_key = bound_trial["trial_key"]
+    _require(
+        evidence.get("schema_version") == (
+            SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION
+            if cache_episode_id is not None
+            else SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION
+        )
+        and (
+            evidence.get("cache_episode_id") == cache_episode_id
+            if cache_episode_id is not None
+            else "cache_episode_id" not in evidence
+        ),
+        "route evidence cache episode differs from request",
+    )
     _require(
         evidence.get("run_id") == run_id
         and evidence.get("trial_id") == trial_key
@@ -880,6 +929,7 @@ def verify_semantic_route_evidence(
     run_id: str,
     bound_trial: Mapping[str, Any],
     bound_stages: Sequence[Mapping[str, Any]],
+    cache_episode_id: str | None = None,
 ) -> dict[str, Any]:
     """Verify endpoint-free route evidence against its frozen public inputs.
 
@@ -894,6 +944,7 @@ def verify_semantic_route_evidence(
         run_id=run_id,
         bound_trial=bound_trial,
         bound_stages=bound_stages,
+        cache_episode_id=cache_episode_id,
     )
 
 
@@ -933,10 +984,15 @@ class FlowMeshSemanticTrialExecutor:
             [Mapping[str, Any]], Mapping[str, str]
         ],
         api_task_timeout_seconds: int | None = None,
+        cache_episode_id: str | None = None,
     ) -> None:
         self._client = client
         self._settings = settings
         self._run_id = _identifier(run_id, "run_id")
+        self._cache_episode_id = (
+            _identifier(cache_episode_id, "cache_episode_id")
+            if cache_episode_id is not None else None
+        )
         _require(
             settings.worker_alias is not None and settings.worker_id is None,
             "semantic FlowMesh execution requires one stable worker alias",
@@ -1040,6 +1096,7 @@ class FlowMeshSemanticTrialExecutor:
             idempotency_key=idempotency_key,
             bound_trial=trial,
             bound_stages=stages,
+            cache_episode_id=self._cache_episode_id,
         )
 
         try:
@@ -1127,6 +1184,7 @@ class FlowMeshSemanticTrialExecutor:
                 run_id=self._run_id,
                 bound_trial=trial,
                 bound_stages=stages,
+                cache_episode_id=self._cache_episode_id,
             )
         except Exception as exc:
             raise SemanticTrialExecutionError(
@@ -1203,6 +1261,7 @@ __all__ = [
     "FlowMeshSemanticTrialExecutor",
     "GenericSemanticRouteRequestHandler",
     "SEMANTIC_ROUTE_ENDPOINT_PATH",
+    "SEMANTIC_ROUTE_EPISODE_REQUEST_SCHEMA_VERSION",
     "SEMANTIC_ROUTE_REQUEST_SCHEMA_VERSION",
     "SEMANTIC_WORKFLOW_EVIDENCE_SCHEMA_VERSION",
     "build_flowmesh_semantic_trial_workflow",

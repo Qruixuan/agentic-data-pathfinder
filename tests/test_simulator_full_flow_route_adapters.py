@@ -351,6 +351,83 @@ class FullFlowRouteAdaptersTest(unittest.TestCase):
         self.assertEqual(_sha(RAW), result.segment.range_sha256)
         self.assertNotIn("range_fraction", client.requests[0])
 
+    def test_n2_query_uses_question_bound_selection_when_available(self) -> None:
+        class TaskRanges:
+            seen = None
+
+            def resolve(self, identity):
+                raise AssertionError("video-only selection was used")
+
+            def resolve_for_task(self, identity, *, task_binding_sha256):
+                self.seen = task_binding_sha256
+                return _RangeCatalog().resolve(identity)
+
+        trial = _trial()
+        ranges = TaskRanges()
+        adapter = BoundIndexQueryAdapter(
+            clients={"N2": _IndexClient()},
+            query_plans=self.query_catalog(trial["trial_key"]),
+            exact_ranges=ranges,
+        )
+        result = adapter.query(
+            run_id="multiq-route-v1", trial=trial,
+            stage={"stage_key": "index", "logical_node_ids": ["N2"]},
+            public_task=_task(), expected_object_id=OBJECT,
+        )
+        self.assertEqual(TASK_SHA, ranges.seen)
+        self.assertIsNotNone(result.segment)
+
+    def test_indexed_derived_requires_a_question_bound_frame_selection(
+        self,
+    ) -> None:
+        class TaskRanges:
+            seen = None
+
+            def resolve_for_task(self, identity, *, task_binding_sha256):
+                self.seen = task_binding_sha256
+                return ExactTemporalFrameSelection(
+                    object_id=identity.object_id,
+                    representation_id="raw_video",
+                    object_catalog_version=identity.object_catalog_version,
+                    full_artifact_size_bytes=identity.artifact_size_bytes,
+                    full_artifact_sha256=identity.artifact_sha256,
+                    selected_representation_id=(
+                        "indexed_temporal_frame_bundle"
+                    ),
+                    selected_artifact_size_bytes=len(BUNDLE),
+                    selected_artifact_sha256=_sha(BUNDLE),
+                    frame_count=4,
+                    temporal_start_fraction=0.25,
+                    temporal_end_fraction=0.75,
+                    selection_policy_sha256="b" * 64,
+                )
+
+        trial = _trial(route="indexed-derived")
+        with self.assertRaisesRegex(
+            FullFlowRouteAdapterError, "task-bound temporal resolver"
+        ):
+            BoundIndexQueryAdapter(
+                clients={"N2": _IndexClient()},
+                query_plans=self.query_catalog(trial["trial_key"]),
+                exact_ranges=_RangeCatalog(),
+            ).query(
+                run_id="indexed-derived-unbound", trial=trial,
+                stage={"stage_key": "index", "logical_node_ids": ["N2"]},
+                public_task=_task(), expected_object_id=OBJECT,
+            )
+        ranges = TaskRanges()
+        result = BoundIndexQueryAdapter(
+            clients={"N2": _IndexClient()},
+            query_plans=self.query_catalog(trial["trial_key"]),
+            exact_ranges=ranges,
+        ).query(
+            run_id="indexed-derived-bound", trial=trial,
+            stage={"stage_key": "index", "logical_node_ids": ["N2"]},
+            public_task=_task(), expected_object_id=OBJECT,
+        )
+        self.assertEqual(TASK_SHA, ranges.seen)
+        self.assertIsInstance(result.segment, ExactTemporalFrameSelection)
+
     def test_local_index_is_explicitly_in_process_and_content_bound(self) -> None:
         trial = _trial(route="local-cache-derived")
         trial["representation_identities"] = []

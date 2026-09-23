@@ -7,6 +7,7 @@ from pathfinder.simulator.full_flow_semantic_input_profiles import (
     DERIVED_SPARSE_FRAMES_PROFILE_ID,
     DERIVED_SPARSE_FUSION_PROFILE_ID,
     INDEXED_WINDOW_PROFILE_ID,
+    INDEXED_DERIVED_FUSION_PROFILE_ID,
     RAW_DIRECT_VIDEO_PROFILE_ID,
     SemanticInputProfileError,
     build_semantic_input_profile,
@@ -16,6 +17,47 @@ from pathfinder.simulator.full_flow_semantic_input_profiles import (
 
 
 class SemanticInputProfileTest(unittest.TestCase):
+    def test_indexed_derived_requires_question_selected_frames_and_digest(
+        self,
+    ) -> None:
+        profile = build_semantic_input_profile(
+            route_family="indexed-derived",
+            model_input_representation_ids=[
+                "raw_video", "multimodal_digest",
+            ],
+            indexed_selection_kind="query-aware-temporal-index",
+            indexed_frame_count=4,
+            indexed_temporal_window_fraction=(0.25, 0.75),
+        )
+        self.assertEqual(
+            INDEXED_DERIVED_FUSION_PROFILE_ID, profile["profile_id"]
+        )
+        self.assertEqual(
+            "digest+indexed-frames-fusion", profile["input_mode"]
+        )
+        self.assertTrue(profile["digest_included"])
+        self.assertEqual(4, profile["frame_selection"]["frame_count"])
+        self.assertEqual(
+            profile,
+            validate_semantic_input_profile(
+                profile,
+                route_family="indexed-derived",
+                model_input_representation_ids=[
+                    "raw_video", "multimodal_digest",
+                ],
+            ),
+        )
+        with self.assertRaisesRegex(
+            SemanticInputProfileError, "query-aware raw projection"
+        ):
+            build_semantic_input_profile(
+                route_family="indexed-derived",
+                model_input_representation_ids=["raw_video"],
+                indexed_selection_kind="query-aware-temporal-index",
+                indexed_frame_count=4,
+                indexed_temporal_window_fraction=(0.25, 0.75),
+            )
+
     def test_raw_and_indexed_profiles_freeze_different_visual_inputs(self) -> None:
         raw = build_semantic_input_profile(
             route_family="raw",

@@ -743,6 +743,7 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
         delegate: GenericSemanticRouteRequestHandler,
         bound_trials: Sequence[Mapping[str, Any]],
         bound_stages: Sequence[Mapping[str, Any]],
+        bound_cache_episodes: Mapping[tuple[str, str], str] | None = None,
     ) -> None:
         _require(logical_node_id in {"N7", "N8"}, "handler node is invalid")
         self._node = logical_node_id
@@ -765,6 +766,29 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
                 "bound stage catalog repeats an identity",
             )
             self._stages[key] = stage
+        self._cache_episodes: dict[tuple[str, str], str] = {}
+        for key, episode_id in (bound_cache_episodes or {}).items():
+            _require(
+                isinstance(key, tuple) and len(key) == 2
+                and all(isinstance(part, str) and part for part in key)
+                and isinstance(episode_id, str) and episode_id,
+                "bound cache episode identity is invalid",
+            )
+            run_id, trial_key = key
+            _identifier(run_id, "bound cache run_id")
+            _identifier(episode_id, "bound cache episode_id")
+            trial = self._trials.get(trial_key)
+            _require(
+                trial is not None
+                and trial.get("route_family") == "local-cache-derived"
+                and trial.get("executor_node_id") == self._node,
+                "cache episode is not bound to a local-cache trial",
+            )
+            _require(
+                all(existing_run != run_id for existing_run, _ in self._cache_episodes),
+                "bound cache run ID is reused",
+            )
+            self._cache_episodes[(run_id, trial_key)] = episode_id
 
     def execute(self, value: Mapping[str, Any]) -> dict[str, Any]:
         request = validate_semantic_route_request(value)
@@ -777,6 +801,13 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
         _require(
             self._trials.get(trial_key) == trial,
             "semantic trial is absent from the verified admission catalog",
+        )
+        episode_id = request.get("cache_episode_id")
+        _require(
+            episode_id is None
+            or self._cache_episodes.get((request["run_id"], trial_key))
+            == episode_id,
+            "cache episode is absent from the verified run binding",
         )
         expected_keys = trial["semantic_stage_keys"]
         expected = [self._stages.get(key) for key in expected_keys]
@@ -969,7 +1000,7 @@ def _data_agent_plan_catalog(
             )
             key = (trial_key, node, object_id, representation)
             bindings[key] = design_id
-        if trial.get("route_family") == "indexed-raw":
+        if trial.get("route_family") in {"indexed-raw", "indexed-derived"}:
             raw_identities = [
                 value
                 for value in identities
@@ -1138,6 +1169,14 @@ def assemble_full_flow_semantic_route_service(
     admission = admission_report["document"]
     index_report = core_reports["index"]
     oracle_report = core_reports["oracle"]
+    _require(
+        not any(
+            trial.get("route_family") == "indexed-derived"
+            for trial in trials
+        ),
+        "indexed-derived admission lacks a source-bound multi-question "
+        "N3 plan and selection catalog",
+    )
     state = Path(state_dir).resolve()
     state.mkdir(parents=True, exist_ok=True)
     _require(

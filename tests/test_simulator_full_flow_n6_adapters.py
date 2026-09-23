@@ -40,6 +40,7 @@ from pathfinder.simulator.full_flow_n6_adapters import (
     N6SampledFrame,
     decode_prepared_semantic_request,
     raw_prepared_representation_sha256,
+    _validate_prepared_request_binding,
 )
 from pathfinder.simulator.full_flow_semantic_input_profiles import (
     build_semantic_input_profile,
@@ -441,6 +442,140 @@ class N6PreparationTest(unittest.TestCase):
                 artifacts=[_access("raw_video", payload)],
             )
 
+    def test_indexed_derived_fusion_uses_exact_n3_frames_and_same_digest(
+        self,
+    ) -> None:
+        source = b"real-routed-video" * 10_000
+        selected = _bundle_bytes(
+            4,
+            source_payload=source,
+            sampling_method="temporal-index-selected-interval",
+            source_duration_seconds=40.0,
+            timestamp_start=10.0,
+        )
+        segment = ExactTemporalFrameSelection(
+            object_id=OBJECT_ID,
+            representation_id="raw_video",
+            object_catalog_version=CATALOG_VERSION,
+            full_artifact_size_bytes=len(source),
+            full_artifact_sha256=_sha(source),
+            selected_representation_id="indexed_temporal_frame_bundle",
+            selected_artifact_size_bytes=len(selected),
+            selected_artifact_sha256=_sha(selected),
+            frame_count=4,
+            temporal_start_fraction=0.25,
+            temporal_end_fraction=0.75,
+            selection_policy_sha256=SELECTION_POLICY_SHA,
+        )
+        digest = _access("multimodal_digest", b"semantic digest")
+        raw = ArtifactAccess(
+            _identity("raw_video", source), selected, segment=segment,
+        )
+        profile = build_semantic_input_profile(
+            route_family="indexed-derived",
+            model_input_representation_ids=[
+                "raw_video", "multimodal_digest",
+            ],
+            indexed_selection_kind="query-aware-temporal-index",
+            indexed_frame_count=4,
+            indexed_temporal_window_fraction=(0.25, 0.75),
+        )
+        sampler = RecordingSampler()
+        adapter = self._adapter(sampler)
+        trial = {
+            "trial_key": "scenario|W1|indexed-derived|r0000",
+            "route_family": "indexed-derived",
+            "artifact_object_id": OBJECT_ID,
+            "semantic_input_profile": profile,
+        }
+        prepared = adapter.prepare(
+            run_id="n6-indexed-fusion-run",
+            trial=trial,
+            stage={"stage_key": "n6-indexed-fusion-prepare"},
+            public_task=_public_task(),
+            mode="digest+indexed-frames-fusion",
+            artifacts=[digest, raw],
+        )
+        request = decode_prepared_semantic_request(prepared)
+        _validate_prepared_request_binding(
+            request, prepared,
+            run_id="n6-indexed-fusion-run", trial=trial,
+            stage={"stage_key": "n6-indexed-fusion-infer"},
+            public_task=_public_task(),
+        )
+        self.assertEqual([], sampler.calls)
+        self.assertEqual("semantic digest", request["digest_text"])
+        self.assertEqual(digest.payload_sha256, request["digest_sha256"])
+        self.assertEqual(4, len(request["frames"]))
+        self.assertEqual(
+            "multimodal_digest+sampled_frame_bundle",
+            request["representation_id"],
+        )
+        derived = self._prepare_profiled(
+            self._adapter(), route_family="remote-derived",
+            mode="digest+frames-fusion",
+            artifacts=[digest, _access("sampled_frame_bundle", _bundle_bytes(4))],
+        )
+        derived_request = decode_prepared_semantic_request(derived)
+        self.assertEqual(
+            derived_request["prompt_sha256"], request["prompt_sha256"]
+        )
+        self.assertEqual(
+            derived_request["digest_sha256"], request["digest_sha256"]
+        )
+        self.assertNotEqual(
+            derived_request["frame_sequence_sha256"],
+            request["frame_sequence_sha256"],
+        )
+        self.assertEqual(
+            (digest.source_identity, raw.source_identity),
+            prepared.component_identities,
+        )
+        executor = FakeExecutor()
+        result = BoundN6SemanticInferenceAdapter(
+            executor=executor, health_probe=_health, expected_model=MODEL,
+        ).infer(
+            run_id="n6-indexed-fusion-run",
+            trial=trial,
+            stage={"stage_key": "n6-indexed-fusion-infer"},
+            public_task=_public_task(),
+            model_input=prepared,
+        )
+        self.assertEqual("B", result.final_answer)
+        self.assertEqual(1, len(executor.calls))
+        with self.assertRaisesRegex(N6AdapterError, "frozen N3 temporal"):
+            adapter.prepare(
+                run_id="n6-indexed-fusion-no-projection",
+                trial=trial,
+                stage={"stage_key": "n6-indexed-fusion-prepare"},
+                public_task=_public_task(),
+                mode="digest+indexed-frames-fusion",
+                artifacts=[digest, _access("raw_video", source)],
+            )
+
+    def test_derived_and_cached_derived_have_identical_model_content(
+        self,
+    ) -> None:
+        artifacts = [
+            _access("multimodal_digest", b"semantic digest"),
+            _access("sampled_frame_bundle", _bundle_bytes(4)),
+        ]
+        remote = decode_prepared_semantic_request(self._prepare_profiled(
+            self._adapter(), route_family="remote-derived",
+            mode="digest+frames-fusion", artifacts=artifacts,
+        ))
+        cached = decode_prepared_semantic_request(self._prepare_profiled(
+            self._adapter(), route_family="local-cache-derived",
+            mode="digest+frames-fusion", artifacts=artifacts,
+        ))
+        self.assertNotEqual(
+            remote["semantic_request_id"], cached["semantic_request_id"]
+        )
+        self.assertEqual(
+            {k: v for k, v in remote.items() if k != "semantic_request_id"},
+            {k: v for k, v in cached.items() if k != "semantic_request_id"},
+        )
+
     def test_raw_range_binds_both_full_identity_and_exact_segment(self) -> None:
         full = b"0123456789abcdefghij"
         identity = _identity("raw_video", full)
@@ -616,6 +751,23 @@ class N6PreparationTest(unittest.TestCase):
             )
 
     def test_requests_are_accepted_by_the_real_container_node_contract(self) -> None:
+        source = b"real-routed-video" * 10_000
+        selected = _bundle_bytes(
+            2, source_payload=source,
+            sampling_method="temporal-index-selected-interval",
+            source_duration_seconds=40.0, timestamp_start=10.0,
+        )
+        segment = ExactTemporalFrameSelection(
+            object_id=OBJECT_ID, representation_id="raw_video",
+            object_catalog_version=CATALOG_VERSION,
+            full_artifact_size_bytes=len(source),
+            full_artifact_sha256=_sha(source),
+            selected_representation_id="indexed_temporal_frame_bundle",
+            selected_artifact_size_bytes=len(selected),
+            selected_artifact_sha256=_sha(selected), frame_count=2,
+            temporal_start_fraction=0.25, temporal_end_fraction=0.75,
+            selection_policy_sha256=SELECTION_POLICY_SHA,
+        )
         cases = {
             "digest": [_access("multimodal_digest", b"digest")],
             "raw-prepared-frames": [_access("raw_video", b"raw")],
@@ -626,6 +778,12 @@ class N6PreparationTest(unittest.TestCase):
                 _access("multimodal_digest", b"digest"),
                 _access("sampled_frame_bundle", _bundle_bytes()),
             ],
+            "digest+indexed-frames-fusion": [
+                _access("multimodal_digest", b"digest"),
+                ArtifactAccess(
+                    _identity("raw_video", source), selected, segment=segment,
+                ),
+            ],
         }
         with tempfile.TemporaryDirectory() as temporary:
             runtime = ContainerNodeRuntime(
@@ -633,9 +791,32 @@ class N6PreparationTest(unittest.TestCase):
             )
             for mode, artifacts in cases.items():
                 with self.subTest(mode=mode):
-                    prepared = self._prepare(
-                        self._adapter(), mode, artifacts
-                    )
+                    if mode == "digest+indexed-frames-fusion":
+                        profile = build_semantic_input_profile(
+                            route_family="indexed-derived",
+                            model_input_representation_ids=[
+                                "raw_video", "multimodal_digest",
+                            ],
+                            indexed_selection_kind="query-aware-temporal-index",
+                            indexed_frame_count=2,
+                            indexed_temporal_window_fraction=(0.25, 0.75),
+                        )
+                        prepared = self._adapter().prepare(
+                            run_id="n6-contract-indexed-fusion",
+                            trial={
+                                "trial_key": "n6-contract-indexed-fusion",
+                                "route_family": "indexed-derived",
+                                "artifact_object_id": OBJECT_ID,
+                                "semantic_input_profile": profile,
+                            },
+                            stage={"stage_key": "n6-contract-prepare"},
+                            public_task=_public_task(), mode=mode,
+                            artifacts=artifacts,
+                        )
+                    else:
+                        prepared = self._prepare(
+                            self._adapter(), mode, artifacts
+                        )
                     request = decode_prepared_semantic_request(prepared)
                     with mock.patch.object(
                         runtime,

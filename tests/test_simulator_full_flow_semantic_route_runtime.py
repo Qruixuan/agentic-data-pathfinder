@@ -30,6 +30,12 @@ from pathfinder.simulator.full_flow_semantic_route_runtime import (
     TransferResult,
 )
 from tests import test_simulator_full_flow_semantic_execution_admission as admission_fixture
+from pathfinder.simulator.full_flow_semantic_input_profiles import (
+    build_semantic_input_profile,
+)
+from pathfinder.integrations.flowmesh.semantic_matrix_trial import (
+    verify_semantic_route_evidence,
+)
 
 
 def _canonical(value: Any) -> bytes:
@@ -142,7 +148,7 @@ class FakeAdapters:
         self.calls["query"] += 1
         self.events.append(("query", stage["stage_key"]))
         segment = None
-        if trial["route_family"] == "indexed-raw" and not self.omit_index_range:
+        if trial["route_family"] in {"indexed-raw", "indexed-derived"} and not self.omit_index_range:
             identity = next(
                 row for row in trial["representation_identities"]
                 if row["representation_id"] == "raw_video"
@@ -313,11 +319,14 @@ class FakeAdapters:
         self,
         *,
         run_id: str,
+        cache_episode_id: str | None = None,
         trial: Mapping[str, Any],
         stage: Mapping[str, Any],
         identity: ArtifactIdentity,
     ) -> CacheLookupResult:
         del run_id
+        if cache_episode_id is not None:
+            self.calls[f"episode-{cache_episode_id}"] += 1
         self.calls["lookup"] += 1
         self.events.append(("lookup", stage["stage_key"]))
         return CacheLookupResult(
@@ -360,13 +369,14 @@ class FakeAdapters:
         self,
         *,
         run_id: str,
+        cache_episode_id: str | None = None,
         trial: Mapping[str, Any],
         stage: Mapping[str, Any],
         identity: ArtifactIdentity,
         lookup: CacheLookupResult,
         artifact: ArtifactAccess,
     ) -> CacheInsertResult:
-        del run_id
+        del run_id, cache_episode_id
         self.calls["cache-insert"] += 1
         self.events.append(("cache-insert", stage["stage_key"]))
         return CacheInsertResult(
@@ -404,6 +414,25 @@ class FakeAdapters:
                 "video_sha256": _sha(video),
                 "video_size_bytes": len(video),
                 "representation_sha256": _sha(video),
+            })
+        if mode == "digest+indexed-frames-fusion":
+            digest = next(
+                value for value in artifacts
+                if value.source_identity.representation_id == "multimodal_digest"
+            )
+            content.update({
+                "semantic_request_id": "a" * 64,
+                "digest_sha256": digest.payload_sha256,
+                "frame_sequence_sha256": "b" * 64,
+                "frames": [
+                    {
+                        "timestamp_seconds": float(index + 1),
+                        "width": 2,
+                        "height": 2,
+                        "jpeg_base64": base64.b64encode(b"jpeg").decode(),
+                    }
+                    for index in range(8)
+                ],
             })
         payload = _canonical(content)
         identities = tuple(value.source_identity for value in artifacts)
@@ -633,6 +662,90 @@ class FullFlowSemanticRouteRuntimeTest(unittest.TestCase):
         self.assertEqual(0, fake.calls["range-fetch"])
         self.assertEqual("raw-prepared-frames", evidence["model_input"]["mode"])
 
+    def test_indexed_derived_routes_n3_selection_and_n4_digest_together(
+        self,
+    ) -> None:
+        trial, indexed_stages = _bound_case(
+            self.trials, self.stages, route_family="indexed-raw",
+            workload_class="W3", executor_node_id="N7",
+        )
+        derived, derived_stages = _bound_case(
+            self.trials, self.stages, route_family="remote-derived",
+            workload_class="W3", executor_node_id="N7",
+        )
+        trial["route_family"] = "indexed-derived"
+        trial["representation_identities"].append(next(
+            row for row in derived["representation_identities"]
+            if row["representation_id"] == "multimodal_digest"
+        ))
+        trial["required_provisioning_chain_ids"] = [
+            "artifact|video-causal|multimodal_digest"
+        ]
+        trial["semantic_input_profile"] = build_semantic_input_profile(
+            route_family="indexed-derived",
+            model_input_representation_ids=[
+                "raw_video", "multimodal_digest",
+            ],
+            indexed_selection_kind="query-aware-temporal-index",
+            indexed_frame_count=8,
+            indexed_temporal_window_fraction=(0.25, 0.75),
+        )
+        read_digest = next(
+            json.loads(json.dumps(stage)) for stage in derived_stages
+            if stage["stage_key"].endswith("|read-digest")
+        )
+        transfer_digest = next(
+            json.loads(json.dumps(stage)) for stage in derived_stages
+            if stage["stage_key"].endswith("|transfer-digest")
+        )
+        prefix = trial["trial_key"]
+        read_digest.update({
+            "trial_key": prefix,
+            "stage_key": f"{prefix}|read-digest",
+            "dependency_stage_keys": [indexed_stages[0]["stage_key"]],
+        })
+        transfer_digest.update({
+            "trial_key": prefix,
+            "stage_key": f"{prefix}|transfer-digest",
+            "dependency_stage_keys": [read_digest["stage_key"]],
+        })
+        stages = [
+            *indexed_stages[:5], read_digest, transfer_digest,
+            *indexed_stages[5:],
+        ]
+        prepare = next(
+            stage for stage in stages
+            if stage["action"] == "prepare-model-input"
+        )
+        prepare["dependency_stage_keys"].append(transfer_digest["stage_key"])
+        for index, stage in enumerate(stages):
+            stage["stage_index"] = index
+        trial["semantic_stage_keys"] = [stage["stage_key"] for stage in stages]
+        trial["bound_stage_sha256"] = [
+            _sha(_canonical(stage)) for stage in stages
+        ]
+        fake = FakeAdapters(temporal_projection=True)
+        evidence = _coordinator(fake).execute(
+            run_id="generic-indexed-derived-run-v1",
+            bound_trial=trial, bound_stages=stages,
+        )
+        self.assertEqual(1, fake.calls["fetch-selected-N3"])
+        self.assertEqual(1, fake.calls["fetch-N4"])
+        self.assertEqual(1, fake.calls["prepare-digest+indexed-frames-fusion"])
+        self.assertEqual(
+            "digest+indexed-frames-fusion", evidence["model_input"]["mode"]
+        )
+        self.assertEqual(2, len(
+            evidence["model_input"]["component_identity_sha256"]
+        ))
+        self.assertEqual(1, fake.calls["infer"])
+        self.assertEqual(1, fake.calls["score"])
+        verified = verify_semantic_route_evidence(
+            evidence, run_id="generic-indexed-derived-run-v1",
+            bound_trial=trial, bound_stages=stages,
+        )
+        self.assertEqual("COMPLETE", verified["status"])
+
     def test_indexed_raw_fails_closed_without_content_bound_range(self) -> None:
         trial, stages = _bound_case(
             self.trials,
@@ -771,6 +884,58 @@ class FullFlowSemanticRouteRuntimeTest(unittest.TestCase):
             )
         self.assertEqual(fake.calls["cache-read"], 0)
         self.assertEqual(fake.calls["score"], 0)
+
+    def test_episode_cache_hit_is_not_tied_to_trial_repetition(self) -> None:
+        from pathfinder.simulator.full_flow_semantic_route_evidence import (
+            SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION,
+            verify_public_semantic_route_evidence,
+        )
+
+        trial, stages = _bound_case(
+            self.trials, self.stages,
+            route_family="local-cache-derived",
+            workload_class="W4", executor_node_id="N8", repetition=0,
+        )
+        fake = FakeAdapters(cache_branch="hit")
+        evidence = _coordinator(fake).execute(
+            run_id="distinct-question-run-v1",
+            bound_trial=trial, bound_stages=stages,
+            cache_episode_id="shared-multiq-episode",
+        )
+        self.assertEqual(
+            SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION,
+            evidence["schema_version"],
+        )
+        self.assertEqual("shared-multiq-episode", evidence["cache_episode_id"])
+        self.assertEqual(1, fake.calls["episode-shared-multiq-episode"])
+        self.assertEqual(
+            evidence, verify_public_semantic_route_evidence(evidence)
+        )
+        from pathfinder.integrations.flowmesh.semantic_matrix_trial import (
+            FlowMeshSemanticTrialError,
+            verify_semantic_route_evidence,
+        )
+        self.assertEqual(
+            evidence,
+            verify_semantic_route_evidence(
+                evidence, run_id="distinct-question-run-v1",
+                bound_trial=trial, bound_stages=stages,
+                cache_episode_id="shared-multiq-episode",
+            ),
+        )
+        forged = dict(evidence, cache_episode_id="other-episode")
+        forged.pop("evidence_sha256")
+        forged["evidence_sha256"] = _sha(_canonical(forged))
+        with self.assertRaisesRegex(
+            FlowMeshSemanticTrialError, "cache episode differs"
+        ):
+            verify_semantic_route_evidence(
+                forged, run_id="distinct-question-run-v1",
+                bound_trial=trial, bound_stages=stages,
+                cache_episode_id="shared-multiq-episode",
+            )
+        self.assertEqual(fake.calls["cache-read"], 1)
+        self.assertEqual(fake.calls["score"], 1)
 
     def test_replay_returns_stored_evidence_without_duplicate_score(self) -> None:
         trial, stages = _bound_case(

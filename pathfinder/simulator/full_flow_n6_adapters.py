@@ -73,6 +73,7 @@ _INPUT_MODES = {
     "digest",
     "frame-bundle",
     "digest+frames-fusion",
+    "digest+indexed-frames-fusion",
 }
 DIRECT_VIDEO_REPRESENTATION_ID = "raw_video_direct"
 DIRECT_VIDEO_MEDIA_TYPE = "video/mp4"
@@ -680,6 +681,7 @@ class N6ModelInputAdapter:
                 artifacts,
                 identities,
                 profile,
+                mode,
             )
         finished = self._clock_ns()
         _require(finished >= started, "N6 preparation clock moved backwards")
@@ -1107,14 +1109,17 @@ class N6ModelInputAdapter:
         artifacts: Sequence[ArtifactAccess],
         identities: tuple[ArtifactIdentity, ...],
         profile: Mapping[str, Any] | None,
+        mode: str,
     ) -> dict[str, Any]:
         by_representation = {
             value.source_identity.representation_id: value for value in artifacts
         }
+        indexed = mode == "digest+indexed-frames-fusion"
         _require(
             set(by_representation)
-            == {"multimodal_digest", "sampled_frame_bundle"},
-            "fusion requires one digest and one frame bundle",
+            == ({"multimodal_digest", "raw_video"} if indexed else
+                {"multimodal_digest", "sampled_frame_bundle"}),
+            "fusion components do not match its input mode",
         )
         digest_access = by_representation["multimodal_digest"]
         _require(digest_access.segment is None, "fusion digest cannot be ranged")
@@ -1134,11 +1139,34 @@ class N6ModelInputAdapter:
                 profile,
                 legacy_count=self._limits.raw_frame_count,
             )
-        frames, sequence_sha = self._validated_bundle_frames(
-            by_representation["sampled_frame_bundle"],
-            frame_count=frame_count,
-        )
-        representation_id = "multimodal_digest+sampled_frame_bundle"
+        if indexed:
+            selected = by_representation["raw_video"]
+            _require(
+                profile is not None
+                and isinstance(selected.segment, ExactTemporalFrameSelection),
+                "indexed fusion requires a frozen N3 temporal projection",
+            )
+            selection = selected.segment
+            _require(
+                frame_count == selection.frame_count
+                and profile["frame_selection"]["temporal_window_fraction"]
+                == [selection.temporal_start_fraction,
+                    selection.temporal_end_fraction],
+                "indexed fusion profile differs from N3 selection",
+            )
+            frames, sequence_sha = self._validated_temporal_frames(
+                selected, selection,
+            )
+            # Both arms present digest + ordered frames under the same N6
+            # prompt label. The source identities and input mode still bind
+            # the indexed frames to N3 instead of N4.
+            representation_id = "multimodal_digest+sampled_frame_bundle"
+        else:
+            frames, sequence_sha = self._validated_bundle_frames(
+                by_representation["sampled_frame_bundle"],
+                frame_count=frame_count,
+            )
+            representation_id = "multimodal_digest+sampled_frame_bundle"
         representation_sha = semantic_fusion_representation_sha256(
             digest_sha, sequence_sha
         )
@@ -1166,7 +1194,7 @@ class N6ModelInputAdapter:
                 stage.get("stage_key"), "stage_key", max_bytes=2048
             ),
             public_task=public_task,
-            mode="digest+frames-fusion",
+            mode=mode,
             identities=identities,
             request_without_id=without_id,
         )
@@ -1229,6 +1257,9 @@ def _validate_prepared_request_binding(
         "frame-bundle": CONTAINER_NODE_SEMANTIC_VISION_REQUEST_SCHEMA_VERSION,
         "direct-video": CONTAINER_NODE_SEMANTIC_VIDEO_REQUEST_SCHEMA_VERSION,
         "digest+frames-fusion": (
+            CONTAINER_NODE_SEMANTIC_FUSION_REQUEST_SCHEMA_VERSION
+        ),
+        "digest+indexed-frames-fusion": (
             CONTAINER_NODE_SEMANTIC_FUSION_REQUEST_SCHEMA_VERSION
         ),
     }
@@ -1451,9 +1482,13 @@ def _validate_prepared_request_binding(
     identity_by_representation = {
         value.representation_id: value for value in identities
     }
+    expected_fusion_representations = (
+        {"multimodal_digest", "raw_video"}
+        if mode == "digest+indexed-frames-fusion"
+        else {"multimodal_digest", "sampled_frame_bundle"}
+    )
     _require(
-        set(identity_by_representation)
-        == {"multimodal_digest", "sampled_frame_bundle"},
+        set(identity_by_representation) == expected_fusion_representations,
         "prepared fusion component identities changed",
     )
     digest_text = _text(
@@ -1672,7 +1707,7 @@ class BoundN6SemanticInferenceAdapter:
             self._validate_video_result(result, request)
         elif mode in {"raw-prepared-frames", "frame-bundle"}:
             self._validate_vision_result(result, request)
-        elif mode == "digest+frames-fusion":
+        elif mode in {"digest+frames-fusion", "digest+indexed-frames-fusion"}:
             self._validate_vision_result(result, request)
             _require(
                 result.get("digest_sha256") == request.get("digest_sha256")

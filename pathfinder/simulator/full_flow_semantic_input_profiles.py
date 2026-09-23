@@ -34,6 +34,9 @@ INDEXED_WINDOW_PROFILE_ID = "indexed-middle-window-8-v1"
 # describing the fixed middle window so historical artifacts stay verifiable;
 # the design IDs (D1/D5) are unchanged so the comparison stays comparable.
 INDEXED_QUERY_AWARE_PROFILE_ID = "indexed-query-aware-temporal-selection-v1"
+INDEXED_DERIVED_FUSION_PROFILE_ID = (
+    "indexed-query-aware-digest-fusion-v1"
+)
 FIXED_MIDDLE_WINDOW_SELECTION = "fixed-middle-window"
 QUERY_AWARE_TEMPORAL_INDEX_SELECTION = "query-aware-temporal-index"
 # The frame_selection.method a query-aware profile records.  It is the only
@@ -50,6 +53,7 @@ DIGEST_ONLY_PROFILE_ID = "derived-digest-only-v1"
 _ROUTE_FAMILIES = {
     "raw",
     "indexed-raw",
+    "indexed-derived",
     "remote-derived",
     "local-cache-derived",
 }
@@ -163,8 +167,8 @@ def build_semantic_input_profile(
     )
     if query_aware:
         _require(
-            route_family == "indexed-raw",
-            "only the indexed-raw family has a query-aware projection",
+            route_family in {"indexed-raw", "indexed-derived"},
+            "only indexed families have a query-aware projection",
         )
         _require(
             type(indexed_frame_count) is int and 0 < indexed_frame_count <= 32,
@@ -223,6 +227,22 @@ def build_semantic_input_profile(
             temporal_window_fraction=(0.25, 0.75),
             digest_included=False,
             source_byte_range_kind="source-decoded-temporal-frame-bundle",
+        )
+    if route_family == "indexed-derived":
+        _require(
+            query_aware
+            and values == {"raw_video", "multimodal_digest"},
+            "indexed-derived requires digest and query-aware raw projection",
+        )
+        return _profile(
+            profile_id=INDEXED_DERIVED_FUSION_PROFILE_ID,
+            input_mode="digest+indexed-frames-fusion",
+            representation_ids=representations,
+            frame_count=indexed_frame_count,
+            temporal_window_fraction=indexed_temporal_window_fraction,
+            digest_included=True,
+            source_byte_range_kind="source-decoded-temporal-frame-bundle",
+            frame_selection_method=QUERY_AWARE_FRAME_SELECTION_METHOD,
         )
     _require(
         values <= _DERIVED_REPRESENTATIONS,

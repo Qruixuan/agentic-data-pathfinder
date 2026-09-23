@@ -16,12 +16,20 @@ from pathfinder.rsi_exam.formal_foundation import (
 )
 from pathfinder.rsi_exam.temporal_index_collection import (
     FormalTemporalIndexError,
+    _checksums,
     _embedding_batches,
     finalize_formal_temporal_index,
     materialize_formal_temporal_captions,
     prepare_formal_temporal_index,
     verify_formal_temporal_caption_package,
     verify_formal_temporal_index_preparation,
+)
+from pathfinder.rsi_exam.temporal_index_layers import (
+    QUERY_SELECTIONS,
+    build_temporal_query_batch,
+    build_video_temporal_index,
+    verify_temporal_query_batch,
+    verify_video_temporal_index,
 )
 from pathfinder.simulator.n3_indexed_data_plane import (
     verify_n3_indexed_data_plane_package,
@@ -370,6 +378,157 @@ class FormalTemporalIndexCollectionTest(unittest.TestCase):
             )
         )
         self.assertNotIn("pilot_config_sha256", foundation_manifest)
+
+    def test_video_index_is_built_once_for_multiple_questions(self) -> None:
+        captions = self.root / "multiq-captions"
+        materialize_formal_temporal_captions(
+            self.prep,
+            output_dir=captions,
+            cache_dir=self.root / "multiq-caption-cache",
+            package_id="multiq-captions-v1",
+            model_id="caption-model",
+            base_url="https://provider.invalid/v1",
+            api_key="test-only-key",
+            transport=self._caption_transport,
+        )
+        video_inputs = []
+
+        def video_transport(request, timeout):
+            video_inputs.extend(json.loads(request.data)["input"])
+            return self._embedding_transport(request, timeout)
+
+        video_dir = self.root / "multiq-video-index"
+        video = build_video_temporal_index(
+            self.prep,
+            captions,
+            output_dir=video_dir,
+            package_id="multiq-video-index-v1",
+            embedding_model_id="embedding-model",
+            base_url="https://provider.invalid/v1",
+            api_key="test-only-key",
+            dimension=8,
+            batch_size=8,
+            transport=video_transport,
+        )
+        self.assertEqual(3, video["object_count"])
+        self.assertEqual(video["window_vector_count"], len(video_inputs))
+        self.assertNotIn("what happened", " ".join(video_inputs))
+        questions = [
+            {"question_id": "q-after", "object_id": "video-temporal",
+             "question": "what happened after the person moved"},
+            {"question_id": "q-before", "object_id": "video-temporal",
+             "question": "what happened before the person moved"},
+            {"question_id": "q-other", "object_id": "video-causal",
+             "question": "what is visible in causal video"},
+        ]
+        query_inputs = []
+
+        def query_transport(request, timeout):
+            query_inputs.extend(json.loads(request.data)["input"])
+            return self._embedding_transport(request, timeout)
+
+        first = self.root / "multiq-query-first"
+        result = build_temporal_query_batch(
+            video_dir, self.prep, captions, questions,
+            output_dir=first,
+            package_id="multiq-query-first-v1",
+            base_url="https://provider.invalid/v1",
+            api_key="test-only-key",
+            transport=query_transport,
+        )
+        self.assertEqual(3, result["question_count"])
+        self.assertEqual(2, result["object_count"])
+        self.assertEqual(3, len(query_inputs))
+        self.assertEqual(0, result["video_build_embedding_inputs_charged_here"])
+        self.assertEqual(video["package_sha256"], result["video_index_sha256"])
+        selections = {
+            row["question_id"]: row
+            for row in (json.loads(line) for line in
+                        (first / QUERY_SELECTIONS).read_text(
+                            encoding="utf-8"
+                        ).splitlines())
+        }
+        self.assertEqual(
+            "following", selections["q-after"]["selection"]["relation"]
+        )
+        self.assertEqual(
+            "preceding", selections["q-before"]["selection"]["relation"]
+        )
+        self.assertEqual(
+            "VERIFIED_MULTI_QUESTION_TEMPORAL_SELECTIONS",
+            verify_temporal_query_batch(
+                first, video_dir, self.prep, captions, questions
+            )["status"],
+        )
+        self.assertEqual(
+            "VERIFIED_REUSABLE_VIDEO_TEMPORAL_INDEX",
+            verify_video_temporal_index(video_dir, self.prep, captions)[
+                "status"
+            ],
+        )
+
+        second = self.root / "multiq-query-second"
+        build_temporal_query_batch(
+            video_dir, self.prep, captions, questions[:2],
+            output_dir=second,
+            package_id="multiq-query-second-v1",
+            base_url="https://provider.invalid/v1",
+            api_key="test-only-key",
+            transport=query_transport,
+        )
+        self.assertEqual(
+            video["package_sha256"],
+            verify_video_temporal_index(video_dir, self.prep, captions)[
+                "package_sha256"
+            ],
+        )
+        with self.assertRaisesRegex(
+            FormalTemporalIndexError, "non-public fields"
+        ):
+            build_temporal_query_batch(
+                video_dir, self.prep, captions,
+                [{**questions[0], "correct_answer_id": "A"}],
+                output_dir=self.root / "refused-query",
+                package_id="refused-query-v1",
+                base_url="https://provider.invalid/v1",
+                api_key="test-only-key",
+                transport=query_transport,
+            )
+
+        changed = [dict(row) for row in questions]
+        changed[0]["question"] += " now"
+        with self.assertRaisesRegex(
+            FormalTemporalIndexError, "source or accounting binding"
+        ):
+            verify_temporal_query_batch(
+                first, video_dir, self.prep, captions, changed
+            )
+
+        # A rewritten manifest and SHA256SUMS still cannot make an altered
+        # selection pass the source-bound recomputation.
+        altered = list(selections.values())
+        altered.sort(key=lambda row: row["question_id"])
+        altered[0]["selection"]["selected_window_ordinals"] = [999]
+        canonical = lambda value: json.dumps(
+            value, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        selection_bytes = b"".join(canonical(row) + b"\n" for row in altered)
+        (first / QUERY_SELECTIONS).write_bytes(selection_bytes)
+        package_path = first / "temporal-query-batch.json"
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+        package["selections_sha256"] = _sha256(selection_bytes)
+        package.pop("package_sha256")
+        package["package_sha256"] = _sha256(canonical(package))
+        _write_json(package_path, package)
+        (first / "SHA256SUMS").write_bytes(_checksums(first))
+        with self.assertRaisesRegex(
+            FormalTemporalIndexError,
+            "selection does not rebuild from frozen inputs",
+        ):
+            verify_temporal_query_batch(
+                first, video_dir, self.prep, captions, questions
+            )
 
     def test_text_embedding_v4_batch_limit_fails_before_transport(self) -> None:
         def transport(request, timeout):

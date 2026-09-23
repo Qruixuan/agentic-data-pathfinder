@@ -32,6 +32,7 @@ from .full_flow_semantic_execution_admission import (
     BOUND_TRIAL_SCHEMA_VERSION,
 )
 from .full_flow_semantic_route_evidence import (
+    SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION,
     SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
     verify_public_semantic_route_evidence,
 )
@@ -64,6 +65,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,255}\Z")
 _ROUTE_FAMILIES = {
     "raw",
     "indexed-raw",
+    "indexed-derived",
     "remote-derived",
     "local-cache-derived",
 }
@@ -73,6 +75,7 @@ _INPUT_MODES = {
     "digest",
     "frame-bundle",
     "digest+frames-fusion",
+    "digest+indexed-frames-fusion",
 }
 _SCORE_RESULT_FIELDS = {
     "schema_version",
@@ -992,6 +995,11 @@ def _validate_trial_and_stages(
             set(identities) == {"raw_video"},
             "raw route must bind only raw_video",
         )
+    elif route_family == "indexed-derived":
+        _require(
+            set(identities) == {"raw_video", "multimodal_digest"},
+            "indexed-derived route requires raw_video and multimodal_digest",
+        )
     else:
         _require(
             set(identities) <= {"multimodal_digest", "sampled_frame_bundle"},
@@ -1093,14 +1101,14 @@ def _validate_trial_and_stages(
         "trial must end in exactly one hidden score",
     )
     _require(actions[0] == "admit-trial", "trial must begin with N1 admission")
-    if route_family == "indexed-raw":
+    if route_family in {"indexed-raw", "indexed-derived"}:
         _require(
             any(
                 stage.get("action") == "query-index"
                 and stage.get("logical_node_ids") == ["N2"]
                 for stage in stages
             ),
-            "indexed-raw route lacks its N2 query",
+            "indexed route lacks its N2 query",
         )
     if route_family == "local-cache-derived":
         _require("lookup" in actions, "cache route lacks a lookup")
@@ -1113,6 +1121,11 @@ def _validate_trial_and_stages(
             "non-cache route contains cache stages",
         )
     profile = trial.get("semantic_input_profile")
+    if route_family == "indexed-derived":
+        _require(
+            isinstance(profile, Mapping),
+            "indexed-derived route requires a frozen fusion profile",
+        )
     if profile is not None:
         frontier = model_input_frontier_representation_ids(stages)
         try:
@@ -1492,6 +1505,12 @@ def _input_mode(
         if route_family == "raw":
             return "direct-video"
         return "raw-prepared-frames"
+    if values == {"raw_video", "multimodal_digest"}:
+        _require(
+            route_family == "indexed-derived",
+            "raw and digest fusion requires indexed-derived route",
+        )
+        return "digest+indexed-frames-fusion"
     if values == {"multimodal_digest"}:
         return "digest"
     if values == {"sampled_frame_bundle"}:
@@ -1681,13 +1700,21 @@ class GenericSemanticRouteCoordinator:
         run_id: str,
         bound_trial: Mapping[str, Any],
         bound_stages: Sequence[Mapping[str, Any]],
+        cache_episode_id: str | None = None,
     ) -> dict[str, Any]:
         run_id = _text(run_id, "run_id", maximum=256)
+        if cache_episode_id is not None:
+            cache_episode_id = _identifier(cache_episode_id, "cache_episode_id")
         trial, stages, identities, public_task = _validate_trial_and_stages(
             bound_trial,
             bound_stages,
         )
         trial_key = trial["trial_key"]
+        _require(
+            cache_episode_id is None
+            or trial["route_family"] == "local-cache-derived",
+            "cache episode is only valid for a cache route",
+        )
         request_core = {
             "domain": "pathfinder.generic-semantic-route-execution/v1",
             "run_id": run_id,
@@ -1697,6 +1724,8 @@ class GenericSemanticRouteCoordinator:
             "oracle_id": self._oracle_id,
             "oracle_public_task_set_sha256": self._public_task_set_sha256,
         }
+        if cache_episode_id is not None:
+            request_core["cache_episode_id"] = cache_episode_id
         request_sha256 = _sha256(_canonical(request_core))
         execution_id = _sha256(_canonical({
             "domain": "pathfinder.generic-semantic-route-id/v1",
@@ -1719,6 +1748,7 @@ class GenericSemanticRouteCoordinator:
                 stages=stages,
                 identities=identities,
                 public_task=public_task,
+                cache_episode_id=cache_episode_id,
             )
             self._store.complete(execution_id, request_sha256, evidence)
             return evidence
@@ -1740,6 +1770,7 @@ class GenericSemanticRouteCoordinator:
         stages: list[dict[str, Any]],
         identities: dict[str, tuple[str, ArtifactIdentity]],
         public_task: dict[str, Any],
+        cache_episode_id: str | None = None,
     ) -> dict[str, Any]:
         provisioning: list[ProvisioningReference] = []
         for chain_id in trial.get("required_provisioning_chain_ids", []):
@@ -1879,20 +1910,27 @@ class GenericSemanticRouteCoordinator:
                     outcome.selected_object_id == trial["artifact_object_id"],
                     "N2/local index selected a different artifact object",
                 )
-                if trial["route_family"] == "indexed-raw":
+                if trial["route_family"] in {"indexed-raw", "indexed-derived"}:
                     _require(
                         stage.get("logical_node_ids") == ["N2"],
-                        "indexed-raw selection must come from N2",
+                        "indexed selection must come from N2",
                     )
                     _require(
                         outcome.segment is not None,
-                        "indexed-raw requires an exact content-bound N2 range; "
+                        "indexed route requires an exact content-bound N2 range; "
                         "estimated fractions are not executable",
                     )
                     _require(
                         outcome.segment.matches(identities["raw_video"][1]),
                         "N2 range does not bind the frozen N3 raw artifact",
                     )
+                    if trial["route_family"] == "indexed-derived":
+                        _require(
+                            isinstance(
+                                outcome.segment, ExactTemporalFrameSelection
+                            ),
+                            "indexed-derived requires an N3 temporal projection",
+                        )
             elif action in {"access-raw-artifact", "access-derived-artifact"}:
                 _require(identity is not None, "artifact access lacks an identity")
                 expected_node = "N3" if action == "access-raw-artifact" else "N4"
@@ -1905,7 +1943,11 @@ class GenericSemanticRouteCoordinator:
                     for value in dependency_values
                     for selection in _find_values(value, IndexSelection)
                 ]
-                if trial["route_family"] == "indexed-raw":
+                if (
+                    action == "access-raw-artifact"
+                    and trial["route_family"]
+                    in {"indexed-raw", "indexed-derived"}
+                ):
                     _require(
                         len(selections) == 1 and selections[0].segment is not None,
                         "N2 exact range was not handed to N3",
@@ -1988,24 +2030,30 @@ class GenericSemanticRouteCoordinator:
                     stage.get("logical_node_ids") == [trial["executor_node_id"]],
                     "cache lookup is not on the selected executor",
                 )
+                cache_episode_kwargs = (
+                    {"cache_episode_id": cache_episode_id}
+                    if cache_episode_id is not None else {}
+                )
                 outcome = self._adapters.cache.lookup(
                     run_id=run_id,
                     trial=trial,
                     stage=stage,
                     identity=identity,
+                    **cache_episode_kwargs,
                 )
                 _require(isinstance(outcome, CacheLookupResult), "cache lookup result is invalid")
                 _require(
                     outcome.node_id == trial["executor_node_id"],
                     "cache lookup came from the wrong executor",
                 )
-                repetition = _integer(trial.get("repetition"), "repetition")
-                expected_branch = "miss" if repetition == 0 else "hit"
-                _require(
-                    outcome.branch == expected_branch,
-                    "cache branch differs from the frozen repetition lifecycle",
-                )
-                if outcome.branch == "hit":
+                if cache_episode_id is None:
+                    repetition = _integer(trial.get("repetition"), "repetition")
+                    expected_branch = "miss" if repetition == 0 else "hit"
+                    _require(
+                        outcome.branch == expected_branch,
+                        "cache branch differs from the frozen repetition lifecycle",
+                    )
+                if outcome.branch == "hit" and cache_episode_id is None:
                     prefix, separator, suffix = trial["trial_key"].rpartition("|")
                     _require(
                         bool(separator)
@@ -2014,6 +2062,12 @@ class GenericSemanticRouteCoordinator:
                         == f"{prefix}|r{repetition - 1:04d}",
                         "cache hit does not bind the immediately preceding "
                         "paired insertion trial",
+                    )
+                if outcome.branch == "hit" and cache_episode_id is not None:
+                    _require(
+                        outcome.source_insert_trial_key is not None
+                        and outcome.source_insert_trial_key != trial["trial_key"],
+                        "episode cache hit lacks a prior insertion trial",
                     )
                 cache_epochs.add((outcome.node_id, outcome.cache_id, outcome.runtime_epoch))
                 cache_evidence.append({
@@ -2061,6 +2115,10 @@ class GenericSemanticRouteCoordinator:
                     and len(artifacts) == 1,
                     "cache insert did not follow one miss artifact",
                 )
+                cache_episode_kwargs = (
+                    {"cache_episode_id": cache_episode_id}
+                    if cache_episode_id is not None else {}
+                )
                 outcome = self._adapters.cache.insert(
                     run_id=run_id,
                     trial=trial,
@@ -2068,6 +2126,7 @@ class GenericSemanticRouteCoordinator:
                     identity=identity,
                     lookup=lookups[0],
                     artifact=artifacts[0],
+                    **cache_episode_kwargs,
                 )
                 _require(isinstance(outcome, CacheInsertResult), "cache insert result is invalid")
                 _require(
@@ -2309,7 +2368,11 @@ class GenericSemanticRouteCoordinator:
             trial.get("semantic_input_profile"),
         )
         evidence: dict[str, Any] = {
-            "schema_version": SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
+            "schema_version": (
+                SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION
+                if cache_episode_id is not None
+                else SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION
+            ),
             "status": "COMPLETE",
             "execution_id": execution_id,
             "request_sha256": request_sha256,
@@ -2404,6 +2467,8 @@ class GenericSemanticRouteCoordinator:
             "credentials_recorded": False,
             "eligible_for_scientific_claims": False,
         }
+        if cache_episode_id is not None:
+            evidence["cache_episode_id"] = cache_episode_id
         _assert_credential_free(evidence)
         evidence["evidence_sha256"] = _sha256(_canonical(evidence))
         return verify_public_semantic_route_evidence(evidence)

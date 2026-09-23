@@ -26,6 +26,9 @@ from .hidden_oracle import (
 SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION = (
     "pathfinder.full-flow-semantic-route-evidence/v1alpha2"
 )
+SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION = (
+    "pathfinder.full-flow-semantic-route-evidence/v1alpha3"
+)
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,255}\Z")
@@ -400,17 +403,33 @@ def _assert_no_private_keys(value: Any, path: str = "evidence") -> None:
 
 def _validate_shape(evidence: Mapping[str, Any]) -> None:
     is_legacy = "semantic_input_profile_verified" not in evidence
+    is_episode = (
+        evidence.get("schema_version")
+        == SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION
+    )
     _exact_fields(
         evidence,
-        _LEGACY_EVIDENCE_FIELDS if is_legacy else _EVIDENCE_FIELDS,
+        (_EVIDENCE_FIELDS | {"cache_episode_id"}) if is_episode
+        else _LEGACY_EVIDENCE_FIELDS if is_legacy else _EVIDENCE_FIELDS,
         "semantic route evidence",
     )
     _require(
-        evidence.get("schema_version") == SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION
+        evidence.get("schema_version") in {
+            SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION,
+            SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION,
+        }
         and evidence.get("status") == "COMPLETE",
         "semantic route evidence schema or status changed",
     )
-    _exact_fields(evidence.get("route"), _ROUTE_FIELDS, "route")
+    route = _exact_fields(evidence.get("route"), _ROUTE_FIELDS, "route")
+    if is_episode:
+        _require(
+            not is_legacy
+            and isinstance(evidence.get("cache_episode_id"), str)
+            and _IDENTIFIER.fullmatch(evidence["cache_episode_id"]) is not None
+            and route.get("route_family") == "local-cache-derived",
+            "episode evidence lacks a valid cache scope",
+        )
 
     artifacts = evidence.get("artifact_identities")
     _require(isinstance(artifacts, list), "artifact_identities must be an array")
@@ -738,6 +757,7 @@ def verify_public_semantic_route_evidence(
 
 
 __all__ = [
+    "SEMANTIC_ROUTE_EPISODE_EVIDENCE_SCHEMA_VERSION",
     "SEMANTIC_ROUTE_EVIDENCE_SCHEMA_VERSION",
     "SemanticRouteEvidenceValidationError",
     "verify_public_semantic_route_evidence",

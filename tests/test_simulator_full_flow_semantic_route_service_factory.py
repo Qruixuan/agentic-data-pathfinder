@@ -406,6 +406,21 @@ class SemanticRouteServiceFactoryTests(unittest.TestCase):
         self.assertNotIn("http://", repr(runtime))
         self.assertNotIn("runtime-secret", repr(runtime))
 
+    def test_indexed_derived_requires_bound_multiq_catalog_before_state(self) -> None:
+        self.trial["route_family"] = "indexed-derived"
+        state = self.root / "blocked-state"
+        with self._patch_sources():
+            with self.assertRaisesRegex(
+                FullFlowSemanticRouteServiceFactoryError,
+                "lacks a source-bound multi-question N3 plan",
+            ):
+                assemble_full_flow_semantic_route_service(
+                    self._sources(),
+                    self._runtime(),
+                    state_dir=state,
+                )
+        self.assertFalse(state.exists())
+
     def test_indexed_trial_binds_private_n3_projection_plan(self) -> None:
         path = self.paths["n3"] / "raw-cold-data-plane.json"
         document = json.loads(path.read_text(encoding="utf-8"))

@@ -102,6 +102,16 @@ def semantic_cache_namespace(run_id: str) -> str:
     }))[:40]
 
 
+def semantic_cache_episode_namespace(episode_id: str) -> str:
+    """Isolate cross-question reuse from the legacy run-scoped namespace."""
+
+    normalized = _text(episode_id, "cache episode_id", maximum=256)
+    return "episode-" + _sha256(_canonical({
+        "domain": "pathfinder.semantic-cache-episode-namespace/v1",
+        "episode_id": normalized,
+    }))[:40]
+
+
 def _require(condition: object, message: str) -> None:
     if not condition:
         raise FullFlowRouteAdapterError(message)
@@ -422,10 +432,25 @@ class BoundIndexQueryAdapter:
         selected = self._selection(result, expected_object_id)
         finished = self._clock_ns()
         segment = None
-        if trial.get("route_family") == "indexed-raw":
-            _require(logical_node == "N2", "indexed raw did not use global N2")
+        indexed_derived = trial.get("route_family") == "indexed-derived"
+        if trial.get("route_family") == "indexed-raw" or indexed_derived:
+            _require(logical_node == "N2", "indexed route did not use global N2")
             identity = _raw_identity(trial)
-            segment = self._ranges.resolve(identity)
+            task_resolver = getattr(self._ranges, "resolve_for_task", None)
+            _require(
+                not indexed_derived or callable(task_resolver),
+                "indexed-derived lacks a task-bound temporal resolver",
+            )
+            if callable(task_resolver):
+                segment = task_resolver(
+                    identity,
+                    task_binding_sha256=_digest(
+                        public_task.get("task_binding_sha256"),
+                        "public task binding digest",
+                    ),
+                )
+            else:
+                segment = self._ranges.resolve(identity)
             _require(
                 isinstance(
                     segment,
@@ -434,6 +459,11 @@ class BoundIndexQueryAdapter:
                 and segment.matches(identity),
                 "exact selection resolver changed the raw artifact identity",
             )
+            if indexed_derived:
+                _require(
+                    isinstance(segment, ExactTemporalFrameSelection),
+                    "indexed-derived did not select an N3 frame bundle",
+                )
         return IndexSelection(
             selected_object_id=selected,
             index_result_sha256=result_sha,
@@ -1234,12 +1264,18 @@ class HttpArtifactCacheRouteAdapter:
         self,
         *,
         run_id: str,
+        cache_episode_id: str | None = None,
         trial: Mapping[str, Any],
         stage: Mapping[str, Any],
         identity: ArtifactIdentity,
     ) -> CacheLookupResult:
         node = self._node(trial, stage)
-        namespace = semantic_cache_namespace(run_id)
+        scope_id = cache_episode_id or run_id
+        namespace = (
+            semantic_cache_episode_namespace(cache_episode_id)
+            if cache_episode_id is not None
+            else semantic_cache_namespace(run_id)
+        )
         cache_id, epoch_before = self._identity(node)
         started = self._clock_ns()
         artifact = self._clients[node].get(
@@ -1255,19 +1291,30 @@ class HttpArtifactCacheRouteAdapter:
             "cache runtime identity changed during lookup",
         )
         source_trial = self._lineage.resolve(
-            run_id=run_id,
+            run_id=scope_id,
             node_id=node,
             cache_id=cache_id,
             runtime_epoch=epoch_before,
             identity=identity,
         )
         branch = "hit" if artifact is not None else "miss"
-        _require(
-            (branch == "hit" and source_trial is not None)
-            or (branch == "miss" and source_trial is None),
-            "cache bytes and durable insertion lineage disagree",
-        )
-        lookup_sha = _sha256(_canonical({
+        if cache_episode_id is None:
+            _require(
+                (branch == "hit" and source_trial is not None)
+                or (branch == "miss" and source_trial is None),
+                "cache bytes and durable insertion lineage disagree",
+            )
+        else:
+            _require(
+                branch == "miss" or source_trial is not None,
+                "episode cache hit lacks durable insertion lineage",
+            )
+            # An episode can revisit a video after its entry was evicted.
+            # The old lineage remains in SQLite until the next insertion,
+            # but it is not evidence that the bytes are still in the cache.
+            if branch == "miss":
+                source_trial = None
+        lookup_binding = {
             "domain": "pathfinder.http-cache-lookup/v1",
             "run_id": run_id,
             "trial_key": trial.get("trial_key"),
@@ -1278,7 +1325,10 @@ class HttpArtifactCacheRouteAdapter:
             "artifact_identity_sha256": identity.commitment,
             "branch": branch,
             "source_insert_trial_key": source_trial,
-        }))
+        }
+        if cache_episode_id is not None:
+            lookup_binding["cache_episode_id"] = cache_episode_id
+        lookup_sha = _sha256(_canonical(lookup_binding))
         if artifact is not None:
             _require(
                 artifact.content_sha256 == identity.artifact_sha256
@@ -1336,6 +1386,7 @@ class HttpArtifactCacheRouteAdapter:
         self,
         *,
         run_id: str,
+        cache_episode_id: str | None = None,
         trial: Mapping[str, Any],
         stage: Mapping[str, Any],
         identity: ArtifactIdentity,
@@ -1366,7 +1417,11 @@ class HttpArtifactCacheRouteAdapter:
         }))
         started = self._clock_ns()
         result = self._clients[node].put(
-            cache_namespace=semantic_cache_namespace(run_id),
+            cache_namespace=(
+                semantic_cache_episode_namespace(cache_episode_id)
+                if cache_episode_id is not None
+                else semantic_cache_namespace(run_id)
+            ),
             request_id=request_id,
             object_id=identity.object_id,
             representation_id=identity.representation_id,
@@ -1391,7 +1446,7 @@ class HttpArtifactCacheRouteAdapter:
             trial.get("trial_key"), "source trial key", maximum=2048
         )
         self._lineage.record(
-            run_id=run_id,
+            run_id=cache_episode_id or run_id,
             node_id=node,
             cache_id=cache_id,
             runtime_epoch=epoch_before,
@@ -1751,5 +1806,6 @@ __all__ = [
     "StaticDataAgentPlanIdResolver",
     "VerifiedN1HTTPScoringAdapter",
     "build_http_semantic_route_adapters",
+    "semantic_cache_episode_namespace",
     "semantic_cache_namespace",
 ]
