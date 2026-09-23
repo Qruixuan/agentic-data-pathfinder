@@ -23,6 +23,7 @@ import math
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -31,7 +32,7 @@ import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -325,6 +326,54 @@ def _semantic_provider_error_metadata(
         else None
     )
     return code, error_type, message_sha256
+
+
+def _semantic_provider_token_usage(
+    payload: Mapping[str, Any],
+) -> dict[str, int] | None:
+    """Keep only validated numeric usage from a successful LLM response."""
+    usage = payload.get("usage")
+    if not isinstance(usage, Mapping):
+        return None
+    input_units = usage.get("input_tokens", usage.get("prompt_tokens"))
+    output_units = usage.get("output_tokens", usage.get("completion_tokens"))
+    if (type(input_units) is not int or input_units < 0
+            or type(output_units) is not int or output_units < 0):
+        return None
+    if ("input_tokens" in usage and "prompt_tokens" in usage
+            and usage["input_tokens"] != usage["prompt_tokens"]):
+        return None
+    if ("output_tokens" in usage and "completion_tokens" in usage
+            and usage["output_tokens"] != usage["completion_tokens"]):
+        return None
+    total = usage.get("total_tokens")
+    if total is not None and (
+        type(total) is not int or total != input_units + output_units
+    ):
+        return None
+    details = [
+        usage.get(name)
+        for name in ("prompt_tokens_details", "input_tokens_details")
+        if name in usage
+    ]
+    if any(not isinstance(value, Mapping) for value in details):
+        return None
+    cached_values = [
+        value.get("cached_tokens", 0) for value in details
+    ]
+    if any(type(value) is not int or value < 0 for value in cached_values):
+        return None
+    if len(set(cached_values)) > 1:
+        return None
+    cached = cached_values[0] if cached_values else 0
+    if cached > input_units:
+        return None
+    return {
+        "input_units": input_units,
+        "cached_input_units": cached,
+        "output_units": output_units,
+        "total_units": input_units + output_units,
+    }
 
 
 def _semantic_error_diagnostic(exc: BaseException) -> dict[str, Any]:
@@ -969,6 +1018,7 @@ class ContainerNodeRuntime:
         self._semantic_request_sha256: dict[str, str] = {}
         self._semantic_requests_in_flight: set[str] = set()
         self._semantic_results: dict[str, dict[str, Any]] = {}
+        self._semantic_usage_journal_error_count = 0
 
     def health(self) -> dict[str, Any]:
         configured = all(
@@ -980,7 +1030,7 @@ class ContainerNodeRuntime:
                 "PATHFINDER_SEMANTIC_LLM_API_KEY",
             )
         )
-        return {
+        health = {
             "api_version": CONTAINER_NODE_API_VERSION,
             "status": "ok",
             "node_id": self.node_id,
@@ -1044,6 +1094,11 @@ class ContainerNodeRuntime:
             ),
             "credentials_recorded": False,
         }
+        if self.node_id == "N6":
+            health["semantic_usage_journal_error_count"] = (
+                self._semantic_usage_journal_error_count
+            )
+        return health
 
     def execute_full_flow_trial(
         self,
@@ -1311,6 +1366,7 @@ class ContainerNodeRuntime:
         video_payload: bytes | None = None,
         video_media_type: str | None = None,
         video_frames_per_second: float | None = None,
+        usage_sink: Callable[[dict[str, int]], None] | None = None,
     ) -> tuple[str, str]:
         base_url, model, api_key, timeout = self._semantic_llm_configuration()
         _require(
@@ -1468,6 +1524,9 @@ class ContainerNodeRuntime:
             api_key not in answer,
             "semantic LLM answer contains a configured credential",
         )
+        usage = _semantic_provider_token_usage(payload)
+        if usage is not None and usage_sink is not None:
+            usage_sink(usage)
         return answer, reported_model
 
     def semantic_complete(self, request: Mapping[str, Any]) -> dict[str, Any]:
@@ -1545,10 +1604,83 @@ class ContainerNodeRuntime:
         with self._operation_condition:
             stored = dict(result)
             stored["idempotent_replay"] = False
+            try:
+                self._record_semantic_provider_usage(stored)
+            except (OSError, sqlite3.Error):
+                # A paid inference must not be repeated merely because the
+                # optional cost journal is unavailable. The health counter
+                # and missing row make that cost evidence incomplete.
+                self._semantic_usage_journal_error_count += 1
             self._semantic_results[request_id] = stored
             self._semantic_requests_in_flight.discard(request_id)
             self._operation_condition.notify_all()
             return dict(stored)
+
+    def _record_semantic_provider_usage(
+        self, result: Mapping[str, Any],
+    ) -> None:
+        """Persist only N6 numeric usage and result-binding digests."""
+        usage = result.get("provider_usage")
+        if self.node_id != "N6" or usage is None:
+            return
+        _require(
+            isinstance(usage, Mapping)
+            and set(usage) == {
+                "input_units", "cached_input_units", "output_units",
+                "total_units",
+            }
+            and all(type(value) is int and value >= 0
+                    for value in usage.values())
+            and usage["cached_input_units"] <= usage["input_units"]
+            and usage["total_units"]
+            == usage["input_units"] + usage["output_units"],
+            "N6 provider usage is invalid",
+        )
+        result_sha256 = hashlib.sha256(_canonical_json_bytes(
+            result, "N6 semantic result",
+        )).hexdigest()
+        request_sha256 = _text(
+            result.get("request_sha256"), "N6 semantic request digest",
+        )
+        _require(
+            re.fullmatch(r"[0-9a-f]{64}", request_sha256) is not None,
+            "N6 semantic request digest is invalid",
+        )
+        path = self.state_dir / "n6-provider-usage-v1.sqlite3"
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.close(fd)
+        connection = sqlite3.connect(path)
+        try:
+            with connection:
+                connection.execute("""
+                    CREATE TABLE IF NOT EXISTS n6_provider_usage (
+                        result_sha256 TEXT PRIMARY KEY,
+                        request_sha256 TEXT NOT NULL,
+                        input_units INTEGER NOT NULL,
+                        cached_input_units INTEGER NOT NULL,
+                        output_units INTEGER NOT NULL,
+                        total_units INTEGER NOT NULL
+                    )
+                """)
+                connection.execute("""
+                    INSERT OR IGNORE INTO n6_provider_usage VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    result_sha256, request_sha256,
+                    usage["input_units"], usage["cached_input_units"],
+                    usage["output_units"], usage["total_units"],
+                ))
+                recorded = connection.execute("""
+                    SELECT request_sha256, input_units, cached_input_units,
+                           output_units, total_units
+                    FROM n6_provider_usage WHERE result_sha256 = ?
+                """, (result_sha256,)).fetchone()
+                _require(recorded == (
+                    request_sha256, usage["input_units"],
+                    usage["cached_input_units"], usage["output_units"],
+                    usage["total_units"],
+                ), "N6 provider usage journal conflicts with result")
+        finally:
+            connection.close()
 
     def _semantic_complete_once(
         self,
@@ -1651,7 +1783,10 @@ class ContainerNodeRuntime:
             "semantic prompt digest mismatch",
         )
         started_ns = time.perf_counter_ns()
-        answer, model = self._call_semantic_llm(prompt)
+        provider_usage: list[dict[str, int]] = []
+        answer, model = self._call_semantic_llm(
+            prompt, usage_sink=provider_usage.append,
+        )
         finished_ns = time.perf_counter_ns()
         return {
             "schema_version": CONTAINER_NODE_SEMANTIC_RESULT_SCHEMA_VERSION,
@@ -1674,6 +1809,7 @@ class ContainerNodeRuntime:
             "final_answer": answer,
             "final_answer_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
             "llm_called": True,
+            **({"provider_usage": provider_usage[0]} if provider_usage else {}),
             "credentials_recorded": False,
         }
 
@@ -1770,11 +1906,13 @@ class ContainerNodeRuntime:
             "semantic prompt digest mismatch",
         )
         started_ns = time.perf_counter_ns()
+        provider_usage: list[dict[str, int]] = []
         answer, model = self._call_semantic_llm(
             prompt,
             video_payload=payload,
             video_media_type=media_type,
             video_frames_per_second=fps,
+            usage_sink=provider_usage.append,
         )
         finished_ns = time.perf_counter_ns()
         return {
@@ -1809,6 +1947,7 @@ class ContainerNodeRuntime:
                 answer.encode("utf-8")
             ).hexdigest(),
             "llm_called": True,
+            **({"provider_usage": provider_usage[0]} if provider_usage else {}),
             "credentials_recorded": False,
         }
 
@@ -1877,9 +2016,11 @@ class ContainerNodeRuntime:
             "semantic prompt digest mismatch",
         )
         started_ns = time.perf_counter_ns()
+        provider_usage: list[dict[str, int]] = []
         answer, model = self._call_semantic_llm(
             prompt,
             jpeg_frames=tuple(frame["jpeg_bytes"] for frame in frames),
+            usage_sink=provider_usage.append,
         )
         finished_ns = time.perf_counter_ns()
         return {
@@ -1911,6 +2052,7 @@ class ContainerNodeRuntime:
                 answer.encode("utf-8")
             ).hexdigest(),
             "llm_called": True,
+            **({"provider_usage": provider_usage[0]} if provider_usage else {}),
             "credentials_recorded": False,
         }
 
@@ -2003,9 +2145,11 @@ class ContainerNodeRuntime:
             "semantic prompt digest mismatch",
         )
         started_ns = time.perf_counter_ns()
+        provider_usage: list[dict[str, int]] = []
         answer, model = self._call_semantic_llm(
             prompt,
             jpeg_frames=tuple(frame["jpeg_bytes"] for frame in frames),
+            usage_sink=provider_usage.append,
         )
         finished_ns = time.perf_counter_ns()
         return {
@@ -2042,6 +2186,7 @@ class ContainerNodeRuntime:
                 answer.encode("utf-8")
             ).hexdigest(),
             "llm_called": True,
+            **({"provider_usage": provider_usage[0]} if provider_usage else {}),
             "credentials_recorded": False,
         }
 
