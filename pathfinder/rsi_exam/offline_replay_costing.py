@@ -218,8 +218,10 @@ def build_object_price_table(
     }
 
 
-def _workbook_usage_rows(path: str | Path) -> list[dict[str, Any]]:
-    """Read only model, usage and HTTP status from an XLSX request log."""
+def _workbook_selected_cells(
+    path: str | Path, *, include_request_id: bool = False,
+) -> list[dict[str, str]]:
+    """Read only columns needed for request-ID and usage reconciliation."""
     ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with ZipFile(path) as archive:
         shared: list[str] = []
@@ -233,14 +235,21 @@ def _workbook_usage_rows(path: str | Path) -> list[dict[str, Any]]:
                         name.startswith("xl/worksheets/sheet") and
                         name.endswith(".xml"))
         _require(len(sheets) == 1, "provider workbook must contain one sheet")
+        _require(
+            archive.getinfo(sheets[0]).file_size <= 32 * 1024 * 1024,
+            "provider worksheet exceeds the safety limit",
+        )
         sheet = ElementTree.fromstring(archive.read(sheets[0]))
-    rows: list[dict[str, Any]] = []
+    selected = {"C", "D", "G"}
+    if include_request_id:
+        selected.add("A")
+    rows: list[dict[str, str]] = []
     for row in sheet.findall(".//x:sheetData/x:row", ns):
         cells: dict[str, str] = {}
         for cell in row.findall("x:c", ns):
             letter = "".join(char for char in cell.attrib.get("r", "")
                              if char.isalpha())
-            if letter not in {"C", "D", "G"}:
+            if letter not in selected:
                 continue
             value = cell.find("x:v", ns)
             if value is None:
@@ -253,26 +262,68 @@ def _workbook_usage_rows(path: str | Path) -> list[dict[str, Any]]:
             else:
                 text = value.text or ""
             cells[letter] = text
+        rows.append(cells)
+    return rows
+
+
+def _provider_usage_from_cells(cells: Mapping[str, str]) -> dict[str, int]:
+    try:
+        usage = json.loads(cells["D"])
+    except (KeyError, json.JSONDecodeError) as exc:
+        raise ValueError("successful provider row lacks usage") from exc
+    _require(isinstance(usage, dict), "provider usage is not an object")
+    details = usage.get("prompt_tokens_details", {})
+    _require(isinstance(details, dict), "provider cache detail is invalid")
+    input_units = usage.get("input_tokens")
+    output_units = usage.get("output_tokens")
+    cached_units = details.get("cached_tokens", 0)
+    _units(input_units, "provider input units")
+    _units(output_units, "provider output units")
+    _units(cached_units, "provider cached units")
+    _require(cached_units <= input_units, "provider cache exceeds input")
+    return {
+        "input_units": input_units,
+        "output_units": output_units,
+        "cached_input_units": cached_units,
+    }
+
+
+def _workbook_usage_rows(path: str | Path) -> list[dict[str, Any]]:
+    """Read only numeric usage from successful qwen3.8-27b log rows."""
+    rows: list[dict[str, Any]] = []
+    for cells in _workbook_selected_cells(path):
         if cells.get("C") != "qwen3.8-27b" or cells.get("G") != "200":
             continue
-        try:
-            usage = json.loads(cells["D"])
-        except (KeyError, json.JSONDecodeError) as exc:
-            raise ValueError("successful provider row lacks usage") from exc
-        _require(isinstance(usage, dict), "provider usage is not an object")
-        details = usage.get("prompt_tokens_details", {})
-        _require(isinstance(details, dict), "provider cache detail is invalid")
-        input_units = usage.get("input_tokens")
-        output_units = usage.get("output_tokens")
-        cached_units = details.get("cached_tokens", 0)
-        _units(input_units, "provider input units")
-        _units(output_units, "provider output units")
-        _units(cached_units, "provider cached units")
-        _require(cached_units <= input_units, "provider cache exceeds input")
+        rows.append(_provider_usage_from_cells(cells))
+    return rows
+
+
+_PROVIDER_REQUEST_UUID = re.compile(
+    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+)
+
+
+def _workbook_request_id_rows(path: str | Path) -> list[dict[str, Any]]:
+    """Hash request IDs in memory; return no raw workbook identifiers."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for cells in _workbook_selected_cells(
+        path, include_request_id=True,
+    ):
+        if cells.get("C") != "qwen3.8-27b" or cells.get("G") != "200":
+            continue
+        request_id = cells.get("A")
+        _require(
+            isinstance(request_id, str)
+            and _PROVIDER_REQUEST_UUID.fullmatch(request_id) is not None,
+            "successful provider row lacks a valid request ID",
+        )
+        digest = hashlib.sha256(request_id.encode("ascii")).hexdigest()
+        _require(digest not in seen, "duplicate provider request ID")
+        seen.add(digest)
         rows.append({
-            "input_units": input_units,
-            "output_units": output_units,
-            "cached_input_units": cached_units,
+            "request_id_sha256": digest,
+            **_provider_usage_from_cells(cells),
         })
     return rows
 
@@ -472,6 +523,92 @@ def price_verified_smoke_n6_usage(
     }
 
 
+def verify_smoke_provider_request_log(
+    smoke_rows: Sequence[Mapping[str, Any]],
+    usage_rows: Sequence[Mapping[str, Any]],
+    attempt_rows: Sequence[Mapping[str, Any]],
+    provider_log_xlsx: str | Path,
+) -> dict[str, Any]:
+    """Require an exact N6 result -> response header -> log Request ID join.
+
+    The provider's raw Request IDs exist only while parsing the workbook.
+    No timestamp or coincidental token-count match can establish this join.
+    A retry requires separate accounting and therefore fails this strict
+    one-attempt-per-result reconciliation.
+    """
+    priced = price_verified_smoke_n6_usage(smoke_rows, usage_rows)
+    _require(
+        len(attempt_rows) == priced["smoke_count"],
+        "provider attempt count differs from completed smoke cases",
+    )
+    by_result = {row["result_sha256"]: row for row in usage_rows}
+    by_attempt: dict[str, Mapping[str, Any]] = {}
+    for attempt in attempt_rows:
+        result_digest = attempt.get("result_sha256")
+        _require(
+            isinstance(result_digest, str)
+            and re.fullmatch(r"[0-9a-f]{64}", result_digest) is not None
+            and result_digest not in by_attempt,
+            "provider attempts have a duplicate or invalid result",
+        )
+        _require(
+            attempt.get("attempt_index") == 0
+            and attempt.get("outcome") == "completed"
+            and attempt.get("http_status") == 200,
+            "provider attempt is not one completed HTTP request",
+        )
+        _require(
+            attempt.get("request_sha256")
+            == by_result.get(result_digest, {}).get("request_sha256"),
+            "provider attempt does not bind N6 request",
+        )
+        by_attempt[result_digest] = attempt
+    provider_rows = _workbook_request_id_rows(provider_log_xlsx)
+    provider_by_id = {
+        row["request_id_sha256"]: row for row in provider_rows
+    }
+    matched: set[str] = set()
+    cases = []
+    for row in priced["rows"]:
+        attempt = by_attempt.get(row["n6_result_sha256"])
+        _require(attempt is not None, "N6 result has no provider attempt")
+        identifier = attempt.get("header_request_id_sha256")
+        _require(
+            isinstance(identifier, str)
+            and re.fullmatch(r"[0-9a-f]{64}", identifier) is not None,
+            "N6 response lacks a provider request ID digest",
+        )
+        provider = provider_by_id.get(identifier)
+        _require(provider is not None, "provider Request ID is not in log")
+        _require(identifier not in matched, "provider log row was reused")
+        matched.add(identifier)
+        _require(
+            all(provider[key] == row[key] for key in (
+                "input_units", "cached_input_units", "output_units"
+            )),
+            "provider log usage differs from N6 result",
+        )
+        cases.append({
+            "case_id": row["case_id"],
+            "design_id": row["design_id"],
+            "n6_list_price_usd": row["n6_list_price_usd"],
+        })
+    return {
+        "schema_version": "pathfinder.rsi-exam-provider-request-join/v1",
+        "smoke_count": priced["smoke_count"],
+        "provider_request_id_match_count": len(matched),
+        "provider_successful_log_row_count": len(provider_rows),
+        "unmatched_provider_log_row_count": len(provider_rows) - len(matched),
+        "provider_log_sha256": hashlib.sha256(
+            Path(provider_log_xlsx).read_bytes()
+        ).hexdigest(),
+        "n6_list_price_usd": priced["n6_list_price_usd"],
+        "cases": cases,
+        "raw_request_ids_recorded": False,
+        "credentials_recorded": False,
+    }
+
+
 def load_object_price_table(
     evidence_dir: str | Path,
     *,
@@ -545,11 +682,46 @@ def load_object_price_table(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cost-evidence-dir", required=True)
-    parser.add_argument("--caption-package-dir", required=True)
-    parser.add_argument("--index-package-dir", required=True)
+    parser.add_argument("--cost-evidence-dir")
+    parser.add_argument("--caption-package-dir")
+    parser.add_argument("--index-package-dir")
+    parser.add_argument("--smoke-results-jsonl")
+    parser.add_argument("--n6-trace-snapshot")
     parser.add_argument("--provider-log-xlsx")
     args = parser.parse_args()
+    if args.smoke_results_jsonl or args.n6_trace_snapshot:
+        _require(
+            all((
+                args.smoke_results_jsonl,
+                args.n6_trace_snapshot,
+                args.provider_log_xlsx,
+            )),
+            "smoke, N6 snapshot and provider workbook are all required",
+        )
+        snapshot = json.loads(
+            Path(args.n6_trace_snapshot).read_bytes()
+        )
+        smoke = [
+            json.loads(line) for line in
+            Path(args.smoke_results_jsonl).read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        result = verify_smoke_provider_request_log(
+            smoke, snapshot["usage_rows"], snapshot["attempt_rows"],
+            args.provider_log_xlsx,
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True,
+                         indent=2))
+        return
+    _require(
+        all((
+            args.cost_evidence_dir,
+            args.caption_package_dir,
+            args.index_package_dir,
+        )),
+        "cost evidence, caption and index packages are all required",
+    )
     print(json.dumps(load_object_price_table(
         args.cost_evidence_dir,
         caption_package_dir=args.caption_package_dir,

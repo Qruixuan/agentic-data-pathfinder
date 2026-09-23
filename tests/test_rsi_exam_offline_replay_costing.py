@@ -4,18 +4,23 @@ from __future__ import annotations
 
 import unittest
 import hashlib
+import io
 import json
+from contextlib import redirect_stdout
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from zipfile import ZipFile
 
 from pathfinder.rsi_exam.offline_replay_costing import (
     allocate_embedding_units,
     build_object_price_table,
+    main,
     price_replay_result,
     price_verified_smoke_n6_usage,
     reconcile_caption_cache,
+    verify_smoke_provider_request_log,
     _workbook_usage_rows,
     _package_self_digest,
 )
@@ -44,6 +49,150 @@ def _batches() -> list[dict[str, int]]:
 
 
 class OfflineReplayCostingTests(unittest.TestCase):
+    def test_provider_request_id_joins_exact_smoke_and_usage(self) -> None:
+        smoke = []
+        usage = []
+        attempts = []
+        provider_ids = []
+        for index in range(10):
+            result_digest = f"{index + 1:064x}"
+            request_digest = f"{index + 21:064x}"
+            provider_id = f"00000000-0000-0000-0000-{index + 1:012x}"
+            provider_ids.append(provider_id)
+            smoke.append({
+                "case_id": f"case-{index}",
+                "trial_key": f"trial-{index}",
+                "result": {
+                    "status": "COMPLETE",
+                    "route_evidence_sha256": f"{index + 41:064x}",
+                    "semantic_route_evidence": {
+                        "evidence_sha256": f"{index + 41:064x}",
+                        "design_id": "D0",
+                        "semantic": {
+                            "model": "qwen3.8-27b",
+                            "result_sha256": result_digest,
+                            "request_sha256": request_digest,
+                        },
+                    },
+                },
+            })
+            usage.append({
+                "result_sha256": result_digest,
+                "request_sha256": request_digest,
+                "input_units": 100,
+                "cached_input_units": 20,
+                "output_units": 10,
+                "total_units": 110,
+            })
+            attempts.append({
+                "result_sha256": result_digest,
+                "request_sha256": request_digest,
+                "attempt_index": 0,
+                "outcome": "completed",
+                "http_status": 200,
+                "header_request_id_sha256": hashlib.sha256(
+                    provider_id.encode("ascii")
+                ).hexdigest(),
+            })
+
+        def workbook_xml(*, duplicate: bool = False,
+                         wrong_usage: bool = False) -> str:
+            rows = []
+            for index, provider_id in enumerate(provider_ids):
+                if duplicate and index == 1:
+                    provider_id = provider_ids[0]
+                input_units = 101 if wrong_usage and index == 0 else 100
+                provider_usage = json.dumps({
+                    "input_tokens": input_units,
+                    "output_tokens": 10,
+                    "prompt_tokens_details": {"cached_tokens": 20},
+                })
+                row_number = index + 2
+                rows.append(
+                    f'<row r="{row_number}">'
+                    f'<c r="A{row_number}" t="inlineStr"><is><t>'
+                    f'{provider_id}</t></is></c>'
+                    f'<c r="C{row_number}" t="inlineStr"><is><t>'
+                    'qwen3.8-27b</t></is></c>'
+                    f'<c r="D{row_number}" t="inlineStr"><is><t>'
+                    f'{provider_usage}</t></is></c>'
+                    f'<c r="G{row_number}"><v>200</v></c>'
+                    '</row>'
+                )
+            return (
+                '<worksheet xmlns="http://schemas.openxmlformats.org/'
+                'spreadsheetml/2006/main"><sheetData>'
+                + ''.join(rows) + '</sheetData></worksheet>'
+            )
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "provider.xlsx"
+            with ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "xl/worksheets/sheet1.xml", workbook_xml()
+                )
+            matched = verify_smoke_provider_request_log(
+                smoke, usage, attempts, path,
+            )
+            self.assertEqual(matched["provider_request_id_match_count"], 10)
+            self.assertEqual(matched["n6_list_price_usd"], "0.000720000")
+            self.assertNotIn(provider_ids[0], json.dumps(matched))
+            self.assertFalse(matched["raw_request_ids_recorded"])
+
+            smoke_path = Path(directory) / "smoke.jsonl"
+            smoke_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in smoke),
+                encoding="utf-8",
+            )
+            snapshot_path = Path(directory) / "snapshot.json"
+            snapshot_path.write_text(
+                json.dumps({"usage_rows": usage, "attempt_rows": attempts}),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with patch("sys.argv", [
+                "offline_replay_costing",
+                "--smoke-results-jsonl", str(smoke_path),
+                "--n6-trace-snapshot", str(snapshot_path),
+                "--provider-log-xlsx", str(path),
+            ]), redirect_stdout(output):
+                main()
+            self.assertEqual(
+                json.loads(output.getvalue())[
+                    "provider_request_id_match_count"
+                ], 10,
+            )
+
+            with ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "xl/worksheets/sheet1.xml",
+                    workbook_xml(wrong_usage=True),
+                )
+            with self.assertRaisesRegex(ValueError, "usage differs"):
+                verify_smoke_provider_request_log(
+                    smoke, usage, attempts, path,
+                )
+
+            with ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "xl/worksheets/sheet1.xml",
+                    workbook_xml(duplicate=True),
+                )
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                verify_smoke_provider_request_log(
+                    smoke, usage, attempts, path,
+                )
+
+            attempts[0]["header_request_id_sha256"] = "f" * 64
+            with ZipFile(path, "w") as archive:
+                archive.writestr(
+                    "xl/worksheets/sheet1.xml", workbook_xml()
+                )
+            with self.assertRaisesRegex(ValueError, "not in log"):
+                verify_smoke_provider_request_log(
+                    smoke, usage, attempts, path,
+                )
+
     def test_smoke_usage_requires_exact_result_and_request_bindings(self) -> None:
         smoke = []
         journal = []
