@@ -1001,6 +1001,8 @@ def _verify_interleaved_sources(
              and sources.interleaved_preparation_dir is not None
              and sources.interleaved_caption_dir is not None,
              "interleaved source set is incomplete")
+    document = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
+                            "interleaved runtime admission")
     try:
         report = verify_interleaved_runtime_admission(
             root,
@@ -1016,7 +1018,7 @@ def _verify_interleaved_sources(
             video_index_dir=sources.interleaved_video_index_dir,
             preparation_dir=sources.interleaved_preparation_dir,
             caption_dir=sources.interleaved_caption_dir,
-            coordinator_base_url="http://10.70.0.17:8780",
+            coordinator_base_url=document["coordinator_base_url"],
         )
         commitment = verify_n1_oracle_preselection_commitment(
             sources.n1_public_commitment_dir,
@@ -1045,8 +1047,6 @@ def _verify_interleaved_sources(
             "interleaved semantic service source verification failed: "
             f"{type(exc).__name__}"
         ) from exc
-    document = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
-                            "interleaved runtime admission")
     public_oracle = _strict_json(
         sources.n1_public_commitment_dir / N1_COMMITMENT_NAME,
         "interleaved N1 public commitment",

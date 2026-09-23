@@ -38,6 +38,10 @@ CACHE_EPISODES = "cache-episode-bindings.jsonl"
 CHECKSUMS = "SHA256SUMS"
 _CONTENT = (MANIFEST, TRIALS, STAGES, INDEX_PLANS,
             ACCESS_PLANS, CACHE_EPISODES)
+_PILOT_COORDINATOR_ORIGINS = frozenset({
+    "http://10.70.0.17:8780",
+    "http://10.70.0.17:18780",
+})
 
 
 class InterleavedRuntimeAdmissionError(ValueError):
@@ -79,8 +83,8 @@ def _expected(
     query_dir: Path, video_index_dir: Path, preparation_dir: Path,
     caption_dir: Path, coordinator_base_url: str,
 ) -> dict[str, bytes]:
-    _require(coordinator_base_url == "http://10.70.0.17:8780",
-             "first interleaved pilot must bind the frozen N7 origin")
+    _require(coordinator_base_url in _PILOT_COORDINATOR_ORIGINS,
+             "interleaved pilot must bind an approved N7 private origin")
     dag_report = verify_interleaved_trial_dags(
         trial_dag_dir, binding_dir=binding_dir, plan_dir=plan_dir,
         n1_public_commitment_dir=n1_public_commitment_dir,
