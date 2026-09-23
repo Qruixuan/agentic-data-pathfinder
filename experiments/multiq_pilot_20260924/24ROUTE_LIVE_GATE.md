@@ -1,9 +1,37 @@
 # 24-route interleaved pilot — live submission gate
 
-Status: **OFFLINE_RUNTIME_ASSEMBLED; LIVE_SUBMISSION_NOT_AUTHORIZED**.
+Status: **CLOSED — VERIFIED_24_ROUTE_OUTPUT**.
 This is a plumbing gate on two previously inspected videos, not held-out
 quality evidence. Follow `EXPERIMENT_OPERATIONS_RUNBOOK.md` before any
 deployment or workflow submission.
+
+## Closure, 2026-09-23 23:03 UTC
+
+The historical pre-submit blockers below were closed by an **additive isolated
+pilot**, not by modifying production services. The new runtime source was
+built from LF-clean commit `d328726` and independently pinned on N1, N2, N3,
+N4, N6 and N7. N1's separate six-label scorer and verifier, v2 N2/N4 agents,
+multi-question N3 agent, N6, N7 cache and N7 coordinator were healthy before
+submission. The isolated admission at
+`artifacts/interleaved-multiq-runtime-admission-d328726-isolated-v1`
+canonically verified 24 trials, 276 stages, six index plans, 42 Data Agent
+plans and six DC cache episodes. N7 reached all eight pilot dependency health
+endpoints with matching identities; N3/N4 advertised origins matched N7's
+configuration; valid-token/invalid-body probes returned 400 and invalid-token
+probes 401. FlowMesh resolved exactly one current alias to N7 `wkr-2`.
+
+The one ordered execution completed **24/24** frozen routes and stopped with
+exit 0. An independent network-free verifier revalidated every route against
+its frozen trial/stages, cache episode, N1 score authenticity and public
+evidence; the 26 checksum entries all passed. Result:
+`artifacts/multiq-24route-20260923t2250z`, admission SHA-256
+`64662cd8e0e3460bc926cdfad39ebacd9de5f46065ded26d700b7c7dfc9ddc18`.
+See `24ROUTE_LIVE_RESULT.md` for the evidence-backed table and limitations.
+`credentials_recorded=false`; hidden-label values were not exported;
+`eligible_for_scientific_claims=false`.
+
+The remainder of this document is the **historical pre-submit snapshot**.
+Its pending-gate statements are not the current deployment state.
 
 ## Frozen and checked
 
