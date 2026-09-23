@@ -30,7 +30,7 @@ import urllib.request
 from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Callable, Mapping, Sequence
 
 from ..data_agent_client import DataAgentClientSettings, HttpDataAgentClient
@@ -84,6 +84,17 @@ from .hidden_oracle_commitment import (
     COMMITMENT_NAME as N1_COMMITMENT_NAME,
     verify_n1_oracle_preselection_commitment,
 )
+from .full_flow_multiq_exact_selection import MultiQuestionExactSelectionCatalog
+from .interleaved_multiq_runtime_admission import (
+    CACHE_EPISODES as MULTIQ_CACHE_EPISODES,
+    INDEX_PLANS as MULTIQ_INDEX_PLANS,
+    ACCESS_PLANS as MULTIQ_ACCESS_PLANS,
+    MANIFEST as MULTIQ_ADMISSION_MANIFEST,
+    STAGES as MULTIQ_STAGES,
+    TRIALS as MULTIQ_TRIALS,
+    verify_interleaved_runtime_admission,
+)
+from .n3_multiq_indexed_data_plane import derive_n3_multiq_question_policies
 from .index_service import N2IndexHTTPClient, verify_n2_index_package
 from .n4_derived_data_plane import (
     PACKAGE_MANIFEST_NAME as N4_MANIFEST_NAME,
@@ -250,6 +261,15 @@ class FrozenSemanticRouteServiceSources:
     exact_range_catalog_dir: Path
     provisioning_catalog_dir: Path
     index_query_plan_catalog_dir: Path | None = None
+    interleaved_runtime_admission_dir: Path | None = None
+    interleaved_trial_dag_dir: Path | None = None
+    interleaved_route_binding_dir: Path | None = None
+    interleaved_plan_dir: Path | None = None
+    interleaved_raw_package_dir: Path | None = None
+    interleaved_query_dir: Path | None = None
+    interleaved_video_index_dir: Path | None = None
+    interleaved_preparation_dir: Path | None = None
+    interleaved_caption_dir: Path | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -269,6 +289,24 @@ class FrozenSemanticRouteServiceSources:
                 "index_query_plan_catalog_dir",
                 Path(self.index_query_plan_catalog_dir).resolve(),
             )
+        multiq = (
+            "interleaved_runtime_admission_dir",
+            "interleaved_trial_dag_dir",
+            "interleaved_route_binding_dir",
+            "interleaved_plan_dir",
+            "interleaved_raw_package_dir",
+            "interleaved_query_dir",
+            "interleaved_video_index_dir",
+            "interleaved_preparation_dir",
+            "interleaved_caption_dir",
+        )
+        configured = [getattr(self, name) is not None for name in multiq]
+        _require(all(configured) or not any(configured),
+                 "interleaved source directories must be all present or absent")
+        for name in multiq:
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, Path(value).resolve())
 
 
 @dataclass(frozen=True, repr=False)
@@ -766,6 +804,7 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
                 "bound stage catalog repeats an identity",
             )
             self._stages[key] = stage
+        self._strict_cache_episodes = bound_cache_episodes is not None
         self._cache_episodes: dict[tuple[str, str], str] = {}
         for key, episode_id in (bound_cache_episodes or {}).items():
             _require(
@@ -803,6 +842,13 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
             "semantic trial is absent from the verified admission catalog",
         )
         episode_id = request.get("cache_episode_id")
+        if self._strict_cache_episodes and trial.get("route_family") == (
+            "local-cache-derived"
+        ):
+            _require(
+                episode_id is not None,
+                "interleaved cache route requires its bound episode",
+            )
         _require(
             episode_id is None
             or self._cache_episodes.get((request["run_id"], trial_key))
@@ -930,6 +976,114 @@ def _verify_sources(
             "exact_ranges": exact_ranges,
             "provisioning": provisioning,
         },
+        trials,
+        stages,
+    )
+
+
+def _verify_interleaved_sources(
+    sources: FrozenSemanticRouteServiceSources,
+) -> tuple[
+    dict[str, Any], dict[str, Any], tuple[dict[str, Any], ...],
+    tuple[dict[str, Any], ...],
+]:
+    """Verify the new public six-question admission independently of legacy."""
+
+    root = sources.interleaved_runtime_admission_dir
+    plan_root = sources.interleaved_plan_dir
+    _require(root is not None and plan_root is not None,
+             "interleaved admission and plan are required")
+    _require(sources.interleaved_trial_dag_dir is not None
+             and sources.interleaved_route_binding_dir is not None
+             and sources.interleaved_raw_package_dir is not None
+             and sources.interleaved_query_dir is not None
+             and sources.interleaved_video_index_dir is not None
+             and sources.interleaved_preparation_dir is not None
+             and sources.interleaved_caption_dir is not None,
+             "interleaved source set is incomplete")
+    try:
+        report = verify_interleaved_runtime_admission(
+            root,
+            trial_dag_dir=sources.interleaved_trial_dag_dir,
+            binding_dir=sources.interleaved_route_binding_dir,
+            plan_dir=plan_root,
+            n1_public_commitment_dir=sources.n1_public_commitment_dir,
+            n2_index_package_dir=sources.n2_index_package_dir,
+            n3_package_dir=sources.n3_package_dir,
+            raw_package_dir=sources.interleaved_raw_package_dir,
+            n4_package_dir=sources.n4_package_dir,
+            query_dir=sources.interleaved_query_dir,
+            video_index_dir=sources.interleaved_video_index_dir,
+            preparation_dir=sources.interleaved_preparation_dir,
+            caption_dir=sources.interleaved_caption_dir,
+            coordinator_base_url="http://10.70.0.17:8780",
+        )
+        commitment = verify_n1_oracle_preselection_commitment(
+            sources.n1_public_commitment_dir,
+        )
+        index = verify_n2_index_package(sources.n2_index_package_dir)
+        plan_doc = _strict_json(plan_root / "interleaved-plan.json",
+                                "interleaved plan")
+        questions = _strict_jsonl(plan_root / "public-questions.jsonl",
+                                  "interleaved public questions")
+        policies = derive_n3_multiq_question_policies(
+            plan_dir=plan_root, public_questions=questions,
+            public_source_sha256=plan_doc["public_source_sha256"],
+            query_dir=sources.interleaved_query_dir,
+            video_index_dir=sources.interleaved_video_index_dir,
+            preparation_dir=sources.interleaved_preparation_dir,
+            caption_dir=sources.interleaved_caption_dir,
+            raw_package_dir=sources.interleaved_raw_package_dir,
+        )
+        exact = MultiQuestionExactSelectionCatalog(
+            sources.n3_package_dir,
+            raw_package_dir=sources.interleaved_raw_package_dir,
+            question_policies=policies,
+        )
+    except Exception as exc:
+        raise FullFlowSemanticRouteServiceFactoryError(
+            "interleaved semantic service source verification failed: "
+            f"{type(exc).__name__}"
+        ) from exc
+    document = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
+                            "interleaved runtime admission")
+    public_oracle = _strict_json(
+        sources.n1_public_commitment_dir / N1_COMMITMENT_NAME,
+        "interleaved N1 public commitment",
+    )
+    _require(report["admission_sha256"] == document["admission_sha256"]
+             and document["oracle_id"] == public_oracle["oracle_id"]
+             and document["public_task_set_sha256"]
+             == public_oracle["public_task_set_sha256"]
+             and document["n2_index_id"] == index["index_id"]
+             and document["n2_index_sha256"] == index["index_sha256"],
+             "interleaved admission identities differ across sources")
+    trials = _strict_jsonl(root / MULTIQ_TRIALS, "interleaved trials")
+    stages = _strict_jsonl(root / MULTIQ_STAGES, "interleaved stages")
+    n4_manifest_sha = _sha256(
+        (sources.n4_package_dir / N4_MANIFEST_NAME).read_bytes()
+    )
+    provisioning = SimpleNamespace(
+        references=(),
+        catalog_sha256=_sha256(_canonical({
+            "domain": "interleaved-preprovisioned-n4-no-live-n5/v1",
+            "n4_package_manifest_sha256": n4_manifest_sha,
+        })),
+    )
+    return (
+        {"status": report["status"], "document": {
+            **document,
+            "promotion_id": plan_doc["experiment_id"],
+            "trial_template_flowmesh_submission_authorized": True,
+        }},
+        {"index": index,
+         "oracle": {
+             "oracle_id": document["oracle_id"],
+             "public_task_set_sha256": document["public_task_set_sha256"],
+         },
+         "commitment": commitment,
+         "exact_ranges": exact,
+         "provisioning": provisioning},
         trials,
         stages,
     )
@@ -1085,6 +1239,51 @@ def _index_plan_catalog(
     return FrozenIndexQueryPlanCatalog(plans)
 
 
+def _interleaved_index_plan_catalog(
+    root: Path,
+) -> FrozenIndexQueryPlanCatalog:
+    rows = _strict_jsonl(root / MULTIQ_INDEX_PLANS,
+                         "interleaved index query plans")
+    _require(len(rows) == 6, "interleaved index query count changed")
+    return FrozenIndexQueryPlanCatalog(tuple(
+        FrozenIndexQueryPlan(
+            trial_key=row["trial_key"],
+            task_binding_sha256=row["task_binding_sha256"],
+            index_id=row["index_id"],
+            query_id=row["query_id"],
+            query_text=row["query_text"],
+            top_k=row["top_k"],
+            candidate_object_ids=tuple(row["candidate_object_ids"]),
+        ) for row in rows
+    ))
+
+
+def _interleaved_data_agent_plan_catalog(
+    root: Path,
+) -> FrozenDataAgentPlanIdCatalog:
+    rows = _strict_jsonl(root / MULTIQ_ACCESS_PLANS,
+                         "interleaved Data Agent plans")
+    _require(len(rows) == 42, "interleaved Data Agent plan count changed")
+    bindings = {
+        (row["trial_key"], row["node_id"], row["object_id"],
+         row["representation_id"]): row["plan_id"]
+        for row in rows
+    }
+    _require(len(bindings) == len(rows),
+             "interleaved Data Agent plan identities repeat")
+    return FrozenDataAgentPlanIdCatalog(bindings)
+
+
+def _interleaved_cache_episodes(root: Path) -> dict[tuple[str, str], str]:
+    rows = _strict_jsonl(root / MULTIQ_CACHE_EPISODES,
+                         "interleaved cache episode bindings")
+    result = {(row["run_id"], row["trial_key"]): row["cache_episode_id"]
+              for row in rows}
+    _require(len(result) == len(rows) == 6,
+             "interleaved cache episode bindings repeat or are incomplete")
+    return result
+
+
 def _gap(gap_id: str, reason: str) -> dict[str, Any]:
     return {
         "schema_version": SERVICE_FACTORY_GAP_SCHEMA_VERSION,
@@ -1160,23 +1359,27 @@ def assemble_full_flow_semantic_route_service(
     the handler on a listening socket.
     """
 
+    interleaved = sources.interleaved_runtime_admission_dir is not None
+    if interleaved:
+        _require(runtime.logical_node_id == "N7",
+                 "first interleaved pilot is pinned to N7")
     (
         admission_report,
         core_reports,
         trials,
         stages,
-    ) = _verify_sources(sources)
+    ) = (_verify_interleaved_sources(sources) if interleaved
+         else _verify_sources(sources))
     admission = admission_report["document"]
     index_report = core_reports["index"]
     oracle_report = core_reports["oracle"]
-    _require(
-        not any(
-            trial.get("route_family") == "indexed-derived"
-            for trial in trials
-        ),
-        "indexed-derived admission lacks a source-bound multi-question "
-        "N3 plan and selection catalog",
-    )
+    if not interleaved:
+        _require(
+            not any(trial.get("route_family") == "indexed-derived"
+                    for trial in trials),
+            "indexed-derived admission lacks a source-bound multi-question "
+            "N3 plan and selection catalog",
+        )
     state = Path(state_dir).resolve()
     state.mkdir(parents=True, exist_ok=True)
     _require(
@@ -1184,9 +1387,17 @@ def assemble_full_flow_semantic_route_service(
         "semantic route state directory is invalid",
     )
 
-    index_plans = _index_plan_catalog(sources)
+    index_plans = (
+        _interleaved_index_plan_catalog(
+            sources.interleaved_runtime_admission_dir
+        ) if interleaved else _index_plan_catalog(sources)
+    )
     exact_ranges = core_reports["exact_ranges"]
-    plan_ids = _data_agent_plan_catalog(sources, trials)
+    plan_ids = (
+        _interleaved_data_agent_plan_catalog(
+            sources.interleaved_runtime_admission_dir
+        ) if interleaved else _data_agent_plan_catalog(sources, trials)
+    )
     provisioning_catalog = core_reports["provisioning"]
 
     private_hosts = runtime.simulator_private_http_hosts
@@ -1346,6 +1557,11 @@ def assemble_full_flow_semantic_route_service(
         delegate=generic_handler,
         bound_trials=trials,
         bound_stages=stages,
+        bound_cache_episodes=(
+            _interleaved_cache_episodes(
+                sources.interleaved_runtime_admission_dir
+            ) if interleaved else None
+        ),
     )
 
     gaps: list[dict[str, Any]] = []
@@ -1356,13 +1572,14 @@ def assemble_full_flow_semantic_route_service(
     )
     _require(
         admission_report.get("status")
-        == "VERIFIED_PUBLIC_LOCAL_RUNTIME_INPUTS"
+        == ("VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED"
+            if interleaved else "VERIFIED_PUBLIC_LOCAL_RUNTIME_INPUTS")
         and admission.get("trial_template_flowmesh_submission_authorized")
         is True
         and authorized,
         "promoted public semantic admission is not executable",
     )
-    if sources.index_query_plan_catalog_dir is None:
+    if not interleaved and sources.index_query_plan_catalog_dir is None:
         gaps.append(_gap(
             "frozen-index-query-plan-catalog-missing",
             "Indexed trials have no source-bound visible query-plan catalog.",
@@ -1401,8 +1618,11 @@ def assemble_full_flow_semantic_route_service(
         "runtime_gaps": gaps,
         "limitations": [
             "Runtime service health is checked on first use, not by assembly.",
-            "N5 evidence describes a verified preprovisioned snapshot; live "
-            "materialization time and cost are not measured.",
+            ("Interleaved N4 inputs are preprovisioned; live N5 "
+             "materialization time and cost are not measured."
+             if interleaved else
+             "N5 evidence describes a verified preprovisioned snapshot; "
+             "live materialization time and cost are not measured."),
             "In-coordinator byte handoff is not a physical-network measurement.",
             "Container evidence is not UpCloud performance evidence.",
         ],

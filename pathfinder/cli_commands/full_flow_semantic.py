@@ -552,6 +552,18 @@ def register_full_flow_semantic_commands(
             "--" + flag, type=Path, required=True
         )
     for flag in (
+        "interleaved-runtime-admission-dir",
+        "interleaved-trial-dag-dir",
+        "interleaved-route-binding-dir",
+        "interleaved-plan-dir",
+        "interleaved-raw-package-dir",
+        "interleaved-query-dir",
+        "interleaved-video-index-dir",
+        "interleaved-preparation-dir",
+        "interleaved-caption-dir",
+    ):
+        semantic_route_serve.add_argument("--" + flag, type=Path)
+    for flag in (
         "n2-index-base-url",
         "n7-index-base-url",
         "n8-index-base-url",
@@ -1302,6 +1314,17 @@ def dispatch_full_flow_semantic_command(
             index_query_plan_catalog_dir=(
                 args.index_query_plan_catalog_dir
             ),
+            interleaved_runtime_admission_dir=(
+                args.interleaved_runtime_admission_dir
+            ),
+            interleaved_trial_dag_dir=args.interleaved_trial_dag_dir,
+            interleaved_route_binding_dir=args.interleaved_route_binding_dir,
+            interleaved_plan_dir=args.interleaved_plan_dir,
+            interleaved_raw_package_dir=args.interleaved_raw_package_dir,
+            interleaved_query_dir=args.interleaved_query_dir,
+            interleaved_video_index_dir=args.interleaved_video_index_dir,
+            interleaved_preparation_dir=args.interleaved_preparation_dir,
+            interleaved_caption_dir=args.interleaved_caption_dir,
         )
         runtime = RuntimeSemanticServiceInputs(
             logical_node_id=args.node_id,

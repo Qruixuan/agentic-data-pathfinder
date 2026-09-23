@@ -46,6 +46,9 @@ class MultiQuestionExactSelectionCatalog:
             question_policies=question_policies, sampler=sampler,
         )
         report = json.loads((root / PACKAGE_MANIFEST_NAME).read_bytes())
+        self.catalog_sha256 = hashlib.sha256(
+            (root / PACKAGE_MANIFEST_NAME).read_bytes()
+        ).hexdigest()
         raw_by_object = {
             row["object_id"]: row for row in report["raw_objects"]
         }

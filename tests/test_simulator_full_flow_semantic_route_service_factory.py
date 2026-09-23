@@ -21,6 +21,7 @@ from pathfinder.simulator.full_flow_semantic_route_service_factory import (
     INDEX_QUERY_PLAN_CATALOG_NAME,
     INDEX_QUERY_PLAN_CATALOG_SCHEMA_VERSION,
     FrozenSemanticRouteServiceSources,
+    FrozenCatalogBoundSemanticRouteRequestHandler,
     FullFlowSemanticRouteServiceFactoryError,
     RuntimeSemanticServiceInputs,
     SQLiteRouteExecutionStore,
@@ -454,6 +455,58 @@ class SemanticRouteServiceFactoryTests(unittest.TestCase):
         self.assertNotIn("n1_oracle_package_dir", names)
         self.assertNotIn("task_plane_dir", names)
         self.assertNotIn("public_task_set_path", names)
+
+    def test_interleaved_source_set_is_all_or_none(self) -> None:
+        with self.assertRaisesRegex(
+            FullFlowSemanticRouteServiceFactoryError,
+            "must be all present or absent",
+        ):
+            replace(
+                self._sources(),
+                interleaved_runtime_admission_dir=self.root,
+            )
+
+    def test_interleaved_cache_route_requires_exact_episode(self) -> None:
+        trial = {
+            "trial_key": "matrix|W1|DC|r0000",
+            "route_family": "local-cache-derived",
+            "executor_node_id": "N7",
+            "semantic_stage_keys": ["cache-stage"],
+        }
+        stage = {"stage_key": "cache-stage"}
+        handler = FrozenCatalogBoundSemanticRouteRequestHandler(
+            logical_node_id="N7",
+            delegate=SimpleNamespace(execute=lambda value: value),
+            bound_trials=[trial],
+            bound_stages=[stage],
+            bound_cache_episodes={
+                ("run-1", trial["trial_key"]): "episode-1",
+            },
+        )
+        request = {
+            "bound_trial": trial,
+            "bound_stages": [stage],
+            "run_id": "run-1",
+        }
+        with patch(MODULE + ".validate_semantic_route_request",
+                   return_value=request):
+            with self.assertRaisesRegex(
+                FullFlowSemanticRouteServiceFactoryError,
+                "requires its bound episode",
+            ):
+                handler.execute(request)
+        request = {**request, "cache_episode_id": "episode-1"}
+        with patch(MODULE + ".validate_semantic_route_request",
+                   return_value=request):
+            self.assertIs(handler.execute(request), request)
+        changed = {**request, "cache_episode_id": "episode-other"}
+        with patch(MODULE + ".validate_semantic_route_request",
+                   return_value=changed):
+            with self.assertRaisesRegex(
+                FullFlowSemanticRouteServiceFactoryError,
+                "absent from the verified run binding",
+            ):
+                handler.execute(changed)
 
     def test_generated_compose_service_hosts_are_valid_private_http_hosts(
         self,

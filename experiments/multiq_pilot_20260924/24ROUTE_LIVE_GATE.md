@@ -1,6 +1,6 @@
 # 24-route interleaved pilot — live submission gate
 
-Status: **OFFLINE_REAL_INPUTS_VERIFIED; LIVE_SUBMISSION_NOT_AUTHORIZED**.
+Status: **OFFLINE_RUNTIME_ASSEMBLED; LIVE_SUBMISSION_NOT_AUTHORIZED**.
 This is a plumbing gate on two previously inspected videos, not held-out
 quality evidence. Follow `EXPERIMENT_OPERATIONS_RUNBOOK.md` before any
 deployment or workflow submission.
@@ -9,7 +9,7 @@ deployment or workflow submission.
 
 | Input | Immutable identity / result |
 | --- | --- |
-| Source revision | `754760e` from an LF-clean Git archive; both new modules match Git blobs |
+| Source revision | Input DAGs at `754760e`; admission at `f7837d0`. Deployable runtime source must be committed and checked from a new LF-clean Git archive. |
 | Public schedule | `artifacts/interleaved-multiq-24route-2561a1f-v1`; 2 videos, 6 questions, 24 unique R/D/DC/I route slots |
 | N1 public commitment | `artifacts/interleaved-multiq-n1-public-1c9ad84-v1`; 6 labels committed, no answer values exported |
 | Video index / six query embeddings | `artifacts/interleaved-multiq-index-2561a1f-v1/{video-index-v1,query-batch-v1}`; source-bound verifiers passed |
@@ -17,6 +17,7 @@ deployment or workflow submission.
 | N4 derived package | `artifacts/rsi-exam-formal-runtime-foundation-321f33a-v2-public/n4-package`; both target videos have the required digest/frame artifacts |
 | Exact route inputs | `artifacts/interleaved-multiq-route-bindings-74114d7-v1`; 24 routes, 42 Data Agent plan bindings; SHA256SUMS passed |
 | Four-arm DAGs | `artifacts/interleaved-multiq-trial-dags-754760e-v1`; 24 trials, 276 stages; each passes the actual route DAG validator; SHA256SUMS passed |
+| Runtime admission | `artifacts/interleaved-multiq-runtime-admission-f7837d0-v1`; 24 admitted trials, 276 stages, 6 index plans, 42 Data Agent plans and 6 DC cache episodes; canonical verifier and SHA256SUMS passed |
 
 The N1 private oracle was built and verified on N1 only. Its labels and CSV
 were not copied to the workstation. Only the label-free public commitment
@@ -31,23 +32,30 @@ question on the same video is valid for that other question, so the Data
 Agent alone cannot reject it; the route admission must enforce the exact
 `(trial, question, plan ID, artifact)` binding. The frozen input package does.
 
-Focused tests: 18 simulator multi-question tests, 6 public-schedule tests,
-and 4 cache-episode tests passed. These are not a full test-suite claim.
+The interleaved N7 service factory assembles offline with these real frozen
+inputs and synthetic runtime-only endpoint/credential placeholders:
+`READY_NOT_PROBED`, 24 trials, 276 stages and zero source gaps. This makes no
+claim about live endpoint or worker readiness and made no network/LLM call.
+Focused factory/admission/DAG/policy tests passed (23); this is not a
+full-suite claim.
 
 ## Mandatory gates still failing
 
-1. The 24 DAGs intentionally have `flowmesh_submission_authorized=false`
-   and `required_runtime_adapter_ids=[multiq-runtime-admission-pending]`.
-   There is no source-bound *runtime admission* for these six question IDs.
-2. The deployed N7/N8 service factory still rejects `indexed-derived` and
-   consumes the legacy one-question admission. It has not mounted the new
-   question-specific N3 plan catalog or the signed DC cache episode map.
-3. The new N3 package, N1 oracle, and affected N6/N7 runtime source have
-   not been deployed. New services/state and rollback must be verified
-   before replacing any currently healthy production container.
-4. The new admission must bind N4 provisioning references, N2 query plans,
-   N1 public commitment, exact N3 selections, and all 276 stages. It must
-   then pass the canonical verifier and source-digest gates.
+1. The new service-factory branch is assembled only on the workstation.
+   It must be committed, built from LF-clean source, deployed with the nine
+   new immutable inputs, and reassembled inside the intended N7 container.
+2. The N1 scorer still mounts the older 12-label private oracle; the new
+   six-label oracle is verified on N1 but not served. Do not submit until a
+   separately state-bound scorer and verifier present the new public oracle
+   identity without exposing labels or breaking the existing scorer.
+3. Read-only Docker mount checks show production N2/N4/N7 use the later
+   `bd2da19-v3` packages, while this admission binds `321f33a-v2` N2/N4.
+   Therefore the current services cannot satisfy the frozen identity gates.
+   Choose verified additive pilot services or regenerate all source-bound
+   inputs against v3; do not point the admission at mismatched live servers.
+4. New N3 package and N6/N7 runtime source are not deployed. New isolated
+   state/cache volumes, health, exact mounts, rollback and image digests must
+   be checked before changing the running production containers.
 5. Runbook deployment, endpoint, auth, worker and fresh-ID checks remain
    pending. No FlowMesh workflow or answer-generation LLM call is allowed
    while any of them fails.
