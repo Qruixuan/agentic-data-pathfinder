@@ -5,7 +5,11 @@ This additive receipt reconstructs **actual provider usage** for the frozen
 12-video formal cohort without changing its 360 outcomes or calling a model.
 
 Inputs are the verified v2 replay package, the matching temporal preparation,
-caption and index packages, and the original durable caption-response cache.
+caption and index packages, the bound N4 package, and the original durable
+caption-response cache. The builder verifies that the N4 frame and digest
+derivations bind the same preparation and caption package, so caption usage
+may be charged to the shared materialization work rather than to an unrelated
+index experiment.
 For each frozen caption, the builder accepts only cache records with the same
 window descriptor and exact request digest; the selected response digest must
 also match. Earlier responses to a different request are excluded. Matching
@@ -26,6 +30,7 @@ python -P -m pathfinder.rsi_exam.materialization_cost_evidence
   --preparation-dir <matching-temporal-preparation>
   --caption-dir <matching-temporal-captions>
   --index-dir <matching-temporal-index>
+  --n4-package-dir <matching-public-N4-package>
   --raw-cache-dir <durable-caption-cache>
   --builder-commit <full-clean-source-commit>
   --package-id <new-immutable-id>

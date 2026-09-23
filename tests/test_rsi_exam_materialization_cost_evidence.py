@@ -8,8 +8,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pathfinder.rsi_exam.materialization_cost_evidence import (
+    _canonical,
     _caption_request_rows,
     _embedding_request_rows,
+    _sha,
+    _verify_n4_derivations,
 )
 
 
@@ -95,3 +98,32 @@ class MaterializationCostEvidenceTests(unittest.TestCase):
         index["embedding_input_count"] = 3
         with self.assertRaisesRegex(ValueError, "input count differs"):
             _embedding_request_rows(index)
+
+    def test_n4_must_bind_same_caption_and_preparation(self) -> None:
+        case = {
+            "object_id": "nextqa-val-1",
+            "materialization_source_video_sha256": "s" * 64,
+        }
+        rows = []
+        for representation in ("sampled_frame_bundle", "multimodal_digest"):
+            derivation = {
+                "derivation_id": "question-independent-test-v1",
+                "object_id": case["object_id"],
+                "representation_id": representation,
+                "source_video_sha256": "s" * 64,
+                "preparation_sha256": "p" * 64,
+                "caption_package_sha256": "c" * 64,
+            }
+            rows.append({
+                "object_id": case["object_id"],
+                "representation_id": representation,
+                "provenance": {
+                    "source_content_sha256": "s" * 64,
+                    "derivation_id": "question-independent-test-v1",
+                    "derivation_sha256": _sha(_canonical(derivation)),
+                },
+            })
+        n4 = {"objects": rows}
+        _verify_n4_derivations(n4, [case], "p" * 64, "c" * 64)
+        with self.assertRaisesRegex(ValueError, "does not bind"):
+            _verify_n4_derivations(n4, [case], "p" * 64, "x" * 64)

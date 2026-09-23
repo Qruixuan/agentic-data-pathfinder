@@ -17,6 +17,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..simulator.n4_derived_data_plane import verify_n4_derived_data_package
 from .offline_replay_v2 import load_offline_replay_v2
 from .temporal_index_collection import (
     verify_formal_temporal_caption_package,
@@ -31,6 +32,7 @@ MANIFEST_FIELDS = frozenset({
     "source_replay_sha256", "source_preparation_sha256",
     "source_caption_package_sha256", "source_caption_cost_sha256",
     "source_index_package_sha256", "source_index_checksums_sha256",
+    "source_n4_package_sha256",
     "object_count", "caption_window_count", "caption_request_count",
     "caption_input_units", "caption_output_units", "caption_total_units",
     "caption_service_time_covered_windows", "embedding_request_count",
@@ -285,9 +287,46 @@ def _object_rows(
     return rows
 
 
+def _verify_n4_derivations(
+    n4: Mapping[str, Any], cases: list[dict[str, Any]],
+    preparation_sha256: str, caption_sha256: str,
+) -> None:
+    by_object = {case["object_id"]: case for case in cases}
+    rows = n4["objects"]
+    _require(len(rows) == 2 * len(cases),
+             "N4 representation count differs from replay")
+    observed: set[tuple[str, str]] = set()
+    for row in rows:
+        object_id = row["object_id"]
+        representation = row["representation_id"]
+        key = (object_id, representation)
+        _require(object_id in by_object and key not in observed and
+                 representation in {"sampled_frame_bundle", "multimodal_digest"},
+                 "N4 object or representation differs")
+        observed.add(key)
+        provenance = row["provenance"]
+        source_sha = by_object[object_id][
+            "materialization_source_video_sha256"
+        ]
+        _require(provenance["source_content_sha256"] == source_sha,
+                 "N4 source video differs from replay")
+        derivation = {
+            "derivation_id": provenance["derivation_id"],
+            "object_id": object_id,
+            "representation_id": representation,
+            "source_video_sha256": source_sha,
+            "preparation_sha256": preparation_sha256,
+            "caption_package_sha256": caption_sha256,
+        }
+        _require(provenance["derivation_sha256"] == _sha(
+            _canonical(derivation)
+        ), "N4 artifact does not bind measured caption production")
+
+
 def build_materialization_cost_evidence(
     replay_dir: str | Path, preparation_dir: str | Path,
     caption_dir: str | Path, index_dir: str | Path,
+    n4_package_dir: str | Path,
     raw_cache_dir: str | Path, *, output_dir: str | Path,
     package_id: str, builder_commit: str,
 ) -> dict[str, Any]:
@@ -330,6 +369,21 @@ def build_materialization_cost_evidence(
              index["preparation_sha256"]
              == caption_manifest["preparation_sha256"],
              "index does not bind these captions and preparation")
+    replay_bindings = replay["manifest"]["materialization_source_bindings"]
+    _require(replay_bindings["preparation_sha256"]
+             == index["preparation_sha256"] and
+             replay_bindings["caption_package_sha256"]
+             == caption_verified["package_sha256"],
+             "replay does not bind measured preparation and captions")
+    n4_root = Path(n4_package_dir).resolve()
+    n4_verified = verify_n4_derived_data_package(n4_root)
+    _require(replay_bindings["n4_package_sha256"]
+             == n4_verified["package_sha256"],
+             "replay N4 package differs from supplied package")
+    _verify_n4_derivations(
+        _read_object(n4_root / "n4-derived-data-package.json"), cases,
+        index["preparation_sha256"], caption_verified["package_sha256"],
+    )
     _require(index["object_count"] == len(cases) and
              index["window_vector_count"] == len(captions) and
              index["anchor_vector_count"] == len(cases),
@@ -359,6 +413,7 @@ def build_materialization_cost_evidence(
         "source_index_checksums_sha256": _sha(
             (index_root / "SHA256SUMS").read_bytes()
         ),
+        "source_n4_package_sha256": n4_verified["package_sha256"],
         "object_count": len(objects),
         "caption_window_count": len(captions),
         "caption_request_count": len(caption_requests),
@@ -392,6 +447,7 @@ def build_materialization_cost_evidence(
             "list_price_estimate_included": False,
             "cross_batch_embedding_allocation": False,
             "raw_response_content_included": False,
+            "derived_n4_provenance_checked": True,
         },
         "credentials_recorded": False,
         "hidden_label_values_included": False,
@@ -460,6 +516,7 @@ def verify_materialization_cost_evidence(
         "list_price_estimate_included": False,
         "cross_batch_embedding_allocation": False,
         "raw_response_content_included": False,
+        "derived_n4_provenance_checked": True,
     }, "cost evidence claim boundary changed")
     for row in captions:
         _require(set(row) == CAPTION_FIELDS and
@@ -523,6 +580,7 @@ def main() -> None:
     parser.add_argument("--preparation-dir", type=Path, required=True)
     parser.add_argument("--caption-dir", type=Path, required=True)
     parser.add_argument("--index-dir", type=Path, required=True)
+    parser.add_argument("--n4-package-dir", type=Path, required=True)
     parser.add_argument("--raw-cache-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--package-id", required=True)
@@ -530,7 +588,8 @@ def main() -> None:
     args = parser.parse_args()
     print(json.dumps(build_materialization_cost_evidence(
         args.replay_dir, args.preparation_dir, args.caption_dir,
-        args.index_dir, args.raw_cache_dir, output_dir=args.output_dir,
+        args.index_dir, args.n4_package_dir, args.raw_cache_dir,
+        output_dir=args.output_dir,
         package_id=args.package_id, builder_commit=args.builder_commit,
     ), sort_keys=True))
 
