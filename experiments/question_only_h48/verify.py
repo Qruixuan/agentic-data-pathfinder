@@ -111,7 +111,7 @@ def verify(source: Path, protocol_path: Path, questions_path: Path,
             "cached_input_units": usage["cached_input_units"],
             "output_units": usage["output_units"],
         })
-    if len(n6_requests) != 12 or len(n1_requests) != 12:
+    if len(n6_requests) != len(questions) or len(n1_requests) != len(questions):
         raise ValueError("diagnostic request identities are not unique")
     return {
         "schema_version": "pathfinder.question-only-development-summary/v1",

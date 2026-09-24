@@ -38,6 +38,19 @@ class QuestionOnlyH48ProbeTests(unittest.TestCase):
                     f"[{option['option_id']}] {option['text']}", prompt)
             self.assertLess(len(prompt.encode("utf-8")), 65536)
 
+    def test_relational_six_question_protocol_uses_same_probe(self) -> None:
+        root = ROOT / "artifacts/relational-development-runtime-20260924-v1"
+        protocol, rows, commitment = read_inputs(
+            ROOT / "experiments/relational_dev_20260924/question-only-protocol.json",
+            root / "plan/public-questions.jsonl",
+            root / "commitment/n1-oracle-preselection-commitment.json",
+        )
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(protocol["max_n6_requests"], 6)
+        self.assertEqual(protocol["max_provider_attempts"], 18)
+        self.assertEqual(commitment["label_count"], 6)
+        self.assertEqual(len({row["object_id"] for row in rows}), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

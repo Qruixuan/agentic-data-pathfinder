@@ -370,6 +370,9 @@ def replay(cost, schedule, policies):
 
 def render_report(cost, result):
     rows = cost['per_route']
+    video_count = cost['object_count']
+    video_noun = 'video' if video_count == 1 else 'videos'
+    unit_noun = 'unit' if video_count == 1 else 'units'
     lines = [
         '# Fresh video-disjoint multi-question pilot', '',
         f"{cost['object_count']} videos, {cost['question_count']} questions, "
@@ -415,14 +418,18 @@ def render_report(cost, result):
         '- Model costs use measured tokens and the frozen 2026-09-23 Singapore USD list-price snapshot, not invoice payments.',
         '- Caption/API usage, build-host elapsed time, query projection, N6 token usage and the nine-VM time allocation are separate components.',
         '- Plan-included disks/private network are not charged twice. Long-term retention and operator setup time are outside policy totals.',
-        '- Rejected-request usage is unknown, never zero. Policies that use such a route have no complete cost total.',
+        '- Missing provider-attempt usage is unknown, never zero. Policies that use such a route have no complete cost total.',
         f"- Active batch fleet allocation: ${Decimal(cost['vm_batch_allocated_usd']):.6f}; "
         f"excluded diagnosis-pause allocation: ${Decimal(cost['excluded_operator_pause_fleet_list_price_usd']):.6f}. "
         f"Full observed start-to-finish fleet window: ${Decimal(cost['observed_full_window_fleet_list_price_usd']):.6f} "
         '(shown separately, not added again).',
         '- Reported route times are observed trace times, not simulated counterfactual latencies for a different scheduling/load history.',
-        '- Four videos are four independent video units, not 48 independent tasks. Single calls per action cannot separate representation effects from model variability.',
-        '- No sample was replaced or request retried to improve test results. Provider refusals are preserved; no input was changed to bypass them.',
+        f'- {video_count} {video_noun} means {video_count} independent video '
+        f'{unit_noun}, '
+        f"not {cost['question_count']} independent video units. Single calls per action "
+        'cannot separate representation effects from model variability.',
+        '- No sample was replaced and no route was retried to improve test results. '
+        'Provider refusals and internal provider attempts are preserved; no input was changed to bypass them.',
         '- This remains a small proposal-development pilot, not a statistically validated benchmark or proof that any baseline generalizes.',
         '', '## Per-question observation matrix', '',
         '| Question | R | D | DC | I |', '|---|---|---|---|---|',
@@ -457,7 +464,7 @@ def render_report(cost, result):
               f"nine-VM fleet window ${Decimal(whole['fleet_list_price_usd']):.6f} = "
               f"known subtotal ${Decimal(whole['known_fleet_plus_api_usd']):.6f}. "
               'This includes operator pauses within that window and does not add build-host allocations again. '
-              'Rejected-request charges and costs outside the recorded window remain outside this known subtotal.']
+              'Missing provider-attempt charges and costs outside the recorded window remain outside this known subtotal.']
     return '\n'.join(lines) + '\n'
 
 

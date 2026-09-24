@@ -2,7 +2,9 @@ import copy
 from decimal import Decimal
 import unittest
 
-from experiments.interleaved_cost_replay import replay, cached_units, policy_arm
+from experiments.interleaved_cost_replay import (
+    replay, cached_units, policy_arm, render_report,
+)
 
 
 class CostReplayTests(unittest.TestCase):
@@ -72,6 +74,30 @@ class CostReplayTests(unittest.TestCase):
         self.assertEqual(result[0]['incorrect'], 0)
         self.assertIsNone(result[0]['total_within_declared_boundary_usd'])
         self.assertIsNotNone(result[1]['total_within_declared_boundary_usd'])
+
+    def test_report_uses_actual_cohort_size_and_attempt_boundary(self):
+        cost, schedule = self.fixture()
+        for row in cost['per_route']:
+            row.update(model_input_bytes=1024,
+                       semantic_content_sha256='same-input')
+        cost.update(
+            object_count=1, question_count=2,
+            vm_batch_allocated_usd='0.01',
+            excluded_operator_pause_fleet_list_price_usd='0',
+            observed_full_window_fleet_list_price_usd='0.02',
+            observed_preparation_to_finish={
+                'started_utc': '2026-09-24T00:00:00Z',
+                'ended_utc': '2026-09-24T00:01:00Z',
+                'known_all_api_list_price_usd': '1',
+                'fleet_list_price_usd': '0.02',
+                'known_fleet_plus_api_usd': '1.02',
+            },
+        )
+        report = render_report(cost, replay(cost, schedule, ['always-R']))
+        self.assertIn('1 video means 1 independent video unit', report)
+        self.assertIn('not 2 independent video units', report)
+        self.assertIn('Missing provider-attempt usage is unknown', report)
+        self.assertNotIn('Four videos', report)
 
 
 if __name__ == '__main__':

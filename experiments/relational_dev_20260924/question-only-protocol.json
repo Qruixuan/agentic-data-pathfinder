@@ -1,0 +1,21 @@
+{
+  "schema_version": "pathfinder.question-only-development-diagnostic/v1",
+  "run_id": "question-only-relational-20260924-52c91e0b",
+  "cohort": "relational-multiq-development-20260924-v1",
+  "question_count": 6,
+  "max_n6_requests": 6,
+  "max_n1_score_requests": 6,
+  "model": "qwen3.8-27b",
+  "temperature": 0,
+  "input_kind": "public-question-and-options-only",
+  "prompt_profile": "question-only-choice-v1",
+  "evaluation_role": "development-diagnostic-on-public-relational-cohort",
+  "claim_boundary": "single-call-answer-prior-check-not-a-held-out-test",
+  "question_file_sha256": "a9cc4e0fdc2acce11a6d625d56212a9ee9e675c5db0cebc12d67538389450891",
+  "price_basis": "frozen-2026-09-23-singapore-usd-list-price",
+  "max_provider_attempts": 18,
+  "provider_retry_policy": "deployed-N6-semantic-endpoint",
+  "allow_question_replacement": false,
+  "credentials_recorded": false,
+  "hidden_labels_read": false
+}

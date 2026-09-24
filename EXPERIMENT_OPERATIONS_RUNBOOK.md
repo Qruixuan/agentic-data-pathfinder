@@ -990,6 +990,9 @@ measured action/state, without inventing unobserved counterfactual answers.
 | Error printed but reported status is zero | Pipeline masked native exit code | Redirect output or capture `PIPESTATUS[0]` | Treat the run as failed and inspect durable state |
 | PowerShell SSH process exists but no usable tunnel | Quoting, authentication prompt, remote bind failure or stale listener | Batch authentication, `ExitOnForwardFailure`, free port and listener ownership checks | Repair only the owned tunnel before preflight |
 | Files apparently missing after transfer | Windows MAX_PATH, ACL, or partial recursive copy | Short staging root, archive transfer, checksum and count gates | Restage from the verified archive |
+| Verified archive works remotely but a local verifier reports missing deep files | Windows MAX_PATH at the local extraction root | Extract the same verified archive under a short root such as `.codex_build/r24`; compare archive digest before inferring source drift | Re-run the canonical verifier from the short root; do not regenerate paid artifacts |
+| One-shot diagnostic container cannot resolve a cross-host service while the deployed route can | Diagnostic container joined the Docker network but omitted the deployed route's `ExtraHosts` | Compare the deployed route's private host mapping by names/IP class, then inherit that exact mapping in the one-shot container | Repair diagnostic launch only; no LLM or FlowMesh call until the no-call network preflight passes |
+| N1 private package is readable but public commitment cannot be written | Root inside an `ALL`-capabilities-dropped one-shot container cannot bypass ownership of the public output directory | Verify the public staging directory's owner and write bit separately from the read-only private mount | Correct only public staging ownership; never broaden hidden-label permissions |
 | N4 current generation loses earlier objects | Atomic publication replaces the snapshot rather than merging ad hoc runs | Build and bind one complete generation such as the exact-six store | Re-publish a complete generation and re-freeze its gate |
 | Evidence says model input does not bind routed artifacts | Verifier and route disagree about the actual inference frontier | Bind exactly the artifacts used for inference while preserving the full routed set | Fix evidence semantics; do not weaken equality checks blindly |
 | Transport cannot bind a runtime value | New value type lacks an explicit canonical handoff | Add a fail-closed, commitment-complete transport branch and focused tests | Deploy only affected route services and use a new run |
@@ -1319,6 +1322,25 @@ explicit verified `.venv-prep/Scripts/python.exe` interpreter for the fresh
 holdout tooling. The replacement command passed all 13 focused accounting
 and reusable-runner tests; do not infer any cloud or package failure from
 the Windows process-start error.
+
+2026-09-24 — RESOLVED, relational-development preflight: an N1 one-shot
+container could read the private oracle but could not write its public
+commitment to a pathfinder-owned output directory because it ran as root
+with all capabilities dropped. Corrected ownership on the public output
+staging directory only, then completed canonical verification. The private
+mount and hidden-label modes were unchanged; no label value was displayed.
+
+2026-09-24 — RESOLVED, local verification: the long Windows artifact path
+caused the N3 input loader to report a missing deep file, while the public
+runtime archive had already verified on Linux. Extracting that same archive
+under `.codex_build/r24` passed the canonical 24-route input and output
+verifiers. Treat this as a local path-length issue, not package corruption.
+
+2026-09-24 — RESOLVED before question-only inference: an isolated diagnostic
+container on N7 lacked the deployed route's cross-host `ExtraHosts`, so N1
+and N6 name resolution failed despite healthy services. The launcher now
+inherits the validated private mappings from the deployed N7 container;
+the no-call health/auth/worker preflight passed before six N6 requests.
 
 ```text
 date_utc:

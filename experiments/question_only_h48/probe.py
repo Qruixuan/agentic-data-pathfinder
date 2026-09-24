@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
@@ -48,32 +49,46 @@ def write_new(path: Path, value: object, *, private: bool = False) -> None:
 def read_inputs(protocol_path: Path, questions_path: Path,
                 commitment_path: Path) -> tuple[dict, list[dict], dict]:
     protocol = json.loads(protocol_path.read_bytes())
+    count = protocol.get("question_count")
+    cohort = protocol.get("cohort")
+    if (type(count) is not int or not 1 <= count <= 24
+            or not isinstance(cohort, str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", cohort) is None
+            or not isinstance(protocol.get("run_id"), str)
+            or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", protocol["run_id"])
+            is None):
+        raise ValueError("diagnostic size or identity is invalid")
     required = {
         "schema_version": "pathfinder.question-only-development-diagnostic/v1",
-        "cohort": "fresh-multiq-holdout-20260924-v2",
-        "question_count": 12, "max_n6_requests": 12,
-        "max_n1_score_requests": 12, "model": "qwen3.8-27b",
+        "max_n6_requests": count, "max_n1_score_requests": count,
+        "model": "qwen3.8-27b",
         "temperature": 0, "input_kind": "public-question-and-options-only",
         "prompt_profile": "question-only-choice-v1",
-        "evaluation_role": "development-diagnostic-on-already-exposed-questions",
-        "max_provider_attempts": 36,
+        "max_provider_attempts": 3 * count,
         "provider_retry_policy": "deployed-N6-semantic-endpoint",
         "allow_question_replacement": False,
         "credentials_recorded": False, "hidden_labels_read": False,
     }
     if any(protocol.get(key) != value for key, value in required.items()):
         raise ValueError("diagnostic protocol differs from frozen contract")
+    if protocol.get("evaluation_role") not in {
+        "development-diagnostic-on-already-exposed-questions",
+        "development-diagnostic-on-public-relational-cohort",
+    } or protocol.get("price_basis") != (
+        "frozen-2026-09-23-singapore-usd-list-price"
+    ):
+        raise ValueError("diagnostic role or price basis differs")
     if len(_SEMANTIC_LLM_RETRY_BACKOFF_SECONDS) + 1 > 3:
         raise ValueError("deployed N6 retry ceiling exceeds frozen budget")
     if digest(questions_path.read_bytes()) != protocol["question_file_sha256"]:
         raise ValueError("question source digest differs")
     rows = [json.loads(line) for line in questions_path.read_text(
         encoding="utf-8").splitlines() if line]
-    if len(rows) != 12 or len({row["question_id"] for row in rows}) != 12:
-        raise ValueError("public questions are not exactly twelve unique tasks")
+    if len(rows) != count or len({row["question_id"] for row in rows}) != count:
+        raise ValueError("public questions do not match frozen task count")
     commitment = json.loads(commitment_path.read_bytes())
-    if (commitment.get("oracle_id") != protocol["cohort"] + "-oracle"
-            or commitment.get("label_count") != 12
+    if (commitment.get("oracle_id") != cohort + "-oracle"
+            or commitment.get("label_count") != count
             or commitment.get("label_values_included") is not False):
         raise ValueError("N1 public commitment differs")
     for row in rows:
@@ -193,7 +208,7 @@ def run(protocol: dict, rows: list[dict], commitment: dict, out: Path) -> None:
         "question_file_sha256": protocol["question_file_sha256"],
         "oracle_id": commitment["oracle_id"],
         "public_task_set_sha256": commitment["public_task_set_sha256"],
-        "n6_request_ceiling": 12, "n1_score_ceiling": 12,
+        "n6_request_ceiling": len(rows), "n1_score_ceiling": len(rows),
         "provider_attempt_ceiling": protocol["max_provider_attempts"],
         "credentials_recorded": False, "hidden_labels_read": False,
     })
