@@ -1,0 +1,30 @@
+{
+  "schema_version": "pathfinder.ten-route-batch-config/v1",
+  "runtime_environment": "multi-host-private-network",
+  "source_dirs": {
+    "local_semantic_admission_dir": "local-semantic-admission",
+    "n4_serve_gate_dir": "n4-live-serve-gate",
+    "deployment_binding_dir": "deployment-binding",
+    "logical_route_dir": "logical-routes",
+    "scenario_path": "scenario.json",
+    "container_plan_dir": "container-plan",
+    "artifact_binding_dir": "artifact-bindings",
+    "one_case_plan_dir": "one-case-plan",
+    "compose_overlay_dir": null,
+    "service_bootstrap_dir": null,
+    "n4_gate_deployment_binding_dir": null,
+    "provisioning_catalog_dir": null,
+    "n4_package_dir": null
+  },
+  "worker_alias": "REPLACE_WITH_FROZEN_WORKER_ALIAS",
+  "worker_node_alias": "REPLACE_WITH_WORKER_NODE_ALIAS",
+  "task_timeout_seconds": 900,
+  "expected_admission_sha256": "REPLACE_WITH_ADMISSION_SHA256",
+  "one_case_selection": {
+    "case_id": "REPLACE_WITH_CASE_ID",
+    "workload_id": "REPLACE_WITH_WORKLOAD_ID",
+    "safe_design_id": "D0"
+  },
+  "n4_live_gate_sources_file": "live-gate-sources.json",
+  "n4_live_gate_sources_sha256": "REPLACE_WITH_DESCRIPTOR_FILE_SHA256"
+}

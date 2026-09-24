@@ -1,0 +1,26 @@
+{
+  "schema_version": "pathfinder.interleaved-batch-config/v1",
+  "admission_dir": "multiq-sealed-runtime-admission-20260924-v2",
+  "source_dirs": {
+    "trial_dag_dir": "multiq-sealed-trial-dags-20260924-v2",
+    "binding_dir": "multiq-sealed-route-bindings-20260924-v2",
+    "plan_dir": "multiq-sealed-test-plan-20260924-v2",
+    "n1_public_commitment_dir": "multiq-sealed-test-oracle-commitment-20260924-v2",
+    "n2_index_package_dir": "rsi-exam-formal-runtime-foundation-321f33a-v2-public/n2-package",
+    "n3_package_dir": "multiq-sealed-n3-20260924-v2",
+    "raw_package_dir": "rsi-exam-formal-n3-raw-12video-ab60687-v2",
+    "n4_package_dir": "rsi-exam-formal-runtime-foundation-321f33a-v2-public/n4-package",
+    "query_dir": "multiq-sealed-query-20260924-v2",
+    "video_index_dir": "interleaved-multiq-index-2561a1f-v1/video-index-v1",
+    "preparation_dir": "rsi-exam-formal-temporal-preparation-ab60687-v2",
+    "caption_dir": "rsi-exam-formal-temporal-captions-7a5a8dd-v2"
+  },
+  "coordinator_base_url": "http://10.70.0.17:18780",
+  "worker_alias": "pathfinder_costaware_20260815a",
+  "worker_node_alias": "pathfinder-n7",
+  "task_timeout_seconds": 900,
+  "expected_plan_sha256": "47d04af19e3f3ff83adf0d936d1c35ebf4c0aa225a7437e1aa7a71f3145a6edb",
+  "expected_question_count": 7,
+  "expected_route_count": 28,
+  "baseline_spec_dir": "multiq-sealed-baselines-20260924-v1"
+}

@@ -7,6 +7,14 @@ dist/
 build/
 *.egg-info/
 outputs/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
 data/phase_b_confirmatory_small/
 data/reduced_oracle_mvp/
 data/multi_candidate_formal_v2/
@@ -15,3 +23,19 @@ data/multi_candidate_formal_v2/
 # grants; narrow patterns so a deliberately shared .claude file still can be.
 .claude/settings.json
 .claude/settings.local.json
+
+# Local build copies and frozen experiment evidence. Keep them on disk;
+# publish reviewed source/configuration, not workstation snapshots or stores.
+/.codex_build/
+/.qruix_smoke_stage/
+/.uv-cache/
+/.venv-prep/
+/artifacts/
+/a7/
+/x6r-20260917/
+/x6store-20260917/
+/semantic-smoke-manifest.local.json
+/experiments/multiq_pilot_20260924/final-execution/
+/experiments/multiq_pilot_20260924/partial-results/
+/experiments/multiq_pilot_20260924/scoring-input/
+/experiments/multiq_pilot_20260924/score-v1/

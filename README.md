@@ -1,5 +1,15 @@
 # Pathfinder Minimal System
 
+Operators should follow the
+[Pathfinder Experiment Operations Runbook](EXPERIMENT_OPERATIONS_RUNBOOK.md)
+before freezing, deploying, or submitting an experiment. It records the
+cross-platform source-binding, deployment, FlowMesh, and evidence gates needed
+to avoid known failed retries.
+
+For new runs, use the configuration-driven [experiment entry point](experiments/README.md)
+instead of copying a dated runner. Historical reports and frozen evidence keep
+their original identities.
+
 The repository also includes an offline, deterministic
 [FlowMesh physical-layout and infrastructure simulator](FLOWMESH_INFRA_SIMULATOR.md).
 Its first reference scenario exercises four workload classes across eight

@@ -231,6 +231,111 @@ queueing, and control-plane overhead and is not an execution estimate.
 There is deliberately no runtime timeout override. If the frozen timeout is
 wrong, create a new plan.
 
+### Reusable experiment runner
+
+Do **not** copy and rename the 24-route or 28-route Python runner/verifier for
+each cohort. Use `experiments.batch`; the frozen configuration schema selects
+either the R/D/DC/I interleaved contract or the existing ten-route contract.
+`experiments.interleaved_batch` remains a compatible entry point.
+See `experiments/README.md` for the active/historical tool inventory. The dated
+24/28-route entry points now delegate to that shared implementation. Their
+offline verifier APIs remain available to historical cost audits; executing
+through a dated runner requires an explicit frozen `--config-dir` and writes
+the common output format. Do not pass that new output to a legacy verifier.
+For interleaved batches, a new batch changes a small public draft
+configuration: immutable artifact directory names, worker alias/node,
+coordinator origin, task timeout, expected plan digest, question/route counts,
+and optional baseline directory. The draft contains no credential or label.
+The existing `configs/dev-24.draft.json` and `configs/sealed-28.draft.json`
+show the two verified shapes; they are examples, not the next cohort's frozen
+inputs.
+
+Freeze that complete draft **once**, before any submission, to a fresh
+directory with `freeze-config`. The tool writes `batch-config.json` and
+`SHA256SUMS` and refuses to overwrite an existing directory. Then use the
+same frozen configuration for `freeze-inputs`, `check`, `preflight`, `execute`,
+and `verify`. `freeze-inputs` reuses the canonical three-stage route-binding,
+DAG, and admission freezers after public plan, N1 commitment, N3 selections,
+query embeddings, and other upstream packages are ready:
+
+```text
+python -m experiments.batch freeze-config \
+  --draft DRAFT.json --output-dir NEW_CONFIG_DIR
+python -m experiments.batch freeze-inputs \
+  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
+python -m experiments.batch check \
+  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
+python -m experiments.batch preflight \
+  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
+python -m experiments.batch execute \
+  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT \
+  --output-dir FRESH_RUN_DIR
+python -m experiments.batch verify \
+  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT \
+  --output-dir FRESH_RUN_DIR --seal
+```
+
+Run these from a clean, dependency-complete source environment; `check` uses
+the canonical source-bound verifier and may need the video-preparation
+dependencies. It must not be replaced by a checksum-only check. `preflight`
+reads the FlowMesh worker registry but makes no route or LLM request;
+`execute` alone submits workflows. `verify --seal` applies only to an
+unsealed, completed, fresh output directory; use plain `verify` afterward.
+If the configuration names a baseline specification, freeze and verify that
+specification after `freeze-inputs` and before `check`; it must bind the new
+admission and plan digests.
+All existing frozen receipts remain untouched. The reusable verifier accepts
+the historical 24-route and 28-route formats for read-only regression, while
+new runs use one format with per-route timing and configuration digest.
+
+This replaces per-cohort runner/verifier code, **not** the source-bound
+preparation pipeline. A new question may still require new public tasks,
+private N1 commitments, query embeddings, N3 selections, bindings, DAGs,
+admission and deployment checks. Reuse any video-level package only when its
+canonical verifier confirms the binding. If future cohorts require editing
+the reusable runner instead of just the draft, record that as a pipeline bug.
+
+#### Ten-route compatibility (D0--D7, N7 and N8)
+
+Use schema `pathfinder.ten-route-batch-config/v1`; start from
+`experiments/configs/ten-route.draft.example.json`. Its placeholders must be
+replaced before freezing. The ten executions retain the original order: raw,
+indexed, derived, cache miss, cache hit on N7, then the same five on N8.
+These are eight designs with two extra cache-hit observations, not ten
+independent policy actions. The adapter delegates to the original runner and
+verifier, preserving their case IDs, prerequisites, idempotency and evidence.
+
+The same `freeze-config`, `check`, `preflight`, `execute`, and `verify`
+commands apply, with two differences:
+
+- `execute` requires `--run-id FRESH_RUN_ID` as well as a new output directory.
+- Use plain `verify`, without `--seal`: the canonical ten-route runner already
+  writes `SHA256SUMS` with its receipt and JSONL results. Progress and timings
+  go in a separate `FRESH_RUN_DIR.attempt/` sibling, leaving the three-file
+  canonical receipt format intact. A failed attempt cannot be blindly resumed.
+
+`runtime_environment` selects `local` or `multi-host-private-network`.
+`one_case_selection` and `one_case_plan_dir` select a single public workload;
+set both to null for the admission's original representative smokes. For a new
+one-case plan, `freeze-inputs` delegates to the existing one-case freezer;
+it does not rebuild an admission or N4 packages. Skip it for an existing plan.
+
+All configured source paths are relative to `--artifact-root`. For live N4,
+provide the existing public live-gate descriptor and pin its file SHA-256;
+paths inside it resolve relative to that descriptor and must stay under the
+artifact root. For preprovisioned N4, set the descriptor fields to null and
+supply the compose/bootstrap/provisioning/N4-package paths. Private oracle
+packages and credentials never belong in this configuration.
+
+Contract compatibility does not authorize changing historical semantics.
+For example, the September 18 sampled-raw profile predates direct-video raw
+input. Its old evidence must be fully verified with its matching source
+revision; the current verifier must not reinterpret it as direct video.
+`check` still enforces the canonical admission, N4 gate, deployment origins,
+worker pin and one-case plan before any submission. If a historical source
+binding fails, use the matching verifier revision for archival verification,
+or prepare new immutable inputs for a new experiment.
+
 ## 3. Staging files safely on Windows and Linux
 
 ### Windows path length and ACL failures
@@ -645,10 +750,53 @@ The ledger may contain identities and non-secret metadata. It must never
 contain API keys, bearer tokens, HMAC secrets, signed URLs, private prompts,
 hidden labels, or environment dumps.
 
-## Before changing this runbook
+## Record failures as they happen
 
-When a new failure occurs, add it only after the exact failing boundary and
-root cause are proven. Record a preventive gate, not merely the repair that
-worked once. If the prevention can be automated safely, add it to the relevant
-planner/verifier or deployment preflight; this document is the fallback, not a
-substitute for executable checks.
+During every experiment, record **each new failure in this runbook before a
+retry or a move to the next phase**. Do not wait until the experiment ends or
+the final report is written. Add a short dated entry under the incident log
+below with the first failing boundary, observable symptom, sanitized evidence
+path, and status. If the root cause is not yet proven, mark it `INVESTIGATING`
+and state what is unknown; do not present a guess as a fact.
+
+Once the cause is proven, update the same entry to `CONFIRMED` or `RESOLVED`:
+record the exact root cause, the minimal fix, and a preventive preflight or
+test that would have stopped the failure before a workflow or paid model call.
+If the same failure recurs, link and strengthen the existing preventive gate
+instead of merely adding another anecdote. Automate the gate in the relevant
+planner, verifier, or deployment preflight when safe; documentation alone is
+not a substitute. At experiment handoff, check that **every** failed attempt
+has an incident entry and that unresolved entries remain visibly unresolved.
+
+Incident entries must not contain credentials, hidden labels, raw prompts,
+answers, signed URLs, or unredacted container environments. A fix after a
+submitted workflow still requires a fresh run identity.
+
+### Incident log
+
+2026-09-24 — CONFIRMED: historical ten-route verifier version mismatch.
+Offline regression on
+`artifacts/minimum-real-retrieval-e1351cf/upcloud-minimum-real-retrieval-20260918t192435z`
+hit `semantic input profile differs from its frozen route frontier` for D0/D4.
+Those observations used sampled raw frames; the current raw profile uses
+direct video. The receipt/checksums remain intact and the other eight route
+evidence records pass current semantic evidence validation. No experiment was
+submitted. Preserve the version boundary and use the historical verifier for
+full archival verification; do not rewrite the old profile. Preventive test:
+`HistoricalTenRouteEvidenceTests` checks all ten stored records and requires
+the incompatible raw profiles to be rejected. This is not a new runtime fault.
+
+Use this compact format for each new failure:
+
+```text
+date_utc:
+status: INVESTIGATING | CONFIRMED | RESOLVED
+experiment_or_run_id:
+first_failing_boundary:
+observable_symptom_and_exit_status:
+sanitized_evidence_path:
+proven_root_cause_or_unknown:
+minimal_fix:
+preventive_gate_or_test:
+verification_result:
+```

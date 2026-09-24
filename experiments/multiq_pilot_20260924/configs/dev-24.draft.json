@@ -1,0 +1,26 @@
+{
+  "schema_version": "pathfinder.interleaved-batch-config/v1",
+  "admission_dir": "interleaved-multiq-runtime-admission-d328726-isolated-v1",
+  "source_dirs": {
+    "trial_dag_dir": "interleaved-multiq-trial-dags-754760e-v1",
+    "binding_dir": "interleaved-multiq-route-bindings-74114d7-v1",
+    "plan_dir": "interleaved-multiq-24route-2561a1f-v1",
+    "n1_public_commitment_dir": "interleaved-multiq-n1-public-1c9ad84-v1",
+    "n2_index_package_dir": "rsi-exam-formal-runtime-foundation-321f33a-v2-public/n2-package",
+    "n3_package_dir": "interleaved-multiq-n3-1c9ad84-v1",
+    "raw_package_dir": "rsi-exam-formal-n3-raw-12video-ab60687-v2",
+    "n4_package_dir": "rsi-exam-formal-runtime-foundation-321f33a-v2-public/n4-package",
+    "query_dir": "interleaved-multiq-index-2561a1f-v1/query-batch-v1",
+    "video_index_dir": "interleaved-multiq-index-2561a1f-v1/video-index-v1",
+    "preparation_dir": "rsi-exam-formal-temporal-preparation-ab60687-v2",
+    "caption_dir": "rsi-exam-formal-temporal-captions-7a5a8dd-v2"
+  },
+  "coordinator_base_url": "http://10.70.0.17:18780",
+  "worker_alias": "pathfinder_costaware_20260815a",
+  "worker_node_alias": "pathfinder-n7",
+  "task_timeout_seconds": 900,
+  "expected_plan_sha256": "2ef17b4dd65f1679802cd7b57469f5a1ea49ef8d1e03d55430b6bcfc9ff8bc4c",
+  "expected_question_count": 6,
+  "expected_route_count": 24,
+  "baseline_spec_dir": null
+}
