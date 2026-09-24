@@ -1,0 +1,52 @@
+{
+  "schema_version": "pathfinder.multiq-sealed-baseline-spec/v1",
+  "status": "FROZEN_BEFORE_SEALED_TEST_OUTCOMES",
+  "plan_sha256": "47d04af19e3f3ff83adf0d936d1c35ebf4c0aa225a7437e1aa7a71f3145a6edb",
+  "admission_sha256": "88574f1624777d2e354a8957f24e7682a7069e9338d01e412d7f2e01d0c920f3",
+  "source_development_run": "multiq-24route-20260923t2250z",
+  "test_question_count": 7,
+  "test_route_count": 28,
+  "policies": {
+    "always-R": "Select complete MP4 for every public question.",
+    "always-D": "Select uncached derived digest and frames for every public question.",
+    "always-DC": "Select shared-episode cached derived digest and frames for every public question.",
+    "always-I": "Select question-aware temporal-index frames for every public question.",
+    "first-R-then-I": "For each video select R on its first question, then I on every later question, counting only earlier questions in the frozen schedule."
+  },
+  "policy_visible_fields": [
+    "current public question and video identity",
+    "frozen arm contracts",
+    "previously visited video counts",
+    "previous build and cache state"
+  ],
+  "policy_forbidden_fields": [
+    "hidden answer",
+    "task_success",
+    "future questions",
+    "future cache state",
+    "held-out route outcomes"
+  ],
+  "outcome_matching": "Use exactly the observed question-and-arm route. For DC, require the replayed cache hit/miss to equal the verified route's state; otherwise mark unsupported, never fabricate a counterfactual outcome.",
+  "build_accounting": "Charge question-independent captions, video index, and derived materialization once per video when first required; charge question embedding and query-specific frame projection per I question; keep build and query costs separate.",
+  "provider_cost_basis": "Recorded input and cached-input and output tokens multiplied by frozen official model/region list prices; not actual invoice payment.",
+  "price_snapshot": {
+    "as_of_date": "2026-09-23",
+    "region": "Singapore",
+    "currency": "USD",
+    "unit": "per_million_tokens",
+    "qwen3.8-27b": {
+      "input": "0.50",
+      "implicit_cached_input": "0.10",
+      "output": "3.00"
+    },
+    "text-embedding-v4": {"input": "0.07"},
+    "source_urls": [
+      "https://www.alibabacloud.com/help/en/model-studio/qwen3-8-27b",
+      "https://www.alibabacloud.com/help/en/model-studio/model-pricing"
+    ]
+  },
+  "vm_allocation": "Allocate shared VM and Root cost by recorded experiment-time interval; missing historical build durations remain unknown, never zero.",
+  "ranking_rule": "Compare quality and full-path list-price cost only if both are observed and all required cost components are present. Otherwise report partial known cost and no winner.",
+  "credentials_recorded": false,
+  "hidden_labels_included": false
+}
