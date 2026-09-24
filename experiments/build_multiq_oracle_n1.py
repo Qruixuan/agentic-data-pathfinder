@@ -7,6 +7,7 @@ from pathfinder.simulator.interleaved_multiq_oracle import build_interleaved_n1_
 from pathfinder.simulator.hidden_oracle_commitment import (
     freeze_n1_oracle_preselection_commitment, verify_n1_oracle_preselection_commitment,
 )
+from pathfinder.rsi_exam.ten_route_multiq_plan import load_verified_multiq_plan
 
 
 def main():
@@ -18,9 +19,7 @@ def main():
     parser.add_argument("--private-output", type=Path, required=True)
     parser.add_argument("--public-output", type=Path, required=True)
     args = parser.parse_args()
-    plan = json.loads((args.plan_dir / "interleaved-plan.json").read_bytes())
-    questions = [json.loads(line) for line in (
-        args.plan_dir / "public-questions.jsonl").read_bytes().splitlines()]
+    plan, questions, _ = load_verified_multiq_plan(args.plan_dir)
     report = build_interleaved_n1_oracle(
         plan_dir=args.plan_dir, public_questions=questions,
         public_source_sha256=plan["public_source_sha256"],

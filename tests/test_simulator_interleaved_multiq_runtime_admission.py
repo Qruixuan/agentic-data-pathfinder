@@ -9,12 +9,32 @@ from unittest.mock import patch
 
 from pathfinder.simulator.interleaved_multiq_runtime_admission import (
     InterleavedRuntimeAdmissionError,
+    _cache_episode_matches,
     freeze_interleaved_runtime_admission,
     verify_interleaved_runtime_admission,
 )
 
 
 class InterleavedRuntimeAdmissionTests(unittest.TestCase):
+    def test_cache_pair_binds_arm_for_legacy_and_ten_route_designs(self):
+        cache = {("run", "trial"): "episode"}
+        for design in ("DC", "D3", "D7"):
+            route = {"design_id": design, "arm_id": "DC",
+                     "run_id": "run", "trial_key": "trial",
+                     "cache_episode_id": "episode"}
+            self.assertTrue(_cache_episode_matches(route, cache))
+            self.assertFalse(_cache_episode_matches(
+                {**route, "cache_episode_id": "wrong"}, cache,
+            ))
+        self.assertTrue(_cache_episode_matches({
+            "design_id": "D2", "arm_id": "D", "run_id": "run",
+            "trial_key": "trial", "cache_episode_id": None,
+        }, cache))
+        self.assertFalse(_cache_episode_matches({
+            "design_id": "D2", "arm_id": "D", "run_id": "run",
+            "trial_key": "trial", "cache_episode_id": "episode",
+        }, cache))
+
     @staticmethod
     def _documents(**_sources):
         return {

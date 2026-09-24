@@ -99,6 +99,19 @@ def _ten_route_origins(value: Mapping[str, str] | None) -> dict[str, str]:
     return result
 
 
+def _cache_episode_matches(
+    route: Mapping[str, Any],
+    cache: Mapping[tuple[str, str], str],
+) -> bool:
+    """Cache admission depends on the arm, never the design label."""
+
+    episode = route["cache_episode_id"]
+    if route["arm_id"] != "DC":
+        return episode is None
+    return (episode is not None
+            and cache.get((route["run_id"], route["trial_key"])) == episode)
+
+
 def _expected(
     *, trial_dag_dir: Path, binding_dir: Path, plan_dir: Path,
     n1_public_commitment_dir: Path, n2_index_package_dir: Path,
@@ -205,9 +218,7 @@ def _expected(
                         for key in promoted["semantic_stage_keys"]]
         episode = route["cache_episode_id"]
         _require(
-            (episode is None and promoted["design_id"] != "DC")
-            or (episode is not None and promoted["design_id"] == "DC"
-                and cache[(route["run_id"], route["trial_key"])] == episode),
+            _cache_episode_matches(route, cache),
             "cache episode differs from the frozen DC schedule",
         )
         build_semantic_route_request(

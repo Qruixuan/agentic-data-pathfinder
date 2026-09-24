@@ -1342,6 +1342,23 @@ and N6 name resolution failed despite healthy services. The launcher now
 inherits the validated private mappings from the deployed N7 container;
 the no-call health/auth/worker preflight passed before six N6 requests.
 
+2026-09-25 — RESOLVED before provider requests: the reusable multi-question
+offline preparer rejected a short `--source-commit` at membership freeze;
+`freeze_collection_plan` requires the full 40-character Git SHA-1. The
+partial local preparation directory was retained for audit, and a fresh
+output directory completed with `git rev-parse HEAD`. Pass the full commit
+identity to every builder; do not interpret this local argument error as a
+media, source-binding, or cloud failure. No LLM or FlowMesh request occurred.
+
+2026-09-25 — RESOLVED before route submission: the shared interleaved runner
+had an old `route_count` field reference that failed for a verified ten-route
+multi-question plan, and runtime admission initially identified cache routes
+by the old `DC` design label rather than the `DC` arm (new labels are D3/D7).
+Self-contained 60-slot and cache-pair tests now exercise both branches. Keep
+the old four-arm plan and ten-route plan as separate schema contracts; never
+infer a new admission failure from an old-field `KeyError` or relabel D3/D7
+without checking the arm. Neither defect reached a live route or model call.
+
 ```text
 date_utc:
 status: INVESTIGATING | CONFIRMED | RESOLVED

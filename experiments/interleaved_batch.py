@@ -383,7 +383,7 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
     if (
         len(questions) != plan["question_count"]
         or len(question_ids) != len(questions)
-        or len(trials) != plan["route_count"]
+        or len(trials) != route_count
         or len(stages) != report["stage_count"]
         or len(route_by_key) != len(trials)
         or len(episode_by_key) != report["cache_episode_binding_count"]

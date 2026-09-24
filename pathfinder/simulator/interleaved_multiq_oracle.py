@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..distributed.scoring import MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE
-from ..rsi_exam.interleaved_multiq_plan import verify_interleaved_plan
+from ..rsi_exam.ten_route_multiq_plan import load_verified_multiq_plan
 from .hidden_oracle import (
     N1_LABEL_SOURCE_SCHEMA_VERSION,
     build_n1_hidden_label_record,
@@ -71,10 +71,11 @@ def build_interleaved_n1_oracle(
     _require(csv_path.is_relative_to(private)
              and target.is_relative_to(private),
              "oracle inputs and output must remain below N1 private root")
-    plan = verify_interleaved_plan(
+    plan_doc, _, plan = load_verified_multiq_plan(
         plan_dir, public_questions,
-        public_source_sha256=public_source_sha256,
     )
+    _require(plan_doc["public_source_sha256"] == public_source_sha256,
+             "oracle public source differs from the verified plan")
     _require(isinstance(official_csv_sha256, str)
              and _SHA256.fullmatch(official_csv_sha256),
              "official CSV digest is invalid")
