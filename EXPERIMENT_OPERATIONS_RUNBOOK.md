@@ -1,5 +1,11 @@
 # Pathfinder Experiment Operations Runbook
 
+Last reviewed: **2026-09-24**, against repository revision **28b5ede**.
+This is a source/contract review, not a live cluster readiness certificate.
+Ports, worker IDs, image IDs, prices and successful runs mentioned as historical
+examples are not defaults for the next experiment. Re-observe live state before
+submission; do not assume uncommitted workstation code is deployed.
+
 This runbook records recurring failures seen while freezing, deploying, and
 running Pathfinder experiments on Windows, `luyao3`, and the UpCloud
 multi-host environment. It is intended to prevent repeated failed submissions,
@@ -7,6 +13,29 @@ container rebuilds, and LLM calls.
 
 Use it for every smoke, canary, one-case run, and formal matrix run. A run is
 not ready for submission until every applicable pre-submit gate below passes.
+
+## Current scope and sources of truth
+
+| Concern | Current source of truth |
+| --- | --- |
+| Supported batch contracts and command flags | `experiments.batch --help`, `experiments/README.md`, `experiments/interleaved_batch.py`, `experiments/ten_route_batch.py` |
+| Interleaved plan, source binding and cache schedule | `pathfinder/rsi_exam/interleaved_multiq_plan.py`, `pathfinder/simulator/interleaved_multiq_runtime_admission.py` and their canonical verifiers |
+| Credential precedence | `pathfinder/cli_commands/_common.py` and the deployed service's declared credential contract |
+| N6 usage and provider-ID capture | `pathfinder/simulator/container_node.py`; cost exports must match the deployed journal schema |
+| SDK dependency | `pyproject.toml` (`flowmesh-sdk==0.1.9` at this review); record separately observed Root/Node/worker versions |
+| Actual endpoints, mounts, images and state | The selected deployment's desired-state record and sanitized live inspection, not an old report or this document's examples |
+
+Use one of two supported batch families: interleaved **R/D/DC/I** or the
+existing **ten-case D0--D7** smoke. The former currently admits the approved
+N7 pilot origins; it is not an arbitrary-host scheduler. The latter can use
+local or verified multi-host bindings. Multi-question x ten-case scheduling
+is still a separate extension, not enabled by changing a route count.
+
+The UpCloud single-worker route-coordinator profile does not imply a worker
+on every data VM: the pinned worker dispatches route API tasks, N7/N8 execute
+their bound paths, and N6 performs inference. A healthy N8 coordinator alone
+does not establish an N8 FlowMesh worker. Check the chosen profile rather
+than inferring topology from node numbers.
 
 ## Operating rule
 
@@ -16,55 +45,81 @@ Treat the experiment as six separate phases:
 2. freeze and verify all derived artifacts;
 3. stage and deploy only the affected services;
 4. prove network, service, worker, and credential readiness without inference;
-5. submit exactly one fresh run;
+5. submit the authorized fresh batch in its frozen order and within its budget;
 6. verify and preserve its evidence before interpreting the result.
 
 Do not use a later phase to diagnose an earlier one. In particular, do not
 submit a workflow to test source binding, container startup, SSH tunnelling,
 worker registration, or endpoint authentication.
 
+A failed gate blocks **submission**, not further safe diagnosis or an
+already-authorized repair. Record the incident, fix the proven cause, rerun
+only affected gates and continue within scope. Do not stop merely at a phase
+boundary. Stop for exhausted budget, missing authority, an unresolved gate,
+or a change to frozen scientific choices that needs the operator's decision.
+
 ## Mandatory pre-submit checklist
 
 Record every value in a small run ledger before submitting:
 
-- [ ] Exact Git commit is recorded and is the same source revision used for
-      freezing, verification, image builds, and the runner.
+- [ ] Exact source revision is recorded for the runner, freezers/verifiers,
+      and each affected runtime image. Every source-bound module matches its
+      artifact contract; any intentionally retained older service image is
+      recorded and verified, not silently normalized by rebuilding everything.
 - [ ] A clean Git archive, not a mutable Windows working tree, is the Python
       import root for all source-bound commands.
-- [ ] Source-bound SHA-256 values match the clean archive byte for byte.
-- [ ] Every frozen directory exists and its verifier passes.
+- [ ] Source commitments match the clean archive under the artifact format's
+      canonical digest scheme; raw-byte and normalized-source hashes are not
+      silently substituted for one another.
+- [ ] Every required frozen directory exists and its canonical verifier passes
+      with flags checked against that revision's `--help` (argparse exit 2 is
+      an invocation error, not a source-binding verdict).
 - [ ] Every `SHA256SUMS` file passes from inside its own directory.
 - [ ] Planning succeeded before plan verification is attempted.
 - [ ] The frozen timeout is greater than every operation lower bound plus a
       documented allowance for storage, compute, queueing, and control-plane
       overhead.
-- [ ] Runtime endpoints use the actual host/private-network ports. Frozen
-      inputs contain no stale loopback ports or single-host Docker DNS names.
+- [ ] Endpoints fit the chosen local or multi-host profile. Cross-host edges
+      contain no stale loopback/Docker-only names; allowed service aliases
+      resolve to the intended private hosts, and allowlists match their names.
 - [ ] Only services affected by the change were rebuilt or recreated.
-- [ ] All required containers are healthy and have restart count zero.
+- [ ] Participating containers are healthy, not restart-looping, and match
+      desired state. Record runtime epochs and restart counts before/after;
+      investigate new unexplained restarts. Do not recreate a healthy reused
+      service solely to reset a historical restart count to zero.
 - [ ] Runtime source/admission/catalog/gate mounts are the intended immutable
       versions and are read-only where required.
 - [ ] N3/N4 advertised origins exactly match the origins used by N7/N8.
-- [ ] Dependency health succeeds from both route coordinators.
-- [ ] Authentication boundary probes return an authenticated validation error
-      such as HTTP 400, never HTTP 401 or 403.
-- [ ] The SSH tunnel is listening locally before any FlowMesh command runs.
+- [ ] Dependency health succeeds from every participating coordinator (both
+      N7 and N8 for ten-case runs; N7 for the current interleaved pilot).
+- [ ] The valid-credential boundary probe reaches the known validation error;
+      the negative-credential control is rejected. A generic HTTP 400 without
+      that endpoint's auth-before-validation contract is not a pass.
+- [ ] If operator access uses an SSH tunnel, its listener belongs to the
+      intended tunnel and reaches the intended Root, before any FlowMesh call.
 - [ ] FlowMesh preflight resolves exactly one current worker for the pinned
       alias. The worker ID is recorded as an observation, not a durable pin.
 - [ ] The run ID, smoke ID, output directory, and operation identities have
       never been used before.
+- [ ] The run budget, trial order, cache episode/namespace and cold/warm
+      initial state are frozen; no other batch can write into that episode.
+- [ ] Public development/test splits and baseline policy are frozen before
+      held-out outcomes. Previously inspected videos are not called unseen.
 - [ ] The command's real exit status will be captured without a pipeline
       masking it.
 - [ ] The expected claim class is written down: infrastructure conformance,
       semantic correctness, performance, or cost. Passing one class must not be
       reported as passing another.
-- [ ] For a cost run, the N6 per-request usage journal is enabled and writable;
+- [ ] For a cost run, N6 has durable writable state and deployed usage/trace
+      capture; `semantic_usage_journal_error_count` has a recorded baseline;
       the official model price snapshot (model, region, currency, effective
       date, input/cache/output rates) and experiment time boundaries are
       frozen before submission. The ledger specifies which cold-build and
       shared-VM costs will be measured, amortized, or left unknown.
 
-If any item fails, stop before submission.
+If any applicable item fails, stop before submission; record why an item is
+not applicable rather than silently skipping it. `check` and `preflight`
+do not automate this entire checklist.
 
 ## 1. Immutable source and cross-platform byte identity
 
@@ -89,14 +144,17 @@ new immutable extraction directory per commit:
 ```powershell
 $Commit = (git rev-parse HEAD).Trim()
 $ShortCommit = $Commit.Substring(0, 12)
-$BuildRoot = Join-Path $env:TEMP "pathfinder-source-$ShortCommit"
+$StageRoot = "D:\pf-src" # Choose an authorized short, local staging root.
+$BuildRoot = Join-Path $StageRoot $ShortCommit
 $Archive = "${BuildRoot}.tar"
 
-if (Test-Path -LiteralPath $BuildRoot) {
-    throw "Clean source already exists: $BuildRoot"
+if ((Test-Path -LiteralPath $BuildRoot) -or
+    (Test-Path -LiteralPath $Archive)) {
+    throw "Clean source/archive already exists; verify it or choose a new path"
 }
+New-Item -ItemType Directory -Force -Path $StageRoot | Out-Null
 
-git archive --format=tar --output=$Archive $Commit
+git -c core.autocrlf=false archive --format=tar --output=$Archive $Commit
 if ($LASTEXITCODE -ne 0) { throw "git archive failed" }
 
 New-Item -ItemType Directory -Path $BuildRoot | Out-Null
@@ -109,8 +167,9 @@ commands with both the clean source as `PYTHONPATH` and Python's `-P` safe-path
 option:
 
 ```powershell
-$Python = (Resolve-Path ".venv\Scripts\python.exe").Path
+$Python = (Resolve-Path ".venv\Scripts\python.exe").Path # Or the verified venv.
 $PreviousLocation = Get-Location
+$PreviousPythonPath = $env:PYTHONPATH
 
 try {
     Set-Location -LiteralPath $BuildRoot
@@ -120,6 +179,7 @@ try {
         throw "Pathfinder did not import from the clean source"
     }
 } finally {
+    $env:PYTHONPATH = $PreviousPythonPath
     Set-Location -LiteralPath $PreviousLocation
 }
 ```
@@ -127,17 +187,22 @@ try {
 On Linux use the same rule:
 
 ```bash
-export PF_SOURCE_COMMIT="$(git rev-parse HEAD)"
-export PF_CLEAN_SOURCE="$(mktemp -d)/pathfinder-${PF_SOURCE_COMMIT:0:12}"
-mkdir -p "$PF_CLEAN_SOURCE"
-git archive "$PF_SOURCE_COMMIT" | tar -x -C "$PF_CLEAN_SOURCE"
-cd "$PF_CLEAN_SOURCE"
-PYTHONPATH="$PF_CLEAN_SOURCE" python -P -m pathfinder --help >/dev/null
+(
+  set -euo pipefail
+  PF_SOURCE_COMMIT="$(git rev-parse HEAD)"
+  PF_CLEAN_SOURCE="$(mktemp -d)"
+  git -c core.autocrlf=false archive "$PF_SOURCE_COMMIT" |
+    tar -x -C "$PF_CLEAN_SOURCE"
+  cd "$PF_CLEAN_SOURCE"
+  PYTHONPATH="$PF_CLEAN_SOURCE" python -P -m pathfinder --help >/dev/null
+  printf 'Clean source: %s\n' "$PF_CLEAN_SOURCE"
+)
 ```
 
-The temporary directory can be removed after all source-bound artifacts and
-evidence are safely copied elsewhere. Never overwrite a clean extraction and
-continue using it under the same name.
+Retain the extraction while an artifact or rollback procedure depends on it.
+Only remove an exact, validated staging path after its required contents have
+been preserved; never recursively clean a workspace or staging parent. Never
+overwrite an extraction and continue using it under the same name.
 
 Inspect line-ending drift before freezing:
 
@@ -147,9 +212,11 @@ git ls-files --eol -- `
   pathfinder/cli_commands/*.py
 ```
 
-`i/lf w/crlf` is sufficient reason not to use the current working-tree file as
-a source-bound input. Do not rely on `core.autocrlf` settings being identical
-across machines.
+Do not rely on `core.autocrlf` settings being identical across machines: set it
+explicitly for the archive operation. Current local-semantic and interleaved
+admission code normalizes CRLF to LF when hashing some implementation sources;
+older revisions and other artifact formats may bind raw bytes. That fix does
+not normalize all payloads or make an arbitrary working tree canonical.
 
 ### Source digest gate
 
@@ -171,8 +238,11 @@ if ($Expected -ne $Actual) {
 }
 ```
 
-Adjust the field and module to the artifact being checked. Do not substitute a
-Git blob ID for a recorded SHA-256; they are different digest schemes.
+Adjust the field, module and digest semantics to the artifact being checked.
+The raw-file comparison above applies to a verified LF extraction. A canonical
+verifier using normalized source bytes or a canonical-JSON commitment is
+authoritative for that scheme. Do not substitute a Git blob ID or raw manifest
+file SHA-256 for a semantic commitment; these are different digest schemes.
 
 ## 2. Freeze, verify, and change-impact discipline
 
@@ -182,14 +252,15 @@ A failed planner normally creates no output directory. Gate every verifier on
 both the planner's exit status and directory existence:
 
 ```powershell
-& $Python -P -m pathfinder <plan-command> <arguments>
+# Set the command names and argument arrays from each subcommand's --help.
+& $Python -P -m pathfinder $PlanCommand @PlanArgs
 $PlanStatus = $LASTEXITCODE
 
 if ($PlanStatus -ne 0 -or -not (Test-Path -LiteralPath $PlanDir)) {
     throw "Planning failed; verification and submission are prohibited"
 }
 
-& $Python -P -m pathfinder <verify-command> --plan-dir $PlanDir
+& $Python -P -m pathfinder $VerifyCommand @VerifyArgs
 if ($LASTEXITCODE -ne 0) { throw "Plan verification failed" }
 ```
 
@@ -202,6 +273,17 @@ On Linux, verify checksums from inside each artifact directory:
 )
 ```
 
+Write new checksum-bound text as UTF-8/LF bytes. An old CRLF checksum manifest
+must remain immutable: distinguish a checksum-reader line-ending error from a
+payload mismatch, then use a documented reader that accepts CRLF terminators
+without changing payload bytes or the frozen manifest. Do not rewrite it in
+place or treat an unsuccessful checksum command as a pass.
+
+Some packages enforce an **exact file set**, including N3 indexed packages.
+Keep supplemental runtime-frame manifests, diagnostics and ledgers in sibling
+directories and bind them through supported source commitments; do not drop
+extra files into a verified package. A sibling is not automatically bound.
+
 ### Regenerate only what the source binding requires
 
 Use the canonical verifier to determine whether a change is admission-bound.
@@ -213,6 +295,7 @@ Do not infer this from the filename or from how small the patch looks.
 | Route adapter or semantic runtime | Regenerate any admission/inventory that records its source digest; deploy N7/N8 |
 | N6 adapter | Regenerate its source-bound admission/inventory; deploy N6 and any bound route runtime |
 | N3 raw package/catalog | Re-freeze N3 and all downstream bindings that commit to its content identities |
+| Query-aware N3 selection / runtime-frame manifest | Verify N3 package, artifact bindings, exact-range/provisioning catalogs, matrix/admission, live preflight and downstream catalog/one-case/N4 gates; follow the actual dependency chain |
 | N4 derived generation | Re-freeze publication snapshot, N4 package, artifact bindings, and the serve gate |
 | CLI-only, non-bound orchestration code | Run the canonical verifier; do not regenerate admission automatically if it proves the source set is unchanged |
 | Documentation only | No runtime artifact regeneration |
@@ -220,16 +303,28 @@ Do not infer this from the filename or from how small the patch looks.
 Never edit a frozen artifact to make verification pass. Generate a new
 timestamped directory and retain the old one as evidence.
 
+Check a candidate verifier invocation against an unchanged control package
+where possible. A bad flag, absent optional dependency or missing path is not
+evidence that a package needs regeneration. Use each subcommand's real
+`--help`; `--output-dir`, `--package-dir`, `--catalog-dir` and source arguments
+are not interchangeable. Keep one ledger of passed gates and reuse it unless
+their committed inputs change; do not rediscover and rebuild the entire chain
+at every phase.
+
 ### Timeout gate
 
-The API task timeout is a frozen execution parameter. It must exceed the
-largest derived operation floor. For example, the slow D4 transfer has a
-known lower bound of 576.03 seconds, so 300 seconds is invalid; the established
-formal matrix used 900 seconds. A lower bound excludes storage, compute,
-queueing, and control-plane overhead and is not an execution estimate.
+Distinguish a plan's operation deadline from the FlowMesh API-task timeout and
+the client's polling/wait deadline. The shared batch adapters currently require
+`task_timeout_seconds >= 900` in the frozen **batch configuration** and pass it
+to the executor. This is a floor, not a guarantee that every workload fits.
+The 576.03-second D4 transfer floor belonged to an earlier shaped-network
+profile; it is not the measured runtime of every raw route.
 
-There is deliberately no runtime timeout override. If the frozen timeout is
-wrong, create a new plan.
+Derive deadlines from the selected plan's operation bounds plus storage,
+inference, queueing and control-plane allowance. If a plan-bound deadline is
+wrong, freeze a new plan and its dependencies; if only the batch timeout needs
+changing, freeze a new batch config and verify that it still satisfies the
+plan. Do not hot-patch a running or frozen experiment's timeout to rescue it.
 
 ### Reusable experiment runner
 
@@ -246,7 +341,8 @@ For interleaved batches, a new batch changes a small public draft
 configuration: immutable artifact directory names, worker alias/node,
 coordinator origin, task timeout, expected plan digest, question/route counts,
 and optional baseline directory. The draft contains no credential or label.
-The existing `configs/dev-24.draft.json` and `configs/sealed-28.draft.json`
+The existing `experiments/multiq_pilot_20260924/configs/dev-24.draft.json`
+and `experiments/multiq_pilot_20260924/configs/sealed-28.draft.json`
 show the two verified shapes; they are examples, not the next cohort's frozen
 inputs.
 
@@ -258,21 +354,18 @@ and `verify`. `freeze-inputs` reuses the canonical three-stage route-binding,
 DAG, and admission freezers after public plan, N1 commitment, N3 selections,
 query embeddings, and other upstream packages are ready:
 
+The following are command shapes with placeholders, not a ready-to-submit
+script. Substitute verified paths and run each step only after its gates pass.
+Use `python -P` with the clean import root prepared above; single lines work in
+both PowerShell and Bash without mixing their continuation syntax.
+
 ```text
-python -m experiments.batch freeze-config \
-  --draft DRAFT.json --output-dir NEW_CONFIG_DIR
-python -m experiments.batch freeze-inputs \
-  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
-python -m experiments.batch check \
-  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
-python -m experiments.batch preflight \
-  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
-python -m experiments.batch execute \
-  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT \
-  --output-dir FRESH_RUN_DIR
-python -m experiments.batch verify \
-  --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT \
-  --output-dir FRESH_RUN_DIR --seal
+python -P -m experiments.batch freeze-config --draft DRAFT.json --output-dir NEW_CONFIG_DIR
+python -P -m experiments.batch freeze-inputs --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
+python -P -m experiments.batch check --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
+python -P -m experiments.batch preflight --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT
+python -P -m experiments.batch execute --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT --output-dir FRESH_RUN_DIR
+python -P -m experiments.batch verify --config-dir NEW_CONFIG_DIR --artifact-root ARTIFACT_ROOT --output-dir FRESH_RUN_DIR --seal
 ```
 
 Run these from a clean, dependency-complete source environment; `check` uses
@@ -284,6 +377,10 @@ unsealed, completed, fresh output directory; use plain `verify` afterward.
 If the configuration names a baseline specification, freeze and verify that
 specification after `freeze-inputs` and before `check`; it must bind the new
 admission and plan digests.
+Skip `freeze-inputs` when its downstream targets already exist and verify;
+it refuses existing binding/DAG/admission targets and is not a resume command.
+It also does not regenerate N1 private inputs, captions, query embeddings or
+N3 selections. Those upstream packages have their own canonical tools.
 All existing frozen receipts remain untouched. The reusable verifier accepts
 the historical 24-route and 28-route formats for read-only regression, while
 new runs use one format with per-route timing and configuration digest.
@@ -292,8 +389,23 @@ This replaces per-cohort runner/verifier code, **not** the source-bound
 preparation pipeline. A new question may still require new public tasks,
 private N1 commitments, query embeddings, N3 selections, bindings, DAGs,
 admission and deployment checks. Reuse any video-level package only when its
-canonical verifier confirms the binding. If future cohorts require editing
-the reusable runner instead of just the draft, record that as a pipeline bug.
+canonical verifier confirms the binding. A new cohort **within the supported
+contract** should not require copying Python code. A new route family, host
+policy or evidence schema can require an explicit extension with focused
+tests; do not bypass a gate or label every unsupported design a pipeline bug.
+
+Current automation boundaries:
+
+- `check` verifies configured immutable inputs; it does not inspect live
+  deployment health, mount contents, auth or cache state.
+- `preflight` adds read-only worker-registry checks; it does not test dispatch,
+  result upload or N6 inference. Validate the chosen Root/node/namespace/
+  cluster separately without a paid smoke.
+- `execute` serially invokes the frozen routes and persists progress. It does
+  not provision upstream assets, reconcile the provider bill, or guarantee a
+  complete cost ledger. Cost journals and exports require separate checks.
+- New interleaved run identities are **inside the frozen plan**, not supplied
+  through `--run-id`; a fresh output path alone does not create a fresh run.
 
 #### Ten-route compatibility (D0--D7, N7 and N8)
 
@@ -336,6 +448,38 @@ worker pin and one-case plan before any submission. If a historical source
 binding fails, use the matching verifier revision for archival verification,
 or prepare new immutable inputs for a new experiment.
 
+### Multi-question index and cache state
+
+Freeze the video-disjoint development/test split, question IDs, seed, ordering,
+baseline policy and budget before outcomes. A split disjoint from only the
+immediately preceding pilot is not necessarily unseen across earlier runs.
+Do not select test videos or change question order to obtain better results.
+
+Video captions/embeddings are video-level reusable builds. Query embedding and
+temporal selection are question-level work. A query-selected N3 frame bundle
+is bound to that question/selection, not a universal video index or a partial
+MP4 range. Record source read bytes, frame payload/bundle bytes, network
+handoff bytes and N6 input bytes separately. Source-side projection may read
+the complete MP4 even when it transfers fewer bytes.
+
+For the interleaved family, keep a distinct `run_id` per route while **DC**
+routes share the one frozen `cache_episode_id`. R/D/I must not acquire that
+episode. The admission binds episode, run and trial; declaring the same string
+in an environment file does not create valid sharing. Use a fresh episode for
+an independent batch and verify the intended initial state. Do not clear the
+cache after each question (that destroys reuse) or run parallel batches into
+the same episode. No volume deletion is needed merely to obtain a fresh
+namespace; preserve old state and establish isolation through the verified
+cache contract, or provision an additional volume if that contract requires it.
+
+The current batch is serial by design; do not submit every question together
+to try to create cache hits. A hit reuses the committed **artifact**, not an
+answer, and still normally calls N6. Artifact cache hits and the LLM provider's
+cached-input tokens are different events. Verify real lookup/insert lineage,
+artifact identity and eviction effects instead of assuming every later access
+hits. Ten-case miss/hit pairs use their original canonical smoke ordering;
+do not replace it with interleaved episode semantics.
+
 ## 3. Staging files safely on Windows and Linux
 
 ### Windows path length and ACL failures
@@ -370,6 +514,16 @@ can turn `http://...` into a Markdown link and can show options as `\--flag`.
 The shell command must contain plain URLs and `--flag`, never brackets,
 parenthesized link targets, HTML entities, or a leading backslash.
 
+Bash uses `\` for line continuation; PowerShell uses a backtick. Do not paste
+Bash brace-expanded paths into PowerShell. Prefer short single-line commands
+or checked-in scripts for long operations. Scan generated Python/shell text
+for stray control bytes (especially a literal 0x08 in place of regex `\b`)
+before running it. Fix the generator, not just one generated copy.
+
+For `luyao3`, use the configured SSH alias so ProxyJump/identity settings apply;
+do not replace it with its LAN IP. For UpCloud, use the selected Root/jump
+configuration. Neither requires opening an unrelated public service port.
+
 For exploratory server diagnostics, avoid global `set -e`; it can terminate
 the SSH session after an expected failed probe. Capture and inspect individual
 statuses instead. Production scripts may use `set -euo pipefail` only after
@@ -384,15 +538,46 @@ once froze 29083, 29086, and 29087, for which no listeners existed. Healthy
 containers could not repair a bad plan. Freeze a new plan against the actual
 endpoints; do not mutate the old plan and do not restart healthy containers.
 
-Inside a container, `127.0.0.1` refers to that container. N3 and N4 Data Agents
-must advertise the same internal DNS origins N7/N8 use, for example:
+For a same-host Docker-network profile, N3/N4 may advertise origins such as:
 
 ```text
 http://pathfinder-full-flow-n3-raw-data-agent:8780
 http://pathfinder-full-flow-n4-derived-data-agent:8780
 ```
 
-Use host loopback URLs only for host-side operator access.
+These are **not** automatically cross-host DNS names. For UpCloud, preserve
+the deployed private alias-to-IP mappings (`extra_hosts` or managed private
+DNS), actual service ports, and client allowlists. N3/N4 advertised origins
+must match what the route clients use (scheme, hostname, effective port), not
+the workstation's tunneled URL. `compose.route-state`/network overlays can
+carry essential mappings; record the complete Compose file set, project,
+service, env-file sources and mounts before recreating a service. Do not
+reconstruct it from a fragment or a matching tag alone.
+
+Inside a normal bridge container, `127.0.0.1` refers to that container; under
+host networking it refers to the host. Neither reaches another VM. Operator
+loopback tunnels must not leak into cross-host frozen dependencies.
+
+#### Private IP is not a universal HTTP allowlist entry
+
+Different boundaries deliberately have different contracts:
+
+- `DataAgentClientSettings.simulator_private_http_hosts` accepts unique frozen
+  names matching `pathfinder-sim-*` or `pathfinder-full-flow-*`, not numeric
+  `10.x` IPs. The N6 HTTP client likewise restricts plain HTTP to loopback or
+  allowlisted simulator names. Use the approved service alias mapped to its
+  private IP; do not broaden the regex or disable same-origin/HTTPS checks.
+- The current interleaved admission explicitly permits the approved N7
+  coordinator origins `http://10.70.0.17:8780` and
+  `http://10.70.0.17:18780`. That does **not** authorize substituting those IPs
+  into Data Agent/N6 allowlists or inventing another coordinator port.
+- The ten-case multi-host adapter verifies coordinator origins against its
+  selected deployment binding. Do not invoke the local-only verifier against
+  a multi-host artifact and interpret its rejection as broken infrastructure.
+
+Check the consumer's constructor/CLI contract offline, then resolve the
+approved alias and health-check the exact origin from each participating
+coordinator. A workstation-only health check is insufficient.
 
 ### Selective deployment
 
@@ -400,9 +585,12 @@ Use independently renderable per-service Compose fragments. A former unified
 overlay required all 117 variables even when starting one service, causing
 unrelated credential and configuration failures.
 
-Build a shared image once, then use `up --no-build` for services that reference
-the same tag. Parallel Compose builds exporting the same tag have raced with
-`image already exists`.
+For an unchanged image, reuse its verified digest. When a rebuild is required,
+build once per distinct image/build host, then use `up --no-build`; do not let
+parallel Compose builds export the same mutable tag. Pin deployments to the
+**new** verified image ID/digest, with the old digest retained only for rollback.
+An image built on one VM is not present on another until distributed or built
+there. Do not use `latest` or an old rollback digest as the new deployment.
 
 Service names and network aliases must be single DNS labels of at most 63
 characters. A 69-character N1 verifier name passed container startup but could
@@ -418,18 +606,29 @@ Preserve these deployment invariants:
 - automatic rollback when a recreated service fails health or dependency
   checks.
 
-Different hosts may produce different image digests because their base image
-resolution differs. Record both the image digest and the embedded source
-commit/module digests. Do not require cross-host image equality unless images
-come from one locked registry manifest.
+Independent builds may produce different image IDs for multiple reasons;
+do not attribute that solely to metadata without inspecting the build inputs.
+Record base image/dependency identities and embedded source digests as well
+as per-host image IDs. Matching Python files alone does not prove identical
+runtime dependencies. Shared locked registry images are preferable where
+available; cross-host digest equality is required only when the deployment
+contract specifies that same image manifest.
 
 ### Permissions and hidden labels
 
-Do not solve hidden-label read failures with world-readable permissions. Use a
-named-user ACL for runtime UID 10001, traverse-only access on private parent
-directories, read-only access on required files, and read-only container
-mounts. Verify that an unrelated UID cannot read the label file and that UID
-10001 cannot write it.
+Do not solve hidden-label read failures with world-readable permissions.
+Respect the selected deployment's ownership and isolation contract: either
+owner-only access for its runtime UID or an explicitly authorized minimal ACL.
+The earlier `luyao3` ACL recipe is not a mandatory step on UpCloud. Grant only
+traverse/read access where needed, never write, and keep mounts read-only.
+Verify effective access with metadata/`test -r`, not by printing labels.
+
+When promotion needs the real private oracle, run the canonical tool **on N1**
+with read-only private/public inputs, a writable new output and no unnecessary
+network. Export only public commitments. A commitment directory is not an
+oracle package. Only the scorer/verifier and an authorized one-shot N1
+promotion process may mount it. ACLs are UID-scoped, not container-scoped;
+mount isolation is essential.
 
 ### Credential families are different
 
@@ -440,30 +639,51 @@ Do not apply one token-precedence rule to every service:
 - N2/N7/N8 regular indexes use their frozen shared index credential contract.
 - N7/N8 persistent caches use their frozen shared cache credential contract.
 - W4 candidate caches keep their dedicated credential.
-- N1 scoring credentials remain isolated to N1.
+- N1's hidden labels and evidence-signing secret remain on N1 scorer/verifier.
+  The oracle bearer token is also needed by authorized N7/N8 scoring clients;
+  their remote-verification client uses the separate verification token.
+  Do not distribute the evidence-signing secret to route coordinators.
 
-An authentication probe should use the deployed client's own resolver and a
-valid endpoint path with an intentionally invalid body. HTTP 400 proves that
-authentication passed and validation rejected the body. HTTP 404 or 501 says
-nothing about authentication because routing may occur first.
+An authentication probe should use the deployed client's resolver and a known
+endpoint with a harmless invalid body. Confirm in that endpoint's handler
+that auth precedes validation: expected evidence is invalid token -> 401/403,
+valid token + invalid body -> the known validation error. **An arbitrary 400
+alone is not proof** of authentication. 404/501 says nothing if routing occurs
+first. Probes must not infer, materialize, score a real answer or populate cache.
 
 Never print, hash, copy into evidence, or include credential values on a
 command line. Inspect key presence and equality only through booleans or
 in-process comparison.
 
+Source credential env files silently with tracing disabled, check only required
+key presence, and never combine N3/N4 per-service values into one shared map
+that shadows one node's token. Runtime secrets and deployment settings can
+reside in different files: do not require every key to exist in a single file
+or `source` an empty search result. Record non-secret filenames/roles, not
+contents. Rotation is a separate authorized operation: N1 evidence-key
+rotation can invalidate its state binding and require a fresh preserved-volume
+branch. Old evidence checksums remain valid, but a retired/destroyed HMAC key
+cannot be re-authenticated by the new runtime; report those separately.
+
 ## 5. FlowMesh and SSH readiness
 
 ### Tunnel readiness on Windows
 
-Create the tunnel with one argument string; an argument array has previously
-failed to create a listener under `Start-Process`. Keep the window hidden and
-test the listener before calling FlowMesh:
+Only create a tunnel when the configured Root is accessed through SSH. Prefer
+the existing reviewed connection helper/alias; the example below assumes
+non-interactive SSH authentication is already configured. Password/passphrase
+setup belongs in an operator-visible session, not a hidden process. Keep
+background windows hidden and refuse an occupied port rather than mistaking a
+stale tunnel's listener for the new one:
 
 ```powershell
-$LocalPort = 18010
-$RemotePort = 8010
-$RootAlias = "pathfinder-upcloud-root"
-$Arguments = "-N -L ${LocalPort}:127.0.0.1:${RemotePort} $RootAlias"
+$LocalPort = 18010 # Example; choose a verified-unused port.
+$RemotePort = 8010 # Verify against this Root's deployment.
+$RootAlias = "pathfinder-upcloud-root" # Verify the configured SSH alias.
+if (Get-NetTCPConnection -State Listen -LocalPort $LocalPort -ErrorAction SilentlyContinue) {
+    throw "Port occupied; identify its owner or choose a different port"
+}
+$Arguments = "-N -o BatchMode=yes -o ExitOnForwardFailure=yes -L 127.0.0.1:${LocalPort}:127.0.0.1:${RemotePort} $RootAlias"
 
 $Tunnel = Start-Process `
     -FilePath "ssh" `
@@ -472,16 +692,25 @@ $Tunnel = Start-Process `
     -WindowStyle Hidden
 
 Start-Sleep -Seconds 2
+$Tunnel.Refresh()
 $Listener = Get-NetTCPConnection `
     -State Listen `
     -LocalPort $LocalPort `
     -ErrorAction SilentlyContinue
 
-if (-not $Listener) {
+if ($Tunnel.HasExited -or -not $Listener -or
+    @($Listener | Where-Object OwningProcess -eq $Tunnel.Id).Count -eq 0) {
     if (-not $Tunnel.HasExited) { Stop-Process -Id $Tunnel.Id }
     throw "SSH tunnel is not listening; do not submit"
 }
 ```
+
+After listener ownership is established, confirm the intended Root through
+read-only API identity/worker checks. A listening TCP socket alone proves
+neither remote reachability nor Root identity. Stop only a tunnel this task
+owns; do not kill an unrelated listener. Linux diagnostic form for environment
+assignment is `timeout 30s env PYTHONPATH=. python -m pathfinder ...`, not
+`timeout 30s PYTHONPATH=. python ...`.
 
 ### Root authentication mode
 
@@ -501,6 +730,21 @@ re-registered. Before every submission, require:
 - expected node/cluster/namespace;
 - worker reachable through the intended Node Server;
 - a read-only preflight exit status of zero.
+
+At this review, repository SDK/API adapters target FlowMesh **0.1.9**. This is
+a pinned compatibility version, not a claim about the latest release or live
+installation. Check `pyproject.toml`, installed SDK and deployed Root/Node/
+worker versions before changing any of them. Do not modify the FlowMesh
+repository; upgrade only through authorized released versions and deployment
+procedures. Keep prior image/config identities for rollback.
+
+`preflight-flowmesh` proves Root visibility and unique current registration;
+its explicit `not_verified` fields include dispatch, result upload and worker
+agent configuration. The common batch additionally checks alias, node alias
+and readiness status, not the complete network/mount/auth checklist. Verify
+namespace/cluster and worker-to-coordinator reachability separately. The
+historical alias `pathfinder_costaware_20260815a` can exist on a different Root;
+the alias alone never proves this is the UpCloud worker.
 
 `worker up` returning "already exists" while preflight finds no current worker
 is a lifecycle/registry problem, not evidence that the worker is usable.
@@ -536,16 +780,24 @@ $Nonce = [guid]::NewGuid().ToString("N").Substring(0, 8)
 $RunId = "pathfinder-$Stamp-$Nonce"
 ```
 
-Do not reuse a run ID, request ID, output directory, or operation key after a
-partial or failed execution. Durable idempotency correctly rejects reuse as
-`container operation was replayed`.
+The generated value is for a new plan/batch identity or the ten-case
+`--run-id`, as appropriate. For interleaved runs, freeze it into the plan and
+derive the per-route identities there; do not override them at execution time.
+
+Do not reuse a run ID, request ID, output directory, or operation key for a
+new experimental submission after a partial or failed execution. Distinguish
+a documented read-only/idempotent result-recovery operation from resubmitting
+the workload. Inspect durable state first: a client timeout does not prove
+inference failed, and a second submission could pay again or break the frozen
+cache order. The shared batch CLI has no general resume command.
 
 Do not pipe the runner directly to `Tee-Object` and then read
 `$LASTEXITCODE`; a later pipeline command can mask the runner's status. Capture
 output first, save the native status immediately, and display it afterward:
 
 ```powershell
-& $Python -P -m pathfinder <run-command> <arguments> *> $ConsoleLog
+# RunArgs contains this family's frozen config, artifact root and fresh output.
+& $Python -P -m experiments.batch execute @RunArgs *> $ConsoleLog
 $RunStatus = $LASTEXITCODE
 Get-Content -LiteralPath $ConsoleLog
 
@@ -554,11 +806,26 @@ if ($RunStatus -ne 0) {
 }
 ```
 
-On Bash with `tee`, enable `set -o pipefail` and capture
-`${PIPESTATUS[0]}` immediately. Prefer redirection when possible.
+On Bash with `tee`, enable `set -o pipefail` and capture the entire status
+array immediately, before `echo` or any other command resets it:
 
-No output directory after a failure means there is nothing to checksum or
-verify. Diagnose the console error and durable runtime state instead.
+```bash
+command_to_run | tee "$PF_CONSOLE_LOG"
+PF_PIPE_STATUS=("${PIPESTATUS[@]}")
+printf 'Runner=%s tee=%s\n' "${PF_PIPE_STATUS[0]}" "${PF_PIPE_STATUS[1]}"
+```
+
+Prefer redirection and immediate `$?` capture when possible. Neither a zero
+shell status nor an error-free log substitutes for the canonical receipt
+verifier; treat a reported error as failure even if the printed shell status
+was accidentally zero.
+
+No **final** output directory does not mean no work was paid for. New ten-case
+runs persist progress in `FRESH_RUN_DIR.attempt/`; interleaved runs write each
+route/timing and `failure.json` into their output directory. Inspect those,
+the console, route/N6 durable state and the exact bound workflow IDs. Do not
+seal a partial attempt or fabricate a successful summary, and do not discard
+completed rows while diagnosing the first failed boundary.
 
 ## 7. Evidence verification and claim boundaries
 
@@ -580,13 +847,14 @@ Keep these outcomes separate:
 - **Task success:** the model answer matched the hidden label.
 - **Performance evidence:** repeated real measurements support a latency or
   throughput comparison.
-- **Cost evidence:** actual priced resource use was measured.
+- **Cost evidence:** measured resource units were priced under an explicit
+  frozen list-price/allocation rule; this is distinct from an observed invoice.
 
-A route can be infrastructure-complete and semantically wrong. For example,
-the minimum-real causal ten-case run completed all paths but achieved 9/10
-task success. The D6 answer error is not an infrastructure failure. Likewise,
-the earlier placeholder-semantic run was valid conformance evidence even
-though all `task_success` values were false.
+A route can be infrastructure-complete and semantically wrong. The earlier
+placeholder-semantic runs were conformance evidence even with every
+`task_success=false`. Other ten-case runs used real scoring; read that run's
+frozen task/scoring contract instead of copying success counts from an old
+report. A wrong answer is not a reason to retry until it becomes correct.
 
 LLM latency is variable and often dominates the total. Do not claim a cache,
 placement, or representation advantage from one end-to-end observation. Use
@@ -604,20 +872,48 @@ observed charge. For N6, use its per-request provider-usage journal and join
 each row to a verified route by both request and result SHA-256. Do not infer
 tokens from payload bytes or match requests by timestamp alone. Check that the
 join is one-to-one and covers every completed inference before reporting a
-complete N6 total. The N6 journal records numeric usage and request/result
-digests; its presence does not by itself recover older runs without matching
-identities.
+complete N6 total. Keep one-to-one inference joins separate from **one-to-many
+provider attempts**: retries can add billable calls beyond the final result.
+The journal's presence does not recover older runs without matching identities.
 
-For the frozen Singapore `qwen3.8-27b` rate snapshot dated 2026-09-23, the
-exact calculation in USD is
+Current N6 capture (`container_node.py`) uses two state databases:
+
+| Database under the configured `state_dir` (normally `/state`) | Contents / limitation |
+| --- | --- |
+| `n6-provider-usage-v1.sqlite3`, table `n6_provider_usage` | Completed-result/request SHA-256 and input/cached/output/total token units; no prompt or answer |
+| `n6-provider-trace-v1.sqlite3`, table `n6_provider_attempts` | Trace/attempt index, request/result binding, outcome/HTTP status and hashed provider IDs; failed attempts may have no result binding or recoverable usage |
+
+Provider request IDs are stored as SHA-256 of validated IDs, not plaintext.
+To reconcile a provider export, hash its corresponding ID consistently and
+require exact matches; do not guess by time, row order or a nearby token count.
+Completion IDs and HTTP request IDs are distinct columns, not interchangeable.
+The numeric-only exporter
+`experiments/multiq_pilot_20260924/export_n6_usage_numeric.py` deliberately
+omits those IDs and is not by itself a provider-log reconciliation tool.
+
+Before a cost run, confirm the deployed capture code, writable durable state,
+and health counter baseline without calling the model. Afterward, export
+read-only, reconcile every completed inference, check attempt counts and
+compare `semantic_usage_journal_error_count` before/after. The counter covers
+journal write failures, **not** missing/invalid provider usage. Journaling is
+best-effort so a paid result is not retried merely because its cost write failed;
+`COMPLETE`, zero counter growth or a present DB alone cannot prove cost coverage.
+
+**Historical fixed-price basis, not a live price quote:** the Singapore
+snapshot in `pathfinder/rsi_exam/offline_replay_costing.py::PRICE_SNAPSHOT`
+is dated 2026-09-23. Reproduce those results using its recorded USD calculation:
 `((input_units - cached_input_units) * 0.50 + cached_input_units * 0.10 +
 output_units * 3.00) / 1,000,000`. Count implicit-cache input only once, at
-the cached rate; output usage includes provider-reported reasoning tokens.
+the cached rate. Use the provider's total output-token field; do not add its
+reasoning-token detail a second time when already included.
 For `text-embedding-v4`, use `prompt_tokens * 0.07 / 1,000,000`. Freeze a new
 official rate snapshot if model, region, date, billing tier, or cache mode
-changes. N6 persists completed-request numeric usage in
-`/state/n6-provider-usage-v1.sqlite3`; reconcile it by request and result
-digests with each route's public evidence. An unobserved failed provider
+changes. A new experiment must either explicitly reuse this fixed historical
+basis for comparability or verify and freeze an updated official rate card;
+do not silently call a hard-coded rate "today's price". Verify whether that
+provider/model reports cached-input detail: the current extractor defaults an
+absent detail to zero, so document that assumption or reconcile the provider
+export rather than claiming cache-hit evidence. An unobserved failed provider
 attempt may still be billable, so mark its amount unknown rather than zero.
 
 Keep these buckets distinct for each object, question, and route:
@@ -642,20 +938,41 @@ Keep these buckets distinct for each object, question, and route:
 
 Report cold-start, warm-reuse, and amortized-at-Q costs separately. For an
 interleaved multi-question run, preserve the exact question order and cache
-state so replay can charge build costs once, at the first use. A historical
-receipt with missing build CPU time, publication time, provider cache units,
-or invoice fields is **partially measured**: mark that component `unknown`,
-not zero, and do not silently substitute a new run's timing. Before the next
-experiment, make raw response/usage and timing receipts durable after every
-paid call, including failed calls, so a later interruption does not lose cost
-evidence. Keep raw prompts, answers, credentials, and hidden labels out of
-public cost artifacts.
+state so replay can charge required build costs once, at their first use and
+under the declared policy. A state transition in replay must have matching
+measured evidence; a DC cold miss cannot be replaced by a warm-hit observation.
+Count shared builds once per declared scope, not once per route, and do not
+add model-API costs twice when comparing N6 versus build buckets.
+
+Missing build compute/publication timing, required resource rates, or unknown
+provider usage makes the affected total **partial**. Mark the component and
+full total `unknown`/`null`, not zero; do not substitute a new run's timing for
+the old run. **Missing invoice/payment fields do not invalidate token x
+list-price cost**: discounts and credits are intentionally outside that basis.
+Record cloud plan cost over the actual interval separately from the chosen
+per-query allocation; time-prorated allocation is not necessarily the
+provider's rounded-hour invoice or the incremental cost of one request.
+
+Use currently deployed per-call persistence and verify its coverage. New
+materializers must cache allowed response content and validated usage after
+each paid call, including diagnosable failed responses, before moving on.
+Do not promise that the existing N6 trace contains usage for every failed
+attempt or raw response content. Keep credentials, raw prompts/answers,
+hidden labels and model reasoning out of public cost artifacts. Do not
+repeat a successful model call merely to fill a missing billing field.
+
+For RSI replay, declare complete/partial cost coverage in the package and
+report the known subtotal separately. Do not declare `always-derived` the
+full-cost winner while D/DC build or infrastructure buckets remain unknown.
+Freeze baseline policies before held-out results; run the baseline on the
+measured action/state, without inventing unobserved counterfactual answers.
 
 ## Recurring failure catalogue
 
 | Symptom | Usual cause | Prevention | Correct response |
 | --- | --- | --- | --- |
-| `source ... does not match`, adapter inventory mismatch | Windows CRLF bytes or wrong import root | Clean Git archive, clean working directory, `PYTHONPATH`, and `python -P`; compare SHA-256 before deploy | Regenerate from clean source; do not edit frozen JSON |
+| `source ... does not match`, adapter inventory mismatch | Wrong import root/revision, or CRLF under a raw-byte contract | `git -c core.autocrlf=false archive`, clean import root and the format's canonical verifier | Diagnose the exact commitment scheme first; regenerate only affected artifacts, never patch frozen JSON |
+| `simulator private HTTP hosts are invalid` | Numeric private IPs supplied to a service-name-only allowlist | Distinguish coordinator origins from Data Agent/N6 client contracts; verify private alias mapping | Use the approved alias/allowlist, not a looser security check |
 | Route HTTP 401 although a token exists | Wrong credential precedence or wrong service-family token | Probe with deployed resolver and valid route; preserve family-specific contracts | Fix selection/configuration; do not rotate unrelated credentials |
 | Route HTTP 401 with signed semantic body | Canonical JSON/HMAC mismatch such as `0.0` versus `0` across Pydantic/wire serialization | Freeze integral values as integers; compare sender and receiver canonical byte length/digest before submit | Fix canonical representation and focused tests; create a fresh run |
 | Data Agent range client requires 206 but receives 200 | Full-span `Range` request treated as a non-partial interval | Preserve whether a Range header was requested; test full-span range | Fix server range semantics; keep client fail-closed |
@@ -664,18 +981,23 @@ public cost artifacts.
 | Timeout rejected at freeze time | Frozen timeout below derived network floor | Inspect maximum lower bound before freezing | Freeze a new plan with adequate timeout |
 | Connection refused on 29xxx | Frozen port does not match actual 19xxx runtime | Probe ports before freeze; bind actual endpoints | New plan or authorized forwarder; no container churn |
 | Data Agent security/origin error | Agent advertises host loopback while route uses Docker DNS/private DNS | Compare configured and advertised normalized origins from N7 and N8 | Recreate only N3/N4 with correct advertised origins |
-| Container healthy but dependency name does not resolve | DNS label exceeds 63 characters or alias missing | Validate every generated service name and alias offline | Regenerate DNS-safe overlay |
+| Container healthy but dependency name does not resolve | Oversized DNS label, missing alias, or omitted cross-host overlay | Check names plus the full Compose/extra-host mapping set | Restore the approved mapping; regenerate names only if the name itself is invalid |
 | Single-service Compose launch asks for unrelated secrets | Whole overlay interpolation requires all variables | Use selective per-service fragments | Regenerate overlay; never fabricate credentials |
 | Parallel build says image already exists | Multiple services export the same image tag | Build shared image once | Continue with verified image and `up --no-build` |
 | Preflight finds no worker; `worker up` says already exists | Stale lifecycle state or missing current registration | Check alias registry and container status separately | Repair worker registration; do not submit unpinned |
 | Workflow fails before any container request | Root/identity-provider/dispatch issue | Check Root task state and route access logs | Preserve IDs and wait/escalate; do not rebuild N1-N8 |
 | Result upload times out | Worker-to-Root result path issue | Verify callback/result endpoint reachability | Repair control plane; do not replay the same operation |
 | Error printed but reported status is zero | Pipeline masked native exit code | Redirect output or capture `PIPESTATUS[0]` | Treat the run as failed and inspect durable state |
-| PowerShell SSH process exists but no local listener | `Start-Process -ArgumentList` quoting/array issue | Use one argument string and verify listening port | Stop failed process and recreate tunnel before preflight |
+| PowerShell SSH process exists but no usable tunnel | Quoting, authentication prompt, remote bind failure or stale listener | Batch authentication, `ExitOnForwardFailure`, free port and listener ownership checks | Repair only the owned tunnel before preflight |
 | Files apparently missing after transfer | Windows MAX_PATH, ACL, or partial recursive copy | Short staging root, archive transfer, checksum and count gates | Restage from the verified archive |
 | N4 current generation loses earlier objects | Atomic publication replaces the snapshot rather than merging ad hoc runs | Build and bind one complete generation such as the exact-six store | Re-publish a complete generation and re-freeze its gate |
 | Evidence says model input does not bind routed artifacts | Verifier and route disagree about the actual inference frontier | Bind exactly the artifacts used for inference while preserving the full routed set | Fix evidence semantics; do not weaken equality checks blindly |
 | Transport cannot bind a runtime value | New value type lacks an explicit canonical handoff | Add a fail-closed, commitment-complete transport branch and focused tests | Deploy only affected route services and use a new run |
+| N3 indexed package file set changed | Extra audit/manifest written inside an exact-file-set package | Put supplements in a sibling and bind them explicitly | Re-freeze to a new directory; do not delete files from frozen evidence |
+| Query-aware bundle rejected at N6 | Legacy sampling-method name used instead of the actual bound policy | Validate source/policy digests and the declared profile end-to-end offline | Fix the consumption gate with rejection tests; do not accept arbitrary bundles |
+| DC misses on every question or sees another run's hit | Cache tied only to per-route ID, or an episode reused across experiments | Signed admission-bound cross-question DC episode with unique batch scope | Preserve existing evidence; correct the frozen schedule/namespace |
+| Paid captions lost after a later window failed | Partial results only saved at the end | Persist allowed response, usage and validation outcome per attempt before advancing | Reuse verified cached results; count failed/lost calls against the budget |
+| Inference COMPLETE but cost rows absent | Missing provider usage or best-effort journal failure | Deployed capture, durable state, health-counter delta and per-result join checks | Mark partial cost; do not repeat successful inference merely for accounting |
 | Workflow DONE but `task_success=false` | Wrong model answer or placeholder task semantics | Inspect hidden-score receipt and semantics mode | Report semantic failure separately from infrastructure success |
 
 ## Failure classification and stop conditions
@@ -709,8 +1031,19 @@ receipt VERIFIED, task_success = false
 Once a workflow has been submitted, do not perform a blind retry. Record the
 run ID, trial key, workflow ID, task ID, selected and assigned worker, durable
 execution ID, failure hash, exact boundary, and whether evidence exists. Apply
-one minimal correction, run focused tests, deploy only affected services, and
-use one new run identity.
+one minimal correction within authorization, run focused tests, deploy only
+affected services if needed, and use fresh identities for a new submission.
+Account for all provider **attempts**, including response-validation failures
+and results lost before persistence; successful-caption count is not the call
+budget. Do not extend an exhausted budget, alter frozen segmentation/ranking/
+scoring, or discard unfavorable outcomes to force a pass.
+
+Use the smallest relevant validation: docs-only -> contract/command review;
+runner -> offline runner/verifier tests; a source-bound runtime change -> its
+focused regressions plus affected canonical artifacts and deployment gates.
+Do not rerun the full suite or a paid ten-case experiment for every small
+patch. A ledger and durable checkpoints are the resume source of truth; lack
+of session context is not permission to repeat already completed paid work.
 
 ## Minimal run ledger template
 
@@ -720,9 +1053,13 @@ Copy this block into the experiment notes before starting:
 date_utc:
 operator:
 claim_class:
-git_commit:
+experiment_family_and_schema:
+authorized_workflow_and_provider_attempt_budget:
+runner_git_commit:
+freezer_and_runtime_revision_by_component:
 clean_source_path:
 clean_source_archive_sha256:
+batch_config_path_and_sha256:
 frozen_plan_or_admission:
 frozen_plan_or_admission_sha256:
 catalog_and_gate_paths:
@@ -730,9 +1067,17 @@ image_digest_by_node:
 worker_alias:
 observed_worker_id:
 root_endpoint_identity:
+flowmesh_sdk_root_node_worker_versions:
+worker_node_cluster_namespace:
 runtime_endpoint_map:
+compose_project_files_and_desired_state_manifest:
+runtime_epochs_and_restart_count_delta:
+development_test_split_and_prior_exposure:
+question_order_and_baseline_spec_sha256:
+cache_episode_and_initial_state:
 run_id:
 output_dir:
+attempt_journal_path:
 native_exit_status:
 workflow_ids:
 verification_status:
@@ -740,10 +1085,13 @@ checksum_status:
 task_success_summary:
 model_price_snapshot:
 n6_usage_join_coverage:
+n6_trace_attempt_count_and_provider_id_join:
+semantic_usage_journal_error_count_before_after:
 build_cost_coverage:
 experiment_time_allocation:
 unmeasured_cost_components:
 known_limitations:
+failed_attempts_and_recovery_links:
 ```
 
 The ledger may contain identities and non-secret metadata. It must never
@@ -773,6 +1121,58 @@ answers, signed URLs, or unredacted container environments. A fix after a
 submitted workflow still requires a fresh run identity.
 
 ### Incident log
+
+2026-09-24 — RESOLVED: N5 h48 offline preparation completed and canonically
+verified (4 videos, 36 windows), but packaging it with the login user failed
+on mode-700 package directories owned by runtime uid 10001. Keep the partial
+archive and export a new public-only archive with `sudo tar`; do not rebuild
+the verified packages or relax their modes. Verify the exported archive and
+inner package checksums. No provider request was made.
+
+2026-09-24 — CONFIRMED BEFORE INFERENCE: a fresh cohort selected only from
+question strata included two original MP4s above the deployed 7,000,000-byte
+direct-video bound (9,375,758 and 7,865,377 bytes). Freeze media eligibility
+from the pinned archive's uncompressed sizes before seeded selection, and
+check both coordinator/N6 limits before any caption build. Preserve the
+unexecuted original cohort; do not relax runtime limits, transcode raw inputs,
+or use answer outcomes to replace videos. No provider request was spent.
+
+2026-09-24 — INVESTIGATING: N6 read-only SSH readiness probe via Root timed
+out during SSH banner exchange, before any remote command ran. Root, N1 and
+N3 had passed their own read-only checks. No inference can be drawn about N6
+application health from the banner timeout. Check the Root-to-N6 private SSH
+path and retry the read-only health probe only; no paid readiness probe.
+
+2026-09-24 — RESOLVED: fresh multi-question holdout preparation.
+The first read-only SSH probe to the documented UpCloud Root failed locally
+with `connect ... port 22: Permission denied` under network sandboxing,
+before authentication. This is not evidence of a remote credential or service
+failure. Use the approved network escalation for the same read-only probe;
+do not rotate credentials or recreate containers. The approved read-only
+probe succeeded; Root, N1 and N3 containers were healthy. No workflow or
+provider request was made. Ledger:
+`experiments/multiq_holdout_20260924/EXECUTION_LEDGER.md`.
+
+2026-09-24 — RESOLVED BEFORE INFERENCE: exposure inventory must support
+variable-length NExT-QA video IDs, not assume ten digits. V1 used a ten-digit
+regex and recorded three public manifests denied by the sandbox. The
+selector itself accepts variable-length IDs; its first selection exposed
+the inventory assumption. Preserve v1 as an unexecuted attempt. V2 scans
+8–12 digit IDs, fails on unreadable public sources and is frozen with
+approved read access. Do not inspect private oracle files to fill this gap.
+Only public object IDs are exported; no task outcomes drive the correction.
+
+2026-09-24 — DOCUMENTATION REVIEW (no live experiment): the manual was checked
+against `28b5ede` and the current canonical entry points. Corrected the archive
+flag/import-root procedure, overly broad same-revision/zero-restart rules,
+single-host versus multi-host origin assumptions, N1 secret-consumer boundary,
+timeout configuration scope, stale tunnel detection, preflight guarantees and
+the invoice-versus-list-price distinction. Added current cache-episode and N6
+usage/trace accounting requirements. Historical rate snapshots and evidence
+remain unchanged. This review did not revalidate the live cluster, update
+FlowMesh, rotate credentials, submit workflows or call an LLM. Future source
+changes must update the applicable section and the review revision, rather
+than treating this date as a permanent readiness claim.
 
 2026-09-24 — CONFIRMED: historical ten-route verifier version mismatch.
 Offline regression on
