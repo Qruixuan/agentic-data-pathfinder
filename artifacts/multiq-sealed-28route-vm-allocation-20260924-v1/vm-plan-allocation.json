@@ -1,0 +1,54 @@
+{
+  "schema_version": "pathfinder.multiq-experiment-vm-plan-allocation/v1",
+  "status": "RECONSTRUCTED_PRORATED_SERVER_PLAN_COST",
+  "route_summary_sha256": "43e45b0634371c66b0b28461091d18bbbb0191bd49a4b04d4fdfa2541acb3536",
+  "experiment_started_utc": "2026-09-24T08:09:27.347027+00:00",
+  "experiment_ended_utc": "2026-09-24T08:21:14.809078+00:00",
+  "elapsed_seconds": "707.462051",
+  "allocation_method": "shared-cluster-plan-cost-prorated-by-experiment-time",
+  "price_observed_utc": "2026-09-24T08:32:36+00:00",
+  "price_source": "https://api.upcloud.com/1.3/price?zone=sg-sin1",
+  "plan_source": "https://api.upcloud.com/1.3/plan",
+  "deployment_shape_source": "infra/upcloud-canary/main.tf",
+  "zone": "sg-sin1",
+  "currency": "USD",
+  "api_plan_price_unit": "US cents per hour; scale cross-checked against the repository's existing eight-data-VM rate of USD 0.095977/hour",
+  "plan_rates": [
+    {
+      "plan": "DEV-1xCPU-1GB",
+      "vm_count": 5,
+      "api_price_cents_per_hour": "0.8184",
+      "included_standard_storage_gib_per_vm": 20
+    },
+    {
+      "plan": "DEV-1xCPU-2GB",
+      "vm_count": 2,
+      "api_price_cents_per_hour": "1.4136",
+      "included_standard_storage_gib_per_vm": 30
+    },
+    {
+      "plan": "DEV-1xCPU-4GB",
+      "vm_count": 1,
+      "api_price_cents_per_hour": "2.6785",
+      "included_standard_storage_gib_per_vm": 40
+    },
+    {
+      "plan": "DEV-2xCPU-4GB",
+      "vm_count": 1,
+      "api_price_cents_per_hour": "3.1250",
+      "included_standard_storage_gib_per_vm": 60
+    }
+  ],
+  "server_plan_usd_per_hour": "0.127227000",
+  "prorated_experiment_server_plan_usd": "0.025002298",
+  "network_gateway_essentials_api_price_cents_per_hour": "0",
+  "private_vlan_api_price_cents_per_hour": "0",
+  "firewall_api_price_cents_per_hour": "0",
+  "actual_incremental_invoice_charge_usd": null,
+  "separately_billed_extra_storage_or_backup_usd": null,
+  "historical_build_vm_cost_usd": null,
+  "full_path_cost_usd": null,
+  "billing_note": "UpCloud bills by started hour; this is a declared research allocation of continuously running plan cost over 707.462051 seconds, not a claim that the invoice increased by this exact amount.",
+  "credentials_recorded": false,
+  "hidden_labels_included": false
+}

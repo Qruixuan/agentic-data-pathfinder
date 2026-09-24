@@ -499,8 +499,21 @@ observed charge. For N6, use its per-request provider-usage journal and join
 each row to a verified route by both request and result SHA-256. Do not infer
 tokens from payload bytes or match requests by timestamp alone. Check that the
 join is one-to-one and covers every completed inference before reporting a
-complete N6 total. The N6 journal records numeric usage and request IDs; its
-presence does not by itself recover older runs without matching identities.
+complete N6 total. The N6 journal records numeric usage and request/result
+digests; its presence does not by itself recover older runs without matching
+identities.
+
+For the frozen Singapore `qwen3.8-27b` rate snapshot dated 2026-09-23, the
+exact calculation in USD is
+`((input_units - cached_input_units) * 0.50 + cached_input_units * 0.10 +
+output_units * 3.00) / 1,000,000`. Count implicit-cache input only once, at
+the cached rate; output usage includes provider-reported reasoning tokens.
+For `text-embedding-v4`, use `prompt_tokens * 0.07 / 1,000,000`. Freeze a new
+official rate snapshot if model, region, date, billing tier, or cache mode
+changes. N6 persists completed-request numeric usage in
+`/state/n6-provider-usage-v1.sqlite3`; reconcile it by request and result
+digests with each route's public evidence. An unobserved failed provider
+attempt may still be billable, so mark its amount unknown rather than zero.
 
 Keep these buckets distinct for each object, question, and route:
 
