@@ -1244,7 +1244,10 @@ def _interleaved_index_plan_catalog(
 ) -> FrozenIndexQueryPlanCatalog:
     rows = _strict_jsonl(root / MULTIQ_INDEX_PLANS,
                          "interleaved index query plans")
-    _require(len(rows) == 6, "interleaved index query count changed")
+    admission = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
+                             "interleaved runtime admission")
+    _require(len(rows) == admission["index_query_plan_count"],
+             "interleaved index query count changed")
     return FrozenIndexQueryPlanCatalog(tuple(
         FrozenIndexQueryPlan(
             trial_key=row["trial_key"],
@@ -1263,7 +1266,10 @@ def _interleaved_data_agent_plan_catalog(
 ) -> FrozenDataAgentPlanIdCatalog:
     rows = _strict_jsonl(root / MULTIQ_ACCESS_PLANS,
                          "interleaved Data Agent plans")
-    _require(len(rows) == 42, "interleaved Data Agent plan count changed")
+    admission = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
+                             "interleaved runtime admission")
+    _require(len(rows) == admission["data_agent_plan_binding_count"],
+             "interleaved Data Agent plan count changed")
     bindings = {
         (row["trial_key"], row["node_id"], row["object_id"],
          row["representation_id"]): row["plan_id"]
@@ -1277,9 +1283,12 @@ def _interleaved_data_agent_plan_catalog(
 def _interleaved_cache_episodes(root: Path) -> dict[tuple[str, str], str]:
     rows = _strict_jsonl(root / MULTIQ_CACHE_EPISODES,
                          "interleaved cache episode bindings")
+    admission = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
+                             "interleaved runtime admission")
     result = {(row["run_id"], row["trial_key"]): row["cache_episode_id"]
               for row in rows}
-    _require(len(result) == len(rows) == 6,
+    _require(len(result) == len(rows)
+             == admission["cache_episode_binding_count"],
              "interleaved cache episode bindings repeat or are incomplete")
     return result
 

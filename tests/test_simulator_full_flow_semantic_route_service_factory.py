@@ -26,6 +26,9 @@ from pathfinder.simulator.full_flow_semantic_route_service_factory import (
     RuntimeSemanticServiceInputs,
     SQLiteRouteExecutionStore,
     _data_agent_plan_catalog,
+    _interleaved_index_plan_catalog,
+    _interleaved_data_agent_plan_catalog,
+    _interleaved_cache_episodes,
     assemble_full_flow_semantic_route_service,
 )
 from pathfinder.simulator.full_flow_semantic_route_runtime import (
@@ -686,6 +689,62 @@ class SemanticRouteServiceFactoryTests(unittest.TestCase):
             store.begin(HEX_A, HEX_B)
         raw = (self.root / "failed.sqlite3").read_bytes()
         self.assertNotIn(b"credential-bearing", raw)
+
+
+class InterleavedCatalogCountTests(unittest.TestCase):
+    def test_catalog_counts_come_from_admission_not_six_question_defaults(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "interleaved-runtime-admission.json").write_text(
+                json.dumps({
+                    "index_query_plan_count": 7,
+                    "data_agent_plan_binding_count": 49,
+                    "cache_episode_binding_count": 7,
+                }), encoding="utf-8",
+            )
+            index = [{
+                "trial_key": f"trial-{number}",
+                "task_binding_sha256": HEX_A,
+                "index_id": "index-1",
+                "query_id": f"query-{number}",
+                "query_text": "What happened?",
+                "top_k": 1,
+                "candidate_object_ids": ["object-1"],
+            } for number in range(7)]
+            access = [{
+                "trial_key": f"trial-{number}",
+                "node_id": "N3",
+                "object_id": "object-1",
+                "representation_id": "raw_video",
+                "plan_id": f"plan-{number}",
+            } for number in range(49)]
+            cache = [{
+                "run_id": "run-1",
+                "trial_key": f"trial-{number}",
+                "cache_episode_id": f"episode-{number}",
+            } for number in range(7)]
+            for name, rows in (
+                ("index-query-plans.jsonl", index),
+                ("data-agent-plan-bindings.jsonl", access),
+                ("cache-episode-bindings.jsonl", cache),
+            ):
+                (root / name).write_text(
+                    "".join(json.dumps(row) + "\n" for row in rows),
+                    encoding="utf-8",
+                )
+            self.assertEqual(len(_interleaved_index_plan_catalog(root)._plans), 7)
+            self.assertEqual(
+                len(_interleaved_data_agent_plan_catalog(root)._values), 49,
+            )
+            self.assertEqual(len(_interleaved_cache_episodes(root)), 7)
+            (root / "cache-episode-bindings.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in cache[:-1]),
+                encoding="utf-8",
+            )
+            with self.assertRaises(FullFlowSemanticRouteServiceFactoryError):
+                _interleaved_cache_episodes(root)
 
 
 if __name__ == "__main__":
