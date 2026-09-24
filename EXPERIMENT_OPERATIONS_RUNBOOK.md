@@ -1108,6 +1108,12 @@ failure observation and its diagnosis. Total submissions must remain the
 original 48. Report answer accuracy and service availability separately;
 missing usage on a rejected attempt is unknown, not zero.
 
+The next frozen route (ordinal 14, R for the same question) independently
+returned the same provider code in its own exact N6 log interval. It is
+also terminal, with no retry/input alteration. Preserve each continuation
+point so operator pauses can be subtracted from path-time allocation while
+remaining visible in the full observed fleet-window cost.
+
 The ledger may contain identities and non-secret metadata. It must never
 contain API keys, bearer tokens, HMAC secrets, signed URLs, private prompts,
 hidden labels, or environment dumps.

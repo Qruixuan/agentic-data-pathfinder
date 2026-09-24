@@ -526,13 +526,17 @@ def continuation_prefix(config: dict, config_sha: str, context: dict,
                 or timing["elapsed_ms"] < 0 or not prior_end <= began <= ended):
             raise ValueError("continuation timing is not a serial prefix")
         prior_end = ended
+    previous_points = []
     if (parent / "continuation.json").exists():
         names.add("continuation.json")
+        previous = _read(parent / "continuation.json")
+        previous_points = previous.get("previous_continuation_points", []) + [previous["next_ordinal"]]
     if {p.name for p in parent.iterdir()} != names:
         raise ValueError("continuation parent file set differs")
     output["continuation.json"] = _pretty({
         "schema_version": "pathfinder.batch-continuation/v1",
         "continued_utc": _utc(), "next_ordinal": ordinal + 1,
+        "previous_continuation_points": previous_points,
         "parent_files": {n: _hash((parent / n).read_bytes()) for n in sorted(names)},
         "diagnosis_sha256": _hash(diagnosis_path.read_bytes()),
         "previous_submissions_repeated": False, "credentials_recorded": False,
