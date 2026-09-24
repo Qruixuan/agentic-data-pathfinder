@@ -89,6 +89,33 @@ Status: PAID_PREPARATION_RUNNING; no route workflow submitted yet.
 
 ## Attempts and immediate next actions
 
+### Current resume point (supersedes the initial entry steps below)
+
+- Fresh outcome-blind v3 selection: 4 new videos, 12 questions, 48 routes.
+  Public packages: `artifacts/h48-runtime-v1`, 169 checked files; remote
+  `/home/pathfinder/h48-public-20260924-v1` on N2/N3/N4/N6/N7.
+- Preparation complete: 36 caption calls + 4 video embedding calls + 12
+  query embedding calls; all responses/usage and machine time persisted.
+  Local paid journals: `artifacts/h48-paid-evidence-v1/output`.
+- N1 oracle was built/verified on N1 only; no label exported. N1/N2/N3/N4/N7
+  isolated services deployed and healthy. N6 and shared DC cache unchanged;
+  new video identities and frozen episode isolate this experiment.
+- Both source-bound gates and 12 dependency/auth probes passed. Worker is
+  wkr-2 under the pinned alias. Original route output on N7:
+  `/home/pathfinder/h48-runner-20260924-v1/output/routes`.
+- 13 routes COMPLETE, ordinal 13 terminal provider rejection, not a bug:
+  `400 data_inspection_failed`. Exact binding and sanitized diagnostic are
+  in `provider-rejection-13.json`. No accuracy outcomes inspected to choose
+  a repair or sample. No retry or input modification is permitted.
+- Shared runner now validates/imports a terminal prefix into a NEW output
+  and continues only untouched slots. Submission ceiling remains 48.
+  Next: stage the runner-only update; repeat no-call readiness; execute the
+  remaining 34 slots, verify terminal observations separately from scores.
+- Afterward export numeric N6 usage/attempts; join by request/result digests;
+  run `experiments.interleaved_cost_replay` and five frozen baselines.
+  Failed request usage remains unknown, not zero. Cost tables and full
+  baseline results are not yet generated. No source-bound module changed.
+
 1. Read-only SSH to the documented Root was denied by the local sandbox
    before authentication (`connect ... port 22: Permission denied`). No
    inference about server health or credentials follows. Retry through the

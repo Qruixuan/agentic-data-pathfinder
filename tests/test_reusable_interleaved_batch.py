@@ -61,6 +61,75 @@ def _fixture(name: str) -> tuple[dict, dict, Path]:
 
 
 class ReusableBatchTests(unittest.TestCase):
+    def test_continuation_validates_prefix_and_never_retries_terminal(self):
+        config, context, _ = _fixture("sealed-28.draft.json")
+        context = copy.deepcopy(context)
+        context["trials"] = context["trials"][:3]
+        old = ARTIFACTS / "multiq-sealed-28route-20260924t080919z-c7df0003/routes"
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            parent = Path(temporary) / "parent"
+            parent.mkdir()
+            start = batch._read(old / "start.json")
+            start["config_sha256"] = "config"
+            (parent / "start.json").write_bytes(batch._pretty(start))
+            for name in ("route-00.json", "timing-00.json"):
+                shutil.copyfile(old / name, parent / name)
+            failure = {**batch._read(old / "timing-01.json"),
+                       "status": "STOPPED_AT_FIRST_FAILURE",
+                       "failure_class": "infrastructure",
+                       "failure_code": "flowmesh-workflow-terminal-failure",
+                       "credentials_recorded": False}
+            (parent / "failure.json").write_bytes(batch._pretty(failure))
+            key = context["trials"][1]["trial_key"]
+            run_id = context["routes"][key]["run_id"]
+            diagnosis = {
+                "run_id": run_id, "trial_key": key,
+                "execution_id": batch._hash(batch._canonical({
+                    "domain": "pathfinder.generic-semantic-route-id/v1",
+                    "run_id": run_id, "trial_key": key})),
+                "provider_code": "data_inspection_failed", "http_status": 400,
+                "workflow_status": "FAILED", "durable_state": "FAILED",
+                "failure_sha256": "a" * 64, "n6_error_sha256": "b" * 64,
+                "retry_authorized": False, "credentials_recorded": False,
+            }
+            receipt = Path(temporary) / "diagnosis.json"
+            receipt.write_bytes(batch._pretty(diagnosis))
+            before = {p.name: p.read_bytes() for p in parent.iterdir()}
+            prefix = batch.continuation_prefix(config, "config", context, parent, receipt)
+            self.assertNotIn("route-01.json", prefix)
+            self.assertIsNone(json.loads(prefix["terminal-01.json"])["task_success"])
+            self.assertEqual(json.loads(prefix["continuation.json"])["next_ordinal"], 2)
+            worker = SimpleNamespace(alias=config["worker_alias"],
+                                     node_alias=config["worker_node_alias"],
+                                     status="IDLE", worker_id="fake-worker")
+            with patch.object(batch, "_settings"), \
+                    patch.object(batch, "SdkFlowMeshClient"), \
+                    patch.object(batch, "describe_pinned_worker", return_value=worker), \
+                    patch.object(batch, "full_flow_hmac_header_provider"), \
+                    patch.dict(os.environ, {"PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET": "test-only"}), \
+                    patch.object(batch, "FlowMeshSemanticTrialExecutor") as executor, \
+                    redirect_stdout(StringIO()):
+                executor.return_value.execute.return_value = batch._read(old / "route-02.json")
+                result = batch.run(config, "config", context, Path(temporary) / "out",
+                                   execute=True, resume_from=parent, failure_diagnosis=receipt)
+                self.assertEqual(result["status"], "ALL_ROUTES_OBSERVED")
+                executor.return_value.execute.assert_called_once()
+                self.assertEqual(executor.return_value.execute.call_args.kwargs["trial"],
+                                 context["trials"][2])
+            self.assertEqual(before, {p.name: p.read_bytes() for p in parent.iterdir()})
+            for field, bad in (("provider_code", "unknown"), ("retry_authorized", True),
+                               ("run_id", "other"), ("execution_id", "c" * 64)):
+                invalid = {**diagnosis, field: bad}
+                receipt.write_bytes(batch._pretty(invalid))
+                with self.subTest(field=field), self.assertRaises(ValueError):
+                    batch.continuation_prefix(config, "config", context, parent, receipt)
+            receipt.write_bytes(batch._pretty(diagnosis))
+            saved = batch._read(parent / "route-00.json")
+            saved["idempotency_key"] = "bad"
+            (parent / "route-00.json").write_bytes(batch._pretty(saved))
+            with self.assertRaisesRegex(ValueError, "saved route evidence"):
+                batch.continuation_prefix(config, "config", context, parent, receipt)
+
     def test_rotated_schedule_changes_order_not_requests(self):
         trials = [{"workload_id": "q", "design_id": arm,
                    "trial_key": arm, "order_index": i}

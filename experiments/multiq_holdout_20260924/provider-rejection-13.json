@@ -1,0 +1,23 @@
+{
+  "schema_version": "pathfinder.operator-terminal-diagnosis/v1",
+  "run_id": "fresh-multiq-holdout-20260924-v2-0003-i",
+  "trial_key": "fresh-multiq-holdout-20260924-v2|nextqa-val-2400715506-q3|I",
+  "execution_id": "5f8ab10f5f531491f4585fc62a35577c459f1ad2bbc1d5b5f596ae8d67cf13f0",
+  "failure_sha256": "bcb93bc665615217dc474bcec92edc7b3702d8343927b906cc7e8b2bc9d254ff",
+  "durable_state": "FAILED",
+  "workflow_id": "wfl-5d7ba9fc-f198-4976-bef0-e7735369145e",
+  "workflow_status": "FAILED",
+  "task_id": "tsk-09675fda-8769-4e55-b5c7-f107506bde79",
+  "assigned_worker": "wkr-2",
+  "n6_error_sha256": "1de2c0edd2add1a6f18bb1a3fb5a57e96b5f2832f9df265fb2f77f319274c318",
+  "provider_code": "data_inspection_failed",
+  "provider_type": "data_inspection_failed",
+  "http_status": 400,
+  "n6_log_interval_utc": ["2026-09-24T13:15:16Z", "2026-09-24T13:15:25Z"],
+  "retry_authorized": false,
+  "sample_replacement_authorized": false,
+  "input_modification_authorized": false,
+  "provider_failed_attempt_charge_known": false,
+  "diagnostic_is_operator_observation_not_n1_score": true,
+  "credentials_recorded": false
+}

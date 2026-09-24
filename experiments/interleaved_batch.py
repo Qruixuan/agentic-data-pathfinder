@@ -416,10 +416,139 @@ def _settings(config: dict) -> FlowMeshSettings:
     )
 
 
+def _verify_completed(context: dict, ordinal: int, result: dict) -> None:
+    """Validate a saved prefix before it can suppress a submission."""
+    trial = context["trials"][ordinal]
+    route = context["routes"][trial["trial_key"]]
+    episode = context["episodes"].get(trial["trial_key"])
+    stages = {s["stage_key"]: s for s in context["stages"]}
+    _assert_public_evidence(result)
+    evidence = verify_semantic_route_evidence(
+        result["semantic_route_evidence"], run_id=route["run_id"],
+        bound_trial=trial,
+        bound_stages=[stages[k] for k in trial["semantic_stage_keys"]],
+        cache_episode_id=episode["cache_episode_id"] if episode else None,
+    )
+    key = _hash(_canonical({
+        "domain": "interleaved-admission-idempotency/v1",
+        "run_id": route["run_id"], "trial_key": trial["trial_key"],
+    }))
+    if (result.get("status") != "COMPLETE"
+            or result.get("trial_key") != trial["trial_key"]
+            or result.get("idempotency_key") != key
+            or result.get("route_evidence_sha256") != evidence["evidence_sha256"]
+            or result.get("execution_transport") != "flowmesh"
+            or result.get("n1_score_authenticity_verified") is not True
+            or result.get("telemetry_complete") is not True
+            or result.get("llm_called") is not True
+            or type(result.get("task_success")) is not bool
+            or result.get("credentials_recorded") is not False
+            or result.get("eligible_for_scientific_claims") is not False):
+        raise ValueError("saved route evidence differs")
+
+
+def _verify_terminal(context: dict, ordinal: int, failure: dict) -> None:
+    trial = context["trials"][ordinal]
+    route = context["routes"][trial["trial_key"]]
+    diagnosis = failure.get("diagnosis", {})
+    execution_id = _hash(_canonical({
+        "domain": "pathfinder.generic-semantic-route-id/v1",
+        "run_id": route["run_id"], "trial_key": trial["trial_key"],
+    }))
+    if (failure.get("status") != "OBSERVED_PROVIDER_REJECTION"
+            or failure.get("ordinal") != ordinal
+            or failure.get("trial_key") != trial["trial_key"]
+            or diagnosis.get("execution_id") != execution_id
+            or diagnosis.get("run_id") != route["run_id"]
+            or diagnosis.get("trial_key") != trial["trial_key"]
+            or diagnosis.get("provider_code") != "data_inspection_failed"
+            or diagnosis.get("http_status") != 400
+            or diagnosis.get("workflow_status") != "FAILED"
+            or diagnosis.get("durable_state") != "FAILED"
+            or diagnosis.get("retry_authorized") is not False
+            or diagnosis.get("credentials_recorded") is not False
+            or failure.get("task_success", "absent") is not None):
+        raise ValueError("terminal failure diagnosis/binding differs")
+    for key in ("failure_sha256", "n6_error_sha256"):
+        value = diagnosis.get(key)
+        if not isinstance(value, str) or len(value) != 64 or any(
+                c not in "0123456789abcdef" for c in value):
+            raise ValueError("terminal failure digest is missing")
+
+
+def continuation_prefix(config: dict, config_sha: str, context: dict,
+                        parent: Path, diagnosis_path: Path) -> dict[str, bytes]:
+    """Import a diagnosed terminal prefix without changing or retrying it."""
+    start = _read(parent / "start.json")
+    if (start.get("status") != "STARTED"
+            or start.get("config_sha256") != config_sha
+            or start.get("admission_sha256") != context["report"]["admission_sha256"]
+            or start.get("baseline_spec_sha256") != context["baseline_sha256"]
+            or start.get("worker_alias") != config["worker_alias"]
+            or start.get("credentials_recorded") is not False):
+        raise ValueError("continuation parent binding differs")
+    failed = _read(parent / "failure.json")
+    ordinal = failed.get("ordinal")
+    if (type(ordinal) is not int or not 0 <= ordinal < len(context["trials"])
+            or failed.get("status") != "STOPPED_AT_FIRST_FAILURE"):
+        raise ValueError("continuation is not a terminal prefix")
+    names = {"start.json", "failure.json"}
+    output = {"start.json": (parent / "start.json").read_bytes()}
+    prior_end = _timestamp(start["started_utc"])
+    for i in range(ordinal + 1):
+        if i == ordinal:
+            terminal = {**failed, "status": "OBSERVED_PROVIDER_REJECTION",
+                        "task_success": None, "diagnosis": _read(diagnosis_path)}
+            _verify_terminal(context, i, terminal)
+            output[f"terminal-{i:02d}.json"] = _pretty(terminal)
+            timing = {k: failed[k] for k in (
+                "ordinal", "trial_key", "route_started_utc",
+                "route_ended_utc", "elapsed_ms")}
+            output[f"timing-{i:02d}.json"] = _pretty(timing)
+        else:
+            name = f"terminal-{i:02d}.json"
+            if (parent / name).exists():
+                _verify_terminal(context, i, _read(parent / name))
+            else:
+                name = f"route-{i:02d}.json"
+                _verify_completed(context, i, _read(parent / name))
+            names.add(name)
+            output[name] = (parent / name).read_bytes()
+            name = f"timing-{i:02d}.json"
+            names.add(name)
+            output[name] = (parent / name).read_bytes()
+            timing = _read(parent / name)
+        began = _timestamp(timing["route_started_utc"])
+        ended = _timestamp(timing["route_ended_utc"])
+        if (timing["ordinal"] != i or timing["trial_key"]
+                != context["trials"][i]["trial_key"]
+                or type(timing["elapsed_ms"]) is not int
+                or timing["elapsed_ms"] < 0 or not prior_end <= began <= ended):
+            raise ValueError("continuation timing is not a serial prefix")
+        prior_end = ended
+    if (parent / "continuation.json").exists():
+        names.add("continuation.json")
+    if {p.name for p in parent.iterdir()} != names:
+        raise ValueError("continuation parent file set differs")
+    output["continuation.json"] = _pretty({
+        "schema_version": "pathfinder.batch-continuation/v1",
+        "continued_utc": _utc(), "next_ordinal": ordinal + 1,
+        "parent_files": {n: _hash((parent / n).read_bytes()) for n in sorted(names)},
+        "diagnosis_sha256": _hash(diagnosis_path.read_bytes()),
+        "previous_submissions_repeated": False, "credentials_recorded": False,
+    })
+    return output
+
+
 def run(config: dict, config_sha: str, context: dict,
         output_dir: Path | None, *, execute: bool,
-        run_id: str | None = None) -> dict:
+        run_id: str | None = None, resume_from: Path | None = None,
+        failure_diagnosis: Path | None = None) -> dict:
+    if (resume_from is None) != (failure_diagnosis is None):
+        raise ValueError("continuation needs both parent and diagnosis")
     if config["schema_version"] != SCHEMA:
+        if resume_from is not None:
+            raise ValueError("continuation is only supported for interleaved batches")
         from experiments.ten_route_batch import run as run_ten
         return run_ten(config, config_sha, context, output_dir,
                        execute=execute, run_id=run_id)
@@ -427,6 +556,9 @@ def run(config: dict, config_sha: str, context: dict,
         raise ValueError("interleaved run identities are frozen in the plan")
     if execute and (output_dir is None or output_dir.exists()):
         raise ValueError("execution requires an unused output directory")
+    prefix = continuation_prefix(
+        config, config_sha, context, resume_from, failure_diagnosis,
+    ) if resume_from is not None else None
     settings = _settings(config)
     client = SdkFlowMeshClient(settings)
     try:
@@ -443,7 +575,7 @@ def run(config: dict, config_sha: str, context: dict,
         output.mkdir(parents=True, exist_ok=False)
         report = context["report"]
         started = _utc()
-        _atomic_json(output / "start.json", {
+        start_record = {
             "status": "STARTED", "started_utc": started,
             "config_sha256": config_sha,
             "admission_sha256": report["admission_sha256"],
@@ -451,11 +583,22 @@ def run(config: dict, config_sha: str, context: dict,
             "worker_alias": config["worker_alias"],
             "observed_worker_id": worker.worker_id,
             "credentials_recorded": False,
-        })
+        }
+        next_ordinal = 0
+        if prefix is not None:
+            for name, data in prefix.items():
+                with (output / name).open("xb") as handle:
+                    handle.write(data)
+            started = json.loads(prefix["start.json"])["started_utc"]
+            next_ordinal = json.loads(prefix["continuation.json"])["next_ordinal"]
+        else:
+            _atomic_json(output / "start.json", start_record)
         signer = full_flow_hmac_header_provider(
             os.environ["PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET"]
         )
         for ordinal, trial in enumerate(context["trials"]):
+            if ordinal < next_ordinal:
+                continue
             route = context["routes"][trial["trial_key"]]
             episode = context["episodes"].get(trial["trial_key"])
             key = _hash(_canonical({
@@ -507,7 +650,8 @@ def run(config: dict, config_sha: str, context: dict,
             })
             print("ROUTE_COMPLETE", ordinal, trial["design_id"], flush=True)
         _atomic_json(output / "summary.json", {
-            "status": "VERIFIED_INTERLEAVED_BATCH_EXECUTION",
+            "status": ("RECORDED_INTERLEAVED_BATCH_OBSERVATIONS" if prefix
+                       else "VERIFIED_INTERLEAVED_BATCH_EXECUTION"),
             "config_sha256": config_sha,
             "admission_sha256": report["admission_sha256"],
             "baseline_spec_sha256": context["baseline_sha256"],
@@ -517,7 +661,7 @@ def run(config: dict, config_sha: str, context: dict,
             "credentials_recorded": False,
             "eligible_for_scientific_claims": False,
         })
-        return {"status": "ALL_ROUTES_COMPLETE",
+        return {"status": "ALL_ROUTES_OBSERVED" if prefix else "ALL_ROUTES_COMPLETE",
                 "route_count": len(context["trials"])}
     finally:
         client.close()
@@ -546,13 +690,29 @@ def verify_output(config: dict, config_sha: str, context: dict,
     status = summary.get("status")
     legacy24 = status == "VERIFIED_24_ROUTE_EXECUTION" and count == 24
     legacy28 = status == "VERIFIED_28_ROUTE_EXECUTION" and count == 28
-    current = status == "VERIFIED_INTERLEAVED_BATCH_EXECUTION"
+    observations = status == "RECORDED_INTERLEAVED_BATCH_OBSERVATIONS"
+    current = status == "VERIFIED_INTERLEAVED_BATCH_EXECUTION" or observations
     if not (legacy24 or legacy28 or current):
         raise ValueError("route output contract or count differs")
     expected = {
         "summary.json", "SHA256SUMS",
         *(f"route-{i:02d}.json" for i in range(count)),
     }
+    terminals = set()
+    if observations:
+        expected.add("continuation.json")
+        continuation = _read(root / "continuation.json")
+        if (continuation.get("schema_version") != "pathfinder.batch-continuation/v1"
+                or continuation.get("previous_submissions_repeated") is not False
+                or continuation.get("credentials_recorded") is not False):
+            raise ValueError("continuation contract differs")
+        for i in range(count):
+            if (root / f"terminal-{i:02d}.json").exists():
+                terminals.add(i)
+                expected.remove(f"route-{i:02d}.json")
+                expected.add(f"terminal-{i:02d}.json")
+        if not terminals:
+            raise ValueError("observation batch omits its terminal failure")
     if legacy24:
         expected.add("admission-sha256.txt")
     else:
@@ -604,9 +764,30 @@ def verify_output(config: dict, config_sha: str, context: dict,
     stages = {row["stage_key"]: row for row in context["stages"]}
     success = {arm: {True: 0, False: 0}
                for arm in context["plan"]["arm_ids"]}
+    unavailable = {arm: 0 for arm in success}
     execution_ids: set[str] = set()
     flowmesh_ids: set[str] = set()
     for ordinal, trial in enumerate(trials):
+        if ordinal in terminals:
+            terminal = _read(root / f"terminal-{ordinal:02d}.json")
+            _verify_terminal(context, ordinal, terminal)
+            timing = _read(root / f"timing-{ordinal:02d}.json")
+            for key in ("ordinal", "trial_key", "route_started_utc",
+                        "route_ended_utc", "elapsed_ms"):
+                if timing.get(key) != terminal.get(key):
+                    raise ValueError("terminal timing binding differs")
+            began = _timestamp(timing["route_started_utc"])
+            ended = _timestamp(timing["route_ended_utc"])
+            if (type(timing["elapsed_ms"]) is not int or timing["elapsed_ms"] < 0
+                    or not prior_end <= began <= ended <= batch_end):
+                raise ValueError("terminal route is not serial in batch")
+            prior_end = ended
+            identity = terminal["diagnosis"]["execution_id"]
+            if identity in execution_ids:
+                raise ValueError("terminal execution identity repeats")
+            execution_ids.add(identity)
+            unavailable[trial["design_id"]] += 1
+            continue
         result = _read(root / f"route-{ordinal:02d}.json")
         _assert_public_evidence(result)
         route = context["routes"][trial["trial_key"]]
@@ -665,8 +846,9 @@ def verify_output(config: dict, config_sha: str, context: dict,
                     raise ValueError(f"route {ordinal} identity is reused")
                 seen.add(identity)
         success[trial["design_id"]][result["task_success"]] += 1
-    if any(sum(values.values()) != context["plan"]["question_count"]
-           for values in success.values()):
+    if any(sum(values.values()) + unavailable[arm]
+           != context["plan"]["question_count"]
+           for arm, values in success.items()):
         raise ValueError("per-arm question coverage differs")
     checksums = "".join(
         f"{_hash(path.read_bytes())}  {path.name}\n"
@@ -680,7 +862,8 @@ def verify_output(config: dict, config_sha: str, context: dict,
     if (root / "SHA256SUMS").read_bytes() != checksums:
         raise ValueError("route checksum manifest differs")
     return {
-        "status": "VERIFIED_INTERLEAVED_BATCH_OUTPUT",
+        "status": ("VERIFIED_INTERLEAVED_BATCH_OBSERVATIONS" if observations
+                   else "VERIFIED_INTERLEAVED_BATCH_OUTPUT"),
         "question_count": context["plan"]["question_count"],
         "route_count": count,
         "config_sha256": config_sha if current else None,
@@ -690,6 +873,7 @@ def verify_output(config: dict, config_sha: str, context: dict,
             arm: {"correct": values[True], "incorrect": values[False]}
             for arm, values in success.items()
         },
+        "unavailable_by_arm": unavailable,
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
@@ -709,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
             action.add_argument("--output-dir", type=Path, required=True)
         if name == "execute":
             action.add_argument("--run-id", help="fresh ten-route run ID")
+            action.add_argument("--resume-from", type=Path)
+            action.add_argument("--failure-diagnosis", type=Path)
         if name == "verify":
             action.add_argument("--seal", action="store_true")
     args = parser.parse_args(argv)
@@ -740,6 +926,8 @@ def main(argv: list[str] | None = None) -> int:
             getattr(args, "output_dir", None),
             execute=args.action == "execute",
             run_id=getattr(args, "run_id", None),
+            resume_from=getattr(args, "resume_from", None),
+            failure_diagnosis=getattr(args, "failure_diagnosis", None),
         )
     print(json.dumps(result, sort_keys=True))
     return 2 if result["status"] == "STOPPED_AT_FIRST_FAILURE" else 0

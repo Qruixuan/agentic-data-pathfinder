@@ -1094,6 +1094,20 @@ known_limitations:
 failed_attempts_and_recovery_links:
 ```
 
+2026-09-24 — CONFIRMED, fresh holdout ordinal 13: the exact FlowMesh task
+and durable route hash resolve to `N6AdapterError` wrapping
+`N6 semantic executor failed: FullFlowRouteAdapterError`. The N6 diagnostic
+inside that route's time interval records HTTP 400, provider code/type
+`data_inspection_failed`. This is a provider refusal, not a source-binding,
+network or scoring defect. Never alter the input to circumvent inspection,
+retry the rejected request, label it incorrect, or replace the sample.
+Keep the original failed batch immutable. A continuation may execute only
+the still-unsubmitted suffix in frozen order, after ordinary readiness
+gates; validate and copy the completed prefix, preserve a distinct terminal
+failure observation and its diagnosis. Total submissions must remain the
+original 48. Report answer accuracy and service availability separately;
+missing usage on a rejected attempt is unknown, not zero.
+
 The ledger may contain identities and non-secret metadata. It must never
 contain API keys, bearer tokens, HMAC secrets, signed URLs, private prompts,
 hidden labels, or environment dumps.
@@ -1195,6 +1209,36 @@ full archival verification; do not rewrite the old profile. Preventive test:
 the incompatible raw profiles to be rejected. This is not a new runtime fault.
 
 Use this compact format for each new failure:
+
+2026-09-24 — INVESTIGATING, fresh holdout route 13: after thirteen COMPLETE
+routes, `fresh-multiq-holdout-20260924-v2|nextqa-val-2400715506-q3|I`
+failed in 4525 ms with `flowmesh-workflow-terminal-failure`. All coordinator,
+worker and dependency services remain healthy. Preserve the completed route
+files and failure receipt under `h48-runner-20260924-v1/output/routes`.
+Read the exact durable execution record before any repeat or continuation;
+do not classify this infrastructure error as an incorrect model answer.
+
+2026-09-24 — RESOLVED, runner-only dependency gate: source-bound inputs
+validated, but using the route service image as a batch-client image raised
+`FlowMeshDependencyError` before worker resolution. Service images need not
+include the optional FlowMesh SDK. Inspect installed distributions first;
+use a dedicated client runtime with the supported SDK rather than modifying
+FlowMesh or rebuilding the healthy services. No workflow was submitted.
+Existing dedicated runner image `sha256:9cc1202c88d14665ffdce135421092449d2172f01f4087ed5455bb88eab713b1`
+already contains flowmesh-sdk 0.1.9, av 17.0.1 and Pillow 12.3.0. Use it
+with the clean experiment source mounted read-only. No dependency install,
+FlowMesh repository modification or service-image rebuild is necessary.
+
+2026-09-24 — RESOLVED, before FlowMesh preflight: the new runner launcher
+passed all seven valid/invalid auth boundaries and the N6 usage-journal gate,
+then stopped at an assertion while acquiring its client configuration. No
+workflow was submitted. Diagnose with explicit health booleans and missing
+key names only; never print the captured container environment or keys.
+Both services were healthy; only `FLOWMESH_API_KEY` was empty, which is valid
+for this private Root's default configuration and is already supported by
+`FlowMeshSettings.from_environment` (empty becomes None). Remove the helper's
+extra all-values assertion, not any server authentication. The real Root
+preflight remains mandatory and is the authority on access readiness.
 
 2026-09-24 — CONFIRMED before holdout submissions: the interleaved DAG keeps
 legacy fixed R/D/DC/I `order_index` values, while the new plan explicitly
