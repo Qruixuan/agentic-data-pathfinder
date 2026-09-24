@@ -68,6 +68,16 @@ def verify_sums(root: Path):
             raise ValueError("input checksum differs: " + name)
 
 
+def verified_public_plan(plan_dir: Path) -> tuple[dict, list[dict]]:
+    """Select a canonical public plan verifier by its frozen file set."""
+
+    from pathfinder.rsi_exam.ten_route_multiq_plan import (
+        load_verified_multiq_plan,
+    )
+    manifest, questions, _ = load_verified_multiq_plan(plan_dir)
+    return manifest, questions
+
+
 def offline(input_dir: Path, output: Path, source_commit: str, host: str):
     from pathfinder.simulator.raw_cold_data_plane import (
         RawColdObjectBinding, build_raw_cold_data_plane_package,
@@ -79,15 +89,9 @@ def offline(input_dir: Path, output: Path, source_commit: str, host: str):
     )
     from pathfinder.simulator.hidden_oracle import build_n1_public_task_binding
     from pathfinder.distributed.scoring import MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE
-    from pathfinder.rsi_exam.interleaved_multiq_plan import verify_interleaved_plan
-
     verify_sums(input_dir / "media")
     media = read(input_dir / "media/media.json")
-    plan = read(input_dir / "plan/interleaved-plan.json")
-    questions = [json.loads(line) for line in (
-        input_dir / "plan/public-questions.jsonl").read_bytes().splitlines()]
-    verify_interleaved_plan(input_dir / "plan", questions,
-                            public_source_sha256=plan["public_source_sha256"])
+    plan, questions = verified_public_plan(input_dir / "plan")
     if ({row["object_id"] for row in media["objects"]}
             != {row["object_id"] for row in questions}):
         raise ValueError("media and question objects differ")
@@ -108,10 +112,14 @@ def offline(input_dir: Path, output: Path, source_commit: str, host: str):
             ) for row in media["objects"]
         ], output_dir=output / "raw", package_id=plan["experiment_id"] + "-raw")
         verify_raw_cold_data_plane_package(output / "raw")
-    # The legacy preparation builder needs a per-video collection membership
-    # manifest. Use only the already-selected causal task for membership;
-    # the actual experiment plan remains the twelve-question interleaved one.
-    membership = [row for row in questions if row["stratum"] == "causal"]
+    # The preparation builder needs one public membership task per video.
+    # Preserve the old causal choice where available; the ten-route cohort
+    # may omit the causal stratum for one video, so choose its first public
+    # question without inspecting an answer or outcome.
+    membership = [min(
+        (row for row in questions if row["object_id"] == object_id),
+        key=lambda row: (row["stratum"] != "causal", row["question_id"]),
+    ) for object_id in sorted({row["object_id"] for row in questions})]
     with measured(output, "membership-freeze", host):
         write(output / "public-membership.json", {
             "schema_version": "pathfinder.public-task-set/v1alpha1",
@@ -128,8 +136,12 @@ def offline(input_dir: Path, output: Path, source_commit: str, host: str):
             "schema_version": "pathfinder.rsi-exam-cohort-spec/v1alpha1",
             "cohort_id": plan["experiment_id"] + "-membership",
             "collection_repetitions": 1, "selection_seed": plan["seed"],
-            "stratum_by_workload": {q["question_id"]: "causal" for q in membership},
-            "split_stratum_targets": {"test": {"causal": len(membership)}},
+            "stratum_by_workload": {q["question_id"]: q["stratum"]
+                                    for q in membership},
+            "split_stratum_targets": {"test": {
+                stratum: sum(q["stratum"] == stratum for q in membership)
+                for stratum in sorted({q["stratum"] for q in membership})
+            }},
         })
         freeze_collection_plan(output / "public-membership.json",
                                output / "membership-spec.json",
@@ -233,7 +245,7 @@ def paid(input_dir: Path, output: Path, protocol_path: Path, phase: str, host: s
     protocol = read(protocol_path)
     prep = input_dir / "build/preparation"
     verified = verify_formal_temporal_index_preparation(prep)
-    plan = read(input_dir / "plan/interleaved-plan.json")
+    plan, questions = verified_public_plan(input_dir / "plan")
     if (verified["window_count"] != protocol["caption_windows"]
             or plan["plan_sha256"] != protocol["plan_sha256"]):
         raise ValueError("preparation or plan differs from execution protocol")
@@ -267,8 +279,9 @@ def paid(input_dir: Path, output: Path, protocol_path: Path, phase: str, host: s
                 api_key=key, batch_size=10, transport=transport,
             )
         else:
-            questions = [{k: row[k] for k in ("question_id", "object_id", "question")}
-                         for row in map(json.loads, (input_dir / "plan/public-questions.jsonl").read_bytes().splitlines())]
+            questions = [{k: row[k] for k in
+                          ("question_id", "object_id", "question")}
+                         for row in questions]
             report = build_temporal_query_batch(
                 output / "video-index", prep, output / "captions", questions,
                 output_dir=output / "query", package_id=protocol["experiment_id"] + "-query",

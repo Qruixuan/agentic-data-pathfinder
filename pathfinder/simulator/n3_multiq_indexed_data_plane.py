@@ -21,7 +21,7 @@ from ..data_agent_manifest import (
     load_data_agent_manifest,
 )
 from ..frame_bundle_ingest import FRAME_BUNDLE_MEDIA_TYPE
-from ..rsi_exam.interleaved_multiq_plan import verify_interleaved_plan
+from ..rsi_exam.ten_route_multiq_plan import load_verified_multiq_plan
 from ..rsi_exam.temporal_index_collection import (
     PREPARATION_MANIFEST,
     _fraction_pair,
@@ -411,10 +411,11 @@ def derive_n3_multiq_question_policies(
     decoding only the disjoint windows or as reduced MP4 storage I/O.
     """
 
-    plan = verify_interleaved_plan(
+    manifest, _, plan = load_verified_multiq_plan(
         plan_dir, public_questions,
-        public_source_sha256=public_source_sha256,
     )
+    _require(manifest["public_source_sha256"] == public_source_sha256,
+             "public source digest differs from the plan")
     simplified = [
         {key: row[key] for key in ("question_id", "object_id", "question")}
         for row in public_questions

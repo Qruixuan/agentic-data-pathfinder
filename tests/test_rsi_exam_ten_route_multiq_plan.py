@@ -1,0 +1,118 @@
+"""Small public ten-observation multi-question plan regressions."""
+
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from pathfinder.distributed.scoring import (
+    MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
+)
+from pathfinder.rsi_exam.ten_route_multiq_plan import (
+    TenRouteMultiQuestionPlanError, freeze_ten_route_multiq_plan,
+    verify_ten_route_multiq_plan,
+)
+from pathfinder.simulator.hidden_oracle import build_n1_public_task_binding
+
+
+def public_questions():
+    options = [{"option_id": chr(65 + i), "text": f"choice {i}"}
+               for i in range(5)]
+    rows = []
+    for video in ("video-a", "video-b", "video-c", "video-d"):
+        for stratum in ("causal", "temporal", "descriptive"):
+            question_id = f"{video}-{stratum}"
+            question = f"What happened in {video} ({stratum})?"
+            binding = build_n1_public_task_binding(
+                workload_id=question_id, object_id=video,
+                task_class_id=stratum, question=question,
+                answer_options=options,
+                success_scoring_rule=(
+                    MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE
+                ),
+            )
+            rows.append({
+                "question_id": question_id,
+                "object_id": video,
+                "stratum": stratum,
+                "question": question,
+                "answer_options": options,
+                "public_task_sha256": binding["task_binding_sha256"],
+            })
+    return rows
+
+
+class TenRouteMultiQuestionPlanTests(unittest.TestCase):
+    def cohort(self):
+        omitted = {"video-a": "causal", "video-b": "temporal",
+                   "video-c": "descriptive"}
+        return [row for row in public_questions()
+                if row["object_id"] in omitted
+                and row["stratum"] != omitted[row["object_id"]]]
+
+    def test_freeze_verifies_ten_slots_and_state_isolation(self):
+        selected = self.cohort()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "new-plan"
+            report = freeze_ten_route_multiq_plan(
+                selected, seed="seed-1", experiment_id="episode-1",
+                public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+                output_dir=root,
+            )
+            self.assertEqual(report["route_observation_count"], 60)
+            self.assertEqual(report, verify_ten_route_multiq_plan(
+                root, selected, public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+            ))
+            rows = [json.loads(line) for line in
+                    (root / "ten-route-multiq-schedule.jsonl")
+                    .read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), 6)
+            self.assertEqual(len({slot["run_id"] for row in rows
+                                  for slot in row["route_slots"]}), 60)
+            self.assertEqual(
+                {row["object_id"] for row in rows[:3]},
+                {"video-a", "video-b", "video-c"},
+            )
+            self.assertTrue(all(a["object_id"] != b["object_id"]
+                                for a, b in zip(rows, rows[1:])))
+            positions = {oid: [i for i, row in enumerate(rows)
+                               if row["object_id"] == oid]
+                         for oid in ("video-a", "video-b", "video-c")}
+            self.assertGreater(len({p[1] - p[0] for p in positions.values()}),
+                               1)
+            for row in rows:
+                self.assertEqual(len(row["route_slots"]), 10)
+                for node in ("N7", "N8"):
+                    cache = [slot for slot in row["route_slots"]
+                             if slot["executor_node_id"] == node
+                             and slot["arm_id"] == "DC"]
+                    self.assertEqual([s["cache_expectation"] for s in cache],
+                                     ["miss", "hit"])
+                    self.assertEqual(cache[0]["cache_episode_id"],
+                                     cache[1]["cache_episode_id"])
+                    self.assertEqual(cache[0]["repetition"], 0)
+                    self.assertEqual(cache[1]["repetition"], 1)
+            with self.assertRaisesRegex(TenRouteMultiQuestionPlanError,
+                                        "plan differs"):
+                verify_ten_route_multiq_plan(
+                    root, selected, public_source_sha256="a" * 64,
+                    exposure_inventory_sha256="c" * 64,
+                )
+
+    def test_labels_and_outcomes_are_not_public_plan_inputs(self):
+        candidates = self.cohort()
+        candidates[0]["answer"] = "A"
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "fields differ"):
+                freeze_ten_route_multiq_plan(
+                    candidates, seed="seed-1", experiment_id="episode-1",
+                    public_source_sha256="a" * 64,
+                    exposure_inventory_sha256="b" * 64,
+                    output_dir=Path(temp) / "rejected",
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

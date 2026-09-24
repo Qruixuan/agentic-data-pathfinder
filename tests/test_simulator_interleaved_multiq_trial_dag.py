@@ -53,7 +53,9 @@ def _artifact(representation: str, character: str) -> dict:
     }
 
 
-def _build(arm: str, *, question: dict | None = None):
+def _build(arm: str, *, question: dict | None = None,
+           executor_node_id: str = "N7", indexed_raw: bool = False,
+           design_id: str | None = None, repetition: int = 0):
     question = question or _question()
     route = {
         "arm_id": arm,
@@ -62,6 +64,9 @@ def _build(arm: str, *, question: dict | None = None):
         "trial_key": f"multiq|{QUESTION_ID}|{arm}",
         "ordinal": 1,
     }
+    if design_id is not None:
+        route.update({"design_id": design_id, "repetition": repetition,
+                      "order_index": 13})
     return build_interleaved_trial_dag(
         route, question,
         raw_artifact=_artifact("raw_video", "a"),
@@ -75,6 +80,8 @@ def _build(arm: str, *, question: dict | None = None):
             "frame_count": 4,
             "temporal_window_fraction": [0.25, 0.75],
         } if arm == "I" else None,
+        executor_node_id=executor_node_id,
+        indexed_raw=indexed_raw,
     )
 
 
@@ -128,6 +135,38 @@ class InterleavedTrialDagTests(unittest.TestCase):
         )
         self.assertTrue(any(row["action"] == "query-index" for row in stages))
         self.assertFalse(any(row["action"] == "lookup" for row in stages))
+
+    def test_ten_route_indexed_raw_reuses_dag_on_both_nodes(self) -> None:
+        for node in ("N7", "N8"):
+            with self.subTest(node=node):
+                trial, stages = _build(
+                    "I", executor_node_id=node, indexed_raw=True,
+                    design_id="D1" if node == "N7" else "D5",
+                )
+                self.assertEqual(trial["executor_node_id"], node)
+                self.assertEqual(trial["design_id"],
+                                 "D1" if node == "N7" else "D5")
+                self.assertEqual(trial["route_family"], "indexed-raw")
+                self.assertEqual(
+                    {row["representation_id"] for row in
+                     trial["representation_identities"]}, {"raw_video"},
+                )
+                self.assertFalse(any(row["stage_key"].endswith("read-digest")
+                                     for row in stages))
+                self.assertTrue(any(
+                    row["action"] == "transfer-bytes"
+                    and row["logical_node_ids"] == ["N3", node]
+                    for row in stages
+                ))
+
+    def test_ten_route_cache_and_bypass_keep_identical_model_content(self) -> None:
+        for node in ("N7", "N8"):
+            direct, _ = _build("D", executor_node_id=node)
+            cached, stages = _build("DC", executor_node_id=node)
+            self.assertEqual(direct["semantic_input_profile"],
+                             cached["semantic_input_profile"])
+            self.assertEqual({row["logical_node_ids"][0] for row in stages
+                              if row["action"] == "lookup"}, {node})
 
     def test_missing_query_policy_and_wrong_task_fail_closed(self) -> None:
         question = _question()

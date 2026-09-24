@@ -21,7 +21,12 @@ from ..rsi_exam.interleaved_multiq_plan import (
     QUESTIONS,
     SCHEDULE,
     interleaved_trial_key,
-    verify_interleaved_plan,
+)
+from ..rsi_exam.ten_route_multiq_plan import (
+    SCHEMA as TEN_ROUTE_PLAN_SCHEMA,
+    SCHEDULE as TEN_ROUTE_SCHEDULE,
+    load_verified_multiq_plan,
+    ten_route_trial_key,
 )
 from .full_flow_multiq_exact_selection import interleaved_data_agent_plan_bindings
 from .hidden_oracle_commitment import verify_n1_oracle_preselection_commitment
@@ -74,11 +79,8 @@ def _expected(
     caption_dir: Path,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     questions = _rows(plan_dir / QUESTIONS)
-    plan_document = json.loads((plan_dir / "interleaved-plan.json").read_bytes())
-    plan = verify_interleaved_plan(
-        plan_dir, questions,
-        public_source_sha256=plan_document["public_source_sha256"],
-    )
+    plan_document, _, plan = load_verified_multiq_plan(plan_dir, questions)
+    ten_route = plan_document["schema_version"] == TEN_ROUTE_PLAN_SCHEMA
     commitment = verify_n1_oracle_preselection_commitment(
         n1_public_commitment_dir,
     )
@@ -101,14 +103,14 @@ def _expected(
     )
     policies = derive_n3_multiq_question_policies(
         plan_dir=plan_dir, public_questions=questions,
-        public_source_sha256=plan["public_source_sha256"],
+        public_source_sha256=plan_document["public_source_sha256"],
         query_dir=query_dir, video_index_dir=video_index_dir,
         preparation_dir=preparation_dir, caption_dir=caption_dir,
         raw_package_dir=raw_package_dir,
     )
     access = interleaved_data_agent_plan_bindings(
         plan_dir=plan_dir, public_questions=questions,
-        public_source_sha256=plan["public_source_sha256"],
+        public_source_sha256=plan_document["public_source_sha256"],
         n3_package_dir=n3_package_dir, raw_package_dir=raw_package_dir,
         question_policies=policies, n4_package_dir=n4_package_dir,
     )
@@ -123,7 +125,8 @@ def _expected(
     _require(len(question_by_id) == len(questions), "question IDs repeat")
 
     routes: list[dict[str, Any]] = []
-    for round_row in _rows(plan_dir / SCHEDULE):
+    schedule_name = TEN_ROUTE_SCHEDULE if ten_route else SCHEDULE
+    for round_row in _rows(plan_dir / schedule_name):
         question = question_by_id[round_row["question_id"]]
         object_id = question["object_id"]
         task_sha = question["public_task_sha256"]
@@ -132,19 +135,24 @@ def _expected(
                  "schedule question binding changed")
         for slot in round_row["route_slots"]:
             arm = slot["arm_id"]
-            trial_key = interleaved_trial_key(
-                plan["experiment_id"], question["question_id"], arm,
+            trial_key = (
+                ten_route_trial_key(
+                    plan_document["experiment_id"], question["question_id"],
+                    slot["design_id"], slot["repetition"],
+                ) if ten_route else interleaved_trial_key(
+                    plan_document["experiment_id"], question["question_id"],
+                    arm,
+                )
             )
             if arm == "R":
                 source = raw[object_id]
                 required = (("N3", "raw_video", source),)
             elif arm == "I":
                 source = selected[(object_id, task_sha)]
-                required = (
-                    ("N3", INDEXED_REPRESENTATION_ID, source),
-                    ("N4", "multimodal_digest",
-                     derived[(object_id, "multimodal_digest")]),
-                )
+                required = (("N3", INDEXED_REPRESENTATION_ID, source),)
+                if not ten_route:
+                    required += (("N4", "multimodal_digest",
+                                  derived[(object_id, "multimodal_digest")]),)
             else:
                 required = tuple(
                     ("N4", representation, derived[(object_id, representation)])
@@ -162,7 +170,7 @@ def _expected(
                     "artifact_size_bytes": artifact["artifact_size_bytes"],
                     "plan_id": access[key],
                 })
-            routes.append({
+            route = {
                 "ordinal": round_row["ordinal"],
                 "question_id": question["question_id"],
                 "object_id": object_id,
@@ -173,21 +181,41 @@ def _expected(
                 "run_id": slot["run_id"],
                 "cache_episode_id": slot["cache_episode_id"],
                 "inputs": inputs,
-            })
-    _require(len(routes) == plan["route_count"],
+            }
+            if ten_route:
+                route.update({
+                    "design_id": slot["design_id"],
+                    "executor_node_id": slot["executor_node_id"],
+                    "repetition": slot["repetition"],
+                    "cache_expectation": slot["cache_expectation"],
+                    "order_index": round_row["ordinal"] * 10
+                    + len(routes) % 10,
+                })
+            routes.append(route)
+    expected_routes = (plan["route_observation_count"] if ten_route
+                       else plan["route_count"])
+    _require(len(routes) == expected_routes,
              "route binding count differs from the plan")
+    expected_coverage = ({arm: 2 * len(questions) for arm in
+                          ("R", "I", "D")}
+                         | {"DC": 4 * len(questions)}) if ten_route else {
+                             arm: len(questions) for arm in ("R", "D", "DC", "I")
+                         }
     _require(Counter(row["arm_id"] for row in routes)
-             == {arm: len(questions) for arm in ("R", "D", "DC", "I")},
-             "four-arm route coverage changed")
+             == expected_coverage, "route coverage changed")
     _require(len({row["trial_key"] for row in routes}) == len(routes)
              and len({row["run_id"] for row in routes}) == len(routes),
              "route or run identity repeats")
+    expected_bindings = (16 if ten_route else 7) * len(questions)
     _require(sum(len(row["inputs"]) for row in routes)
-             == len(access) == 7 * len(questions),
+             == len(access) == expected_bindings,
              "exact Data Agent binding count changed")
     manifest = {
-        "schema_version": SCHEMA,
-        "status": "FROZEN_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED",
+        "schema_version": ("pathfinder.ten-route-multiq-route-input-bindings/"
+                           "v1alpha1" if ten_route else SCHEMA),
+        "status": ("FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED"
+                   if ten_route else
+                   "FROZEN_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED"),
         "plan_sha256": plan["plan_sha256"],
         "n1_public_commitment_sha256": commitment["commitment_sha256"],
         "n3_package_manifest_sha256": _source_sha(n3_package_dir, N3_MANIFEST),
@@ -203,6 +231,8 @@ def _expected(
     }
     manifest["routes_sha256"] = _sha(b"".join(_canonical(row) + b"\n"
                                            for row in routes))
+    if ten_route:
+        manifest["plan_schema_version"] = TEN_ROUTE_PLAN_SCHEMA
     manifest["manifest_sha256"] = _sha(_canonical(manifest))
     return manifest, routes
 
@@ -253,7 +283,10 @@ def verify_interleaved_route_bindings(
                  _canonical(row) + b"\n" for row in routes),
              "route input bindings differ from verified sources")
     return {
-        "status": "VERIFIED_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED",
+        "status": ("VERIFIED_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED"
+                   if manifest.get("status")
+                   == "FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED"
+                   else "VERIFIED_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED"),
         "route_count": len(routes),
         "question_count": manifest["question_count"],
         "data_agent_binding_count": manifest["data_agent_binding_count"],

@@ -31,6 +31,13 @@ from pathfinder.simulator.full_flow_matrix_runner import _assert_public_evidence
 from pathfinder.rsi_exam.interleaved_multiq_plan import (
     verify_interleaved_plan,
 )
+from pathfinder.rsi_exam.ten_route_multiq_plan import (
+    MANIFEST as TEN_PLAN_MANIFEST,
+    SCHEDULE as TEN_PLAN_SCHEDULE,
+    SCHEMA as TEN_PLAN_SCHEMA,
+    load_verified_multiq_plan,
+    ten_route_trial_key,
+)
 from pathfinder.simulator.interleaved_multiq_route_bindings import (
     freeze_interleaved_route_bindings,
     verify_interleaved_route_bindings,
@@ -46,6 +53,7 @@ from pathfinder.simulator.interleaved_multiq_runtime_admission import (
 
 
 SCHEMA = "pathfinder.interleaved-batch-config/v1"
+TEN_MULTIQ_SCHEMA = "pathfinder.ten-route-multiq-batch-config/v1"
 SOURCE_KEYS = frozenset({
     "trial_dag_dir", "binding_dir", "plan_dir", "n1_public_commitment_dir",
     "n2_index_package_dir", "n3_package_dir", "raw_package_dir",
@@ -58,6 +66,9 @@ CONFIG_KEYS = frozenset({
     "task_timeout_seconds", "expected_plan_sha256",
     "expected_question_count", "expected_route_count", "baseline_spec_dir",
 })
+TEN_MULTIQ_CONFIG_KEYS = (
+    CONFIG_KEYS - {"coordinator_base_url"} | {"coordinator_base_urls"}
+)
 
 
 def _canonical(value: object) -> bytes:
@@ -103,6 +114,24 @@ def _validate_config(config: dict) -> dict:
     ):
         from experiments.ten_route_batch import validate_config
         return validate_config(config)
+    if isinstance(config, dict) and config.get("schema_version") == (
+        TEN_MULTIQ_SCHEMA
+    ):
+        if set(config) != TEN_MULTIQ_CONFIG_KEYS:
+            raise ValueError("ten-route multi-question config keys differ")
+        from pathfinder.simulator.interleaved_multiq_runtime_admission import (
+            _ten_route_origins,
+        )
+        origins = _ten_route_origins(config["coordinator_base_urls"])
+        old_shape = dict(config)
+        old_shape["schema_version"] = SCHEMA
+        old_shape["coordinator_base_url"] = origins["N7"]
+        del old_shape["coordinator_base_urls"]
+        _validate_config(old_shape)
+        if (config["expected_question_count"] != 6
+                or config["expected_route_count"] != 60):
+            raise ValueError("ten-route multi-question cardinality differs")
+        return config
     if not isinstance(config, dict) or set(config) != CONFIG_KEYS:
         raise ValueError("batch configuration keys differ")
     if config["schema_version"] != SCHEMA:
@@ -202,9 +231,10 @@ def _baseline(root: Path, relative: str | None,
 def freeze_inputs(config: dict, artifact_root: Path) -> dict:
     """Freeze route bindings, DAGs, and admission from prepared inputs."""
 
-    if config["schema_version"] != SCHEMA:
+    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
         from experiments.ten_route_batch import freeze_inputs as freeze_ten
         return freeze_ten(config, artifact_root)
+    ten_multiq = config["schema_version"] == TEN_MULTIQ_SCHEMA
     root = artifact_root.resolve()
     sources = {
         key: _path(root, value)
@@ -217,17 +247,24 @@ def freeze_inputs(config: dict, artifact_root: Path) -> dict:
     if any(path.exists() for path in targets.values()):
         raise ValueError("downstream freeze target already exists")
     plan_dir = sources["plan_dir"]
-    plan = _read(plan_dir / "interleaved-plan.json")
-    questions = _rows(plan_dir / "public-questions.jsonl")
-    verified_plan = verify_interleaved_plan(
-        plan_dir, questions,
-        public_source_sha256=plan["public_source_sha256"],
-    )
+    if ten_multiq:
+        plan, questions, verified_plan = load_verified_multiq_plan(plan_dir)
+        if plan["schema_version"] != TEN_PLAN_SCHEMA:
+            raise ValueError("batch and public plan profiles differ")
+    else:
+        plan = _read(plan_dir / "interleaved-plan.json")
+        questions = _rows(plan_dir / "public-questions.jsonl")
+        verified_plan = verify_interleaved_plan(
+            plan_dir, questions,
+            public_source_sha256=plan["public_source_sha256"],
+        )
+    route_count = (plan["route_observation_count"] if ten_multiq
+                   else plan["route_count"])
     if (
         verified_plan["plan_sha256"] != config["expected_plan_sha256"]
         or verified_plan["question_count"]
         != config["expected_question_count"]
-        or verified_plan["route_count"] != config["expected_route_count"]
+        or route_count != config["expected_route_count"]
     ):
         raise ValueError("prepared plan does not match frozen configuration")
     binding_sources = {
@@ -240,7 +277,7 @@ def freeze_inputs(config: dict, artifact_root: Path) -> dict:
     )
     if bound != verify_interleaved_route_bindings(
         targets["binding_dir"], **binding_sources,
-    ) or bound["route_count"] != plan["route_count"]:
+    ) or bound["route_count"] != route_count:
         raise ValueError("frozen route binding verification differs")
     dag_sources = {
         **binding_sources, "binding_dir": targets["binding_dir"],
@@ -250,23 +287,28 @@ def freeze_inputs(config: dict, artifact_root: Path) -> dict:
     )
     if dags != verify_interleaved_trial_dags(
         targets["trial_dag_dir"], **dag_sources,
-    ) or dags["trial_count"] != plan["route_count"]:
+    ) or dags["trial_count"] != route_count:
         raise ValueError("frozen trial DAG verification differs")
     admission_sources = {
         **dag_sources,
         "trial_dag_dir": targets["trial_dag_dir"],
         "n2_index_package_dir": sources["n2_index_package_dir"],
-        "coordinator_base_url": config["coordinator_base_url"],
+        ("coordinator_base_urls" if ten_multiq
+         else "coordinator_base_url"): (
+            config["coordinator_base_urls"] if ten_multiq
+            else config["coordinator_base_url"]
+        ),
     }
     admitted = freeze_interleaved_runtime_admission(
         output_dir=targets["admission_dir"], **admission_sources,
     )
     if admitted != verify_interleaved_runtime_admission(
         targets["admission_dir"], **admission_sources,
-    ) or admitted["trial_count"] != plan["route_count"]:
+    ) or admitted["trial_count"] != route_count:
         raise ValueError("frozen admission verification differs")
     return {
-        "status": "FROZEN_INTERLEAVED_BATCH_INPUTS",
+        "status": ("FROZEN_TEN_ROUTE_MULTIQ_BATCH_INPUTS" if ten_multiq
+                   else "FROZEN_INTERLEAVED_BATCH_INPUTS"),
         "question_count": plan["question_count"],
         "route_count": admitted["trial_count"],
         "admission_sha256": admitted["admission_sha256"],
@@ -274,9 +316,10 @@ def freeze_inputs(config: dict, artifact_root: Path) -> dict:
 
 
 def load_inputs(config: dict, artifact_root: Path) -> dict:
-    if config["schema_version"] != SCHEMA:
+    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
         from experiments.ten_route_batch import load_inputs as load_ten
         return load_ten(config, artifact_root)
+    ten_multiq = config["schema_version"] == TEN_MULTIQ_SCHEMA
     root = artifact_root.resolve()
     sources = {
         key: _path(root, value)
@@ -285,22 +328,37 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
     admission = _path(root, config["admission_dir"])
     report = verify_interleaved_runtime_admission(
         admission, **sources,
-        coordinator_base_url=config["coordinator_base_url"],
+        **({"coordinator_base_urls": config["coordinator_base_urls"]}
+           if ten_multiq else
+           {"coordinator_base_url": config["coordinator_base_url"]}),
     )
-    if report["status"] != (
-        "VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED"
-    ):
+    required_status = (
+        "VERIFIED_TEN_ROUTE_MULTIQ_ADMISSION_NOT_DEPLOYED" if ten_multiq
+        else "VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED"
+    )
+    if report["status"] != required_status:
         raise ValueError("admission source-bound verification failed")
-    plan = _read(sources["plan_dir"] / "interleaved-plan.json")
+    plan, questions, plan_report = load_verified_multiq_plan(
+        sources["plan_dir"]
+    )
+    if ten_multiq != (plan["schema_version"] == TEN_PLAN_SCHEMA):
+        raise ValueError("batch and public plan profiles differ")
+    route_count = (plan["route_observation_count"] if ten_multiq
+                   else plan["route_count"])
     if (
         plan.get("plan_sha256") != config["expected_plan_sha256"]
         or plan.get("question_count") != config["expected_question_count"]
-        or plan.get("route_count") != config["expected_route_count"]
-        or report["trial_count"] != plan["route_count"]
-        or report["index_query_plan_count"] != plan["question_count"]
+        or plan_report["plan_sha256"] != plan["plan_sha256"]
+        or route_count != config["expected_route_count"]
+        or report["trial_count"] != route_count
+        or report["index_query_plan_count"]
+        != (2 if ten_multiq else 1) * plan["question_count"]
+        or (ten_multiq and report["data_agent_plan_binding_count"]
+            != 16 * plan["question_count"])
+        or (ten_multiq and report["cache_episode_binding_count"]
+            != 4 * plan["question_count"])
     ):
         raise ValueError("frozen plan or admission cardinality differs")
-    questions = _rows(sources["plan_dir"] / "public-questions.jsonl")
     trials = sorted(
         _rows(admission / "admitted-trials.jsonl"),
         key=lambda row: row["order_index"],
@@ -310,9 +368,18 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
     episodes = _rows(admission / "cache-episode-bindings.jsonl")
     route_by_key = {row["trial_key"]: row for row in routes}
     episode_by_key = {row["trial_key"]: row for row in episodes}
-    arms = tuple(plan["arm_ids"])
+    arms = tuple(("R", "I", "D", "DC") if ten_multiq
+                 else plan["arm_ids"])
     question_ids = {row["question_id"] for row in questions}
-    pairs = Counter((row["workload_id"], row["design_id"]) for row in trials)
+    pairs = Counter((row["workload_id"], row["design_id"],
+                     row.get("repetition", 0)) for row in trials)
+    coverage = (
+        Counter({(q, f"D{i}", repetition): 1
+                 for q in question_ids for i in range(8)
+                 for repetition in ((0, 1) if i in (3, 7) else (0,))})
+        if ten_multiq else
+        Counter({(q, arm, 0): 1 for q in question_ids for arm in arms})
+    )
     if (
         len(questions) != plan["question_count"]
         or len(question_ids) != len(questions)
@@ -321,9 +388,8 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
         or len(route_by_key) != len(trials)
         or len(episode_by_key) != report["cache_episode_binding_count"]
         or len(set(arms)) != len(arms)
-        or len(trials) != len(questions) * len(arms)
-        or pairs != Counter({(q, arm): 1 for q in question_ids
-                            for arm in arms})
+        or len(trials) != len(questions) * (10 if ten_multiq else len(arms))
+        or pairs != coverage
         or [row["order_index"] for row in trials] != list(range(len(trials)))
     ):
         raise ValueError("frozen trials do not cover each question and arm once")
@@ -334,11 +400,12 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
         if (
             trial["worker_alias"] != config["worker_alias"]
             or trial["route_coordinator_binding"]["base_url"]
-            != config["coordinator_base_url"]
+            != (config["coordinator_base_urls"][trial["executor_node_id"]]
+                if ten_multiq else config["coordinator_base_url"])
             or route["trial_key"] != key
         ):
             raise ValueError("trial, route, worker, or origin binding differs")
-        if trial["design_id"] == "DC":
+        if trial["route_family"] == "local-cache-derived":
             if episode is None or episode["run_id"] != route["run_id"]:
                 raise ValueError("DC cache episode binding differs")
         elif episode is not None:
@@ -348,8 +415,12 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
         report["admission_sha256"], plan["plan_sha256"],
     )
     trials = schedule_trials(
-        trials, _rows(sources["plan_dir"] / "interleaved-schedule.jsonl"),
+        trials,
+        _rows(sources["plan_dir"] /
+              (TEN_PLAN_SCHEDULE if ten_multiq
+               else "interleaved-schedule.jsonl")),
         route_by_key,
+        experiment_id=plan["experiment_id"] if ten_multiq else None,
     )
     return {
         "report": report, "plan": plan, "trials": trials,
@@ -359,12 +430,45 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
 
 
 def schedule_trials(trials: list[dict], schedule: list[dict],
-                    route_by_key: dict) -> list[dict]:
+                    route_by_key: dict, *,
+                    experiment_id: str | None = None) -> list[dict]:
     """Honor frozen route-slot order without changing admitted requests.
 
     Historical DAG order_index values name a canonical layout, not the
     counterbalanced execution order. Slot run IDs bind the latter exactly.
     """
+    if experiment_id is not None:
+        by_key = {t["trial_key"]: t for t in trials}
+        if len(by_key) != len(trials):
+            raise ValueError("admitted ten-route trial identity repeats")
+        ordered = []
+        for ordinal, question in enumerate(schedule):
+            if question["ordinal"] != ordinal or len(
+                question["route_slots"]
+            ) != 10:
+                raise ValueError("frozen ten-route question order differs")
+            for slot in question["route_slots"]:
+                key = ten_route_trial_key(
+                    experiment_id, question["question_id"],
+                    slot["design_id"], slot["repetition"],
+                )
+                trial = by_key.get(key)
+                route = route_by_key.get(key)
+                if (trial is None or route is None
+                        or trial["executor_node_id"]
+                        != slot["executor_node_id"]
+                        or trial["design_id"] != slot["design_id"]
+                        or route["run_id"] != slot["run_id"]
+                        or route["object_id"] != question["object_id"]
+                        or route["cache_episode_id"]
+                        != slot["cache_episode_id"]):
+                    raise ValueError("ten-route slot identity differs")
+                ordered.append(trial)
+        if len(ordered) != len(trials) or {
+            row["trial_key"] for row in ordered
+        } != set(by_key):
+            raise ValueError("ten-route schedule omits an admitted trial")
+        return ordered
     by_pair = {(t["workload_id"], t["design_id"]): t for t in trials}
     if len(by_pair) != len(trials):
         raise ValueError("admitted question/arm pair repeats")
@@ -550,7 +654,7 @@ def run(config: dict, config_sha: str, context: dict,
         failure_diagnosis: Path | None = None) -> dict:
     if (resume_from is None) != (failure_diagnosis is None):
         raise ValueError("continuation needs both parent and diagnosis")
-    if config["schema_version"] != SCHEMA:
+    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
         if resume_from is not None:
             raise ValueError("continuation is only supported for interleaved batches")
         from experiments.ten_route_batch import run as run_ten
@@ -682,7 +786,7 @@ def _timestamp(value: object) -> datetime:
 
 def verify_output(config: dict, config_sha: str, context: dict,
                   output_dir: Path, *, seal: bool = False) -> dict:
-    if config["schema_version"] != SCHEMA:
+    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
         from experiments.ten_route_batch import verify_output as verify_ten
         return verify_ten(config, context, output_dir, seal=seal)
     root = output_dir.resolve()
@@ -766,8 +870,10 @@ def verify_output(config: dict, config_sha: str, context: dict,
             raise ValueError("batch end precedes start")
         prior_end = batch_start
     stages = {row["stage_key"]: row for row in context["stages"]}
-    success = {arm: {True: 0, False: 0}
-               for arm in context["plan"]["arm_ids"]}
+    ten_multiq = config["schema_version"] == TEN_MULTIQ_SCHEMA
+    designs = (tuple(f"D{i}" for i in range(8)) if ten_multiq
+               else tuple(context["plan"]["arm_ids"]))
+    success = {arm: {True: 0, False: 0} for arm in designs}
     unavailable = {arm: 0 for arm in success}
     execution_ids: set[str] = set()
     flowmesh_ids: set[str] = set()
@@ -852,6 +958,7 @@ def verify_output(config: dict, config_sha: str, context: dict,
         success[trial["design_id"]][result["task_success"]] += 1
     if any(sum(values.values()) + unavailable[arm]
            != context["plan"]["question_count"]
+           * (2 if ten_multiq and arm in {"D3", "D7"} else 1)
            for arm, values in success.items()):
         raise ValueError("per-arm question coverage differs")
     checksums = "".join(

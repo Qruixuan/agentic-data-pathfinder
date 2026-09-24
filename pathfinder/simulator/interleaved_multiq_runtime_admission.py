@@ -14,6 +14,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 from ..integrations.flowmesh.semantic_matrix_trial import (
     build_semantic_route_request,
@@ -21,7 +22,12 @@ from ..integrations.flowmesh.semantic_matrix_trial import (
 from ..rsi_exam.interleaved_multiq_plan import (
     QUESTIONS,
     interleaved_cache_episode_bindings,
-    verify_interleaved_plan,
+)
+from ..rsi_exam.ten_route_multiq_plan import (
+    SCHEMA as TEN_ROUTE_PLAN_SCHEMA,
+    SCHEDULE as TEN_ROUTE_SCHEDULE,
+    load_verified_multiq_plan,
+    ten_route_trial_key,
 )
 from .full_flow_route_adapters import FrozenIndexQueryPlan
 from .hidden_oracle_commitment import verify_n1_oracle_preselection_commitment
@@ -76,15 +82,42 @@ def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _ten_route_origins(value: Mapping[str, str] | None) -> dict[str, str]:
+    _require(isinstance(value, Mapping) and set(value) == {"N7", "N8"},
+             "both private coordinator origins are required")
+    result = {}
+    for node, host in (("N7", "10.70.0.17"), ("N8", "10.70.0.18")):
+        origin = value[node]
+        parsed = urlsplit(origin)
+        _require(parsed.scheme == "http" and parsed.hostname == host
+                 and parsed.port is not None
+                 and 0 < parsed.port <= 65535
+                 and not parsed.path and not parsed.query and not parsed.fragment
+                 and not parsed.username and not parsed.password,
+                 "coordinator origin is not its private service address")
+        result[node] = origin
+    return result
+
+
 def _expected(
     *, trial_dag_dir: Path, binding_dir: Path, plan_dir: Path,
     n1_public_commitment_dir: Path, n2_index_package_dir: Path,
     n3_package_dir: Path, raw_package_dir: Path, n4_package_dir: Path,
     query_dir: Path, video_index_dir: Path, preparation_dir: Path,
-    caption_dir: Path, coordinator_base_url: str,
+    caption_dir: Path, coordinator_base_url: str | None = None,
+    coordinator_base_urls: Mapping[str, str] | None = None,
 ) -> dict[str, bytes]:
-    _require(coordinator_base_url in _PILOT_COORDINATOR_ORIGINS,
-             "interleaved pilot must bind an approved N7 private origin")
+    plan_doc, public_questions, plan = load_verified_multiq_plan(plan_dir)
+    ten_route = plan_doc["schema_version"] == TEN_ROUTE_PLAN_SCHEMA
+    if ten_route:
+        origins = _ten_route_origins(coordinator_base_urls)
+        _require(coordinator_base_url is None,
+                 "ten-route admission cannot use one coordinator origin")
+    else:
+        _require(coordinator_base_url in _PILOT_COORDINATOR_ORIGINS
+                 and coordinator_base_urls is None,
+                 "interleaved pilot must bind an approved N7 private origin")
+        origins = {"N7": coordinator_base_url}
     dag_report = verify_interleaved_trial_dags(
         trial_dag_dir, binding_dir=binding_dir, plan_dir=plan_dir,
         n1_public_commitment_dir=n1_public_commitment_dir,
@@ -92,12 +125,6 @@ def _expected(
         n4_package_dir=n4_package_dir, query_dir=query_dir,
         video_index_dir=video_index_dir,
         preparation_dir=preparation_dir, caption_dir=caption_dir,
-    )
-    public_questions = _rows(plan_dir / QUESTIONS)
-    plan_doc = json.loads((plan_dir / "interleaved-plan.json").read_bytes())
-    plan = verify_interleaved_plan(
-        plan_dir, public_questions,
-        public_source_sha256=plan_doc["public_source_sha256"],
     )
     n1 = verify_n1_oracle_preselection_commitment(n1_public_commitment_dir)
     n1_doc = json.loads((n1_public_commitment_dir /
@@ -113,16 +140,32 @@ def _expected(
     routes = _rows(binding_dir / "route-inputs.jsonl")
     dag_trials = _rows(trial_dag_dir / "interleaved-trials.jsonl")
     stages = _rows(trial_dag_dir / "interleaved-stages.jsonl")
-    _require(len(routes) == len(dag_trials) == plan["route_count"],
+    expected_routes = (plan["route_observation_count"] if ten_route
+                       else plan["route_count"])
+    _require(len(routes) == len(dag_trials) == expected_routes,
              "route or DAG coverage differs from the plan")
     by_route = {row["trial_key"]: row for row in routes}
     by_stage = {row["stage_key"]: row for row in stages}
     _require(len(by_route) == len(routes) and len(by_stage) == len(stages),
              "route or stage identities repeat")
-    cache = interleaved_cache_episode_bindings(
-        plan_dir, public_questions,
-        public_source_sha256=plan["public_source_sha256"],
-    )
+    if ten_route:
+        cache = {}
+        for scheduled in _rows(plan_dir / TEN_ROUTE_SCHEDULE):
+            for slot in scheduled["route_slots"]:
+                if slot["arm_id"] != "DC":
+                    continue
+                trial_key = ten_route_trial_key(
+                    plan_doc["experiment_id"], scheduled["question_id"],
+                    slot["design_id"], slot["repetition"],
+                )
+                cache[slot["run_id"], trial_key] = slot["cache_episode_id"]
+        _require(len(cache) == 4 * len(public_questions),
+                 "ten-route cache episode coverage changed")
+    else:
+        cache = interleaved_cache_episode_bindings(
+            plan_dir, public_questions,
+            public_source_sha256=plan_doc["public_source_sha256"],
+        )
     admitted: list[dict[str, Any]] = []
     index_plans: list[dict[str, Any]] = []
     access_plans: list[dict[str, Any]] = []
@@ -132,7 +175,15 @@ def _expected(
         _require(
             trial["public_task_binding_sha256"] == route["public_task_sha256"]
             and trial["artifact_object_id"] == route["object_id"]
-            and trial["design_id"] == route["arm_id"],
+            and trial["design_id"] == (
+                route["design_id"] if ten_route else route["arm_id"]
+            )
+            and trial["executor_node_id"] == (
+                route["executor_node_id"] if ten_route else "N7"
+            )
+            and trial["repetition"] == (
+                route["repetition"] if ten_route else 0
+            ),
             "admission trial differs from its source-bound route",
         )
         promoted = {
@@ -140,8 +191,10 @@ def _expected(
             "required_runtime_adapter_ids": [],
             "flowmesh_submission_authorized": True,
             "route_coordinator_binding": {
-                "service_contract_id": "N7.execution-compute",
-                "base_url": coordinator_base_url,
+                "service_contract_id": (
+                    trial["executor_node_id"] + ".execution-compute"
+                ),
+                "base_url": origins[trial["executor_node_id"]],
                 "adapter_id": "contract-http-adapter-v1",
                 "credential_env_names": [
                     "PATHFINDER_FULL_FLOW_INGRESS_HMAC_SECRET"
@@ -168,7 +221,7 @@ def _expected(
             cache_episode_id=episode,
         )
         admitted.append(promoted)
-        if promoted["route_family"] == "indexed-derived":
+        if promoted["route_family"] in {"indexed-derived", "indexed-raw"}:
             query_id = "query-" + _sha(_canonical({
                 "domain": "pathfinder.visible-index-query-plan/v1",
                 "trial_key": trial["trial_key"],
@@ -201,10 +254,13 @@ def _expected(
                 "artifact_sha256": source["artifact_sha256"],
                 "artifact_size_bytes": source["artifact_size_bytes"],
             })
-    _require(len(admitted) == plan["route_count"]
-             and len(index_plans) == plan["question_count"]
-             and len(access_plans) == 7 * plan["question_count"]
-             and len(cache) == plan["question_count"],
+    _require(len(admitted) == expected_routes
+             and len(index_plans) == (2 if ten_route else 1)
+             * plan["question_count"]
+             and len(access_plans) == (16 if ten_route else 7)
+             * plan["question_count"]
+             and len(cache) == (4 if ten_route else 1)
+             * plan["question_count"],
              "runtime plan or cache coverage changed")
     admitted.sort(key=lambda row: row["order_index"])
     index_plans.sort(key=lambda row: row["trial_key"])
@@ -224,8 +280,11 @@ def _expected(
         CACHE_EPISODES: _jsonl(cache_rows),
     }
     manifest = {
-        "schema_version": SCHEMA,
-        "status": "FROZEN_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED",
+        "schema_version": ("pathfinder.ten-route-multiq-runtime-admission/"
+                           "v1alpha1" if ten_route else SCHEMA),
+        "status": ("FROZEN_TEN_ROUTE_MULTIQ_ADMISSION_NOT_DEPLOYED"
+                   if ten_route else
+                   "FROZEN_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED"),
         "compiler_source_sha256": _sha(Path(__file__).read_bytes()
                                         .replace(b"\r\n", b"\n")),
         "plan_sha256": plan["plan_sha256"],
@@ -235,8 +294,6 @@ def _expected(
         "public_task_set_sha256": n1_doc["public_task_set_sha256"],
         "n2_index_id": n2["index_id"],
         "n2_index_sha256": n2["index_sha256"],
-        "coordinator_node_id": "N7",
-        "coordinator_base_url": coordinator_base_url,
         "trial_count": len(admitted),
         "stage_count": len(stages),
         "index_query_plan_count": len(index_plans),
@@ -251,6 +308,12 @@ def _expected(
         "credentials_recorded": False,
         "eligible_for_scientific_claims": False,
     }
+    if ten_route:
+        manifest["coordinator_base_urls"] = origins
+        manifest["coordinator_node_ids"] = ["N7", "N8"]
+    else:
+        manifest["coordinator_node_id"] = "N7"
+        manifest["coordinator_base_url"] = coordinator_base_url
     manifest["admission_sha256"] = _sha(_canonical(manifest))
     return {MANIFEST: _pretty(manifest), **documents}
 
@@ -260,11 +323,22 @@ def _checksums(documents: Mapping[str, bytes]) -> bytes:
                     for name in sorted(documents))
 
 
+def _source_paths(sources: Mapping[str, Any]) -> dict[str, Any]:
+    paths: dict[str, Any] = {}
+    for key, value in sources.items():
+        if key == "coordinator_base_url":
+            paths[key] = str(value)
+        elif key == "coordinator_base_urls":
+            paths[key] = dict(value)
+        else:
+            paths[key] = Path(value).resolve()
+    return paths
+
+
 def freeze_interleaved_runtime_admission(
     *, output_dir: str | Path, **sources: str | Path,
 ) -> dict[str, Any]:
-    paths = {key: (str(value) if key == "coordinator_base_url"
-                   else Path(value).resolve()) for key, value in sources.items()}
+    paths = _source_paths(sources)
     documents = _expected(**paths)
     target = Path(output_dir).resolve()
     _require(not target.exists(), "runtime admission output already exists")
@@ -290,8 +364,7 @@ def verify_interleaved_runtime_admission(
     _require(root.is_dir() and {path.name for path in root.iterdir()}
              == set(_CONTENT) | {CHECKSUMS},
              "runtime admission file set changed")
-    paths = {key: (str(value) if key == "coordinator_base_url"
-                   else Path(value).resolve()) for key, value in sources.items()}
+    paths = _source_paths(sources)
     documents = _expected(**paths)
     _require(all((root / name).read_bytes() == payload
                  for name, payload in documents.items())
@@ -299,7 +372,10 @@ def verify_interleaved_runtime_admission(
              "runtime admission differs from its verified source inputs")
     manifest = json.loads(documents[MANIFEST])
     return {
-        "status": "VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED",
+        "status": ("VERIFIED_TEN_ROUTE_MULTIQ_ADMISSION_NOT_DEPLOYED"
+                   if manifest.get("status")
+                   == "FROZEN_TEN_ROUTE_MULTIQ_ADMISSION_NOT_DEPLOYED"
+                   else "VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED"),
         "admission_sha256": manifest["admission_sha256"],
         "trial_count": manifest["trial_count"],
         "stage_count": manifest["stage_count"],

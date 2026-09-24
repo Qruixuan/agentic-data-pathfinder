@@ -12,7 +12,12 @@ from ..rsi_exam.interleaved_multiq_plan import (
     QUESTIONS,
     SCHEDULE,
     interleaved_trial_key,
-    verify_interleaved_plan,
+)
+from ..rsi_exam.ten_route_multiq_plan import (
+    SCHEMA as TEN_ROUTE_SCHEMA,
+    SCHEDULE as TEN_ROUTE_SCHEDULE,
+    load_verified_multiq_plan,
+    ten_route_trial_key,
 )
 from ..video_prep import sample_video
 from .full_flow_semantic_route_runtime import (
@@ -116,7 +121,7 @@ def interleaved_data_agent_plan_bindings(
     n4_package_dir: str | Path,
     sampler: Any = sample_video,
 ) -> dict[tuple[str, str, str, str], str]:
-    """Rebuild all 24 per-trial Data Agent plan bindings from frozen inputs.
+    """Rebuild exact per-trial Data Agent plans from a verified multiq plan.
 
     N3's selected bundle is addressed by both video and public task digest;
     an arm ID or video ID alone is never sufficient. N4's existing D2/D3
@@ -124,10 +129,12 @@ def interleaved_data_agent_plan_bindings(
     """
 
     plan_root = Path(plan_dir).resolve()
-    plan = verify_interleaved_plan(
+    manifest, _, plan = load_verified_multiq_plan(
         plan_root, public_questions,
-        public_source_sha256=public_source_sha256,
     )
+    if manifest["public_source_sha256"] != public_source_sha256:
+        raise MultiQuestionSelectionError("public source digest differs")
+    ten_route = manifest["schema_version"] == TEN_ROUTE_SCHEMA
     n3_root = Path(n3_package_dir).resolve()
     n3 = MultiQuestionExactSelectionCatalog(
         n3_root, raw_package_dir=raw_package_dir,
@@ -178,7 +185,8 @@ def interleaved_data_agent_plan_bindings(
         raise MultiQuestionSelectionError("N4 artifact identities repeat")
     schedule = [
         json.loads(line) for line in
-        (plan_root / SCHEDULE).read_text(encoding="utf-8").splitlines()
+        (plan_root / (TEN_ROUTE_SCHEDULE if ten_route else SCHEDULE))
+        .read_text(encoding="utf-8").splitlines()
     ]
     bindings: dict[tuple[str, str, str, str], str] = {}
     for row in schedule:
@@ -190,13 +198,22 @@ def interleaved_data_agent_plan_bindings(
             arm = slot["arm_id"]
             if arm not in ARMS:
                 raise MultiQuestionSelectionError("route arm is invalid")
-            trial_key = interleaved_trial_key(
-                plan["experiment_id"], question["question_id"], arm,
+            trial_key = (
+                ten_route_trial_key(
+                    manifest["experiment_id"], question["question_id"],
+                    slot["design_id"], slot["repetition"],
+                ) if ten_route else interleaved_trial_key(
+                    manifest["experiment_id"], question["question_id"], arm,
+                )
             )
             if arm == "R":
                 bindings[(trial_key, "N3", object_id, "raw_video")] = (
                     n3_plan_id
                 )
+                continue
+            if arm == "I" and ten_route:
+                bindings[(trial_key, "N3", object_id,
+                          INDEXED_REPRESENTATION_ID)] = n3_plan_id
                 continue
             n4_plan_id = _N4_PLAN_BY_ARM[arm]
             representations = (
@@ -218,10 +235,12 @@ def interleaved_data_agent_plan_bindings(
                     trial_key, "N3", object_id,
                     INDEXED_REPRESENTATION_ID,
                 )] = n3_plan_id
-    if len(bindings) != plan["route_count"] * 2 - len(questions):
-        # Per question: R=1, D=2, DC=2, I=2 -> seven bindings.
+    expected = (16 if ten_route else 7) * len(questions)
+    if len(bindings) != expected:
+        # New ten-slot profile: both nodes have R=1, I=1, D=2,
+        # and two DC repetitions of two entries (eight per node).
         raise MultiQuestionSelectionError(
-            "interleaved Data Agent plan binding count differs"
+            "multi-question Data Agent plan binding count differs"
         )
     return bindings
 

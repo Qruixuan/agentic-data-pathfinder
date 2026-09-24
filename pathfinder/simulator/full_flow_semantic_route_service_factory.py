@@ -39,6 +39,7 @@ from ..integrations.flowmesh.semantic_matrix_trial import (
     GenericSemanticRouteRequestHandler,
     validate_semantic_route_request,
 )
+from ..rsi_exam.ten_route_multiq_plan import load_verified_multiq_plan
 from .full_flow_cache import HttpFullFlowArtifactCacheClient
 from .full_flow_exact_range_catalog import ExactFullObjectRangeCatalog
 from .n3_indexed_data_plane import INDEXED_REPRESENTATION_ID
@@ -1004,6 +1005,11 @@ def _verify_interleaved_sources(
     document = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
                             "interleaved runtime admission")
     try:
+        origin_sources = (
+            {"coordinator_base_urls": document["coordinator_base_urls"]}
+            if "coordinator_base_urls" in document else
+            {"coordinator_base_url": document["coordinator_base_url"]}
+        )
         report = verify_interleaved_runtime_admission(
             root,
             trial_dag_dir=sources.interleaved_trial_dag_dir,
@@ -1018,16 +1024,13 @@ def _verify_interleaved_sources(
             video_index_dir=sources.interleaved_video_index_dir,
             preparation_dir=sources.interleaved_preparation_dir,
             caption_dir=sources.interleaved_caption_dir,
-            coordinator_base_url=document["coordinator_base_url"],
+            **origin_sources,
         )
         commitment = verify_n1_oracle_preselection_commitment(
             sources.n1_public_commitment_dir,
         )
         index = verify_n2_index_package(sources.n2_index_package_dir)
-        plan_doc = _strict_json(plan_root / "interleaved-plan.json",
-                                "interleaved plan")
-        questions = _strict_jsonl(plan_root / "public-questions.jsonl",
-                                  "interleaved public questions")
+        plan_doc, questions, _ = load_verified_multiq_plan(plan_root)
         policies = derive_n3_multiq_question_policies(
             plan_dir=plan_root, public_questions=questions,
             public_source_sha256=plan_doc["public_source_sha256"],
@@ -1369,9 +1372,6 @@ def assemble_full_flow_semantic_route_service(
     """
 
     interleaved = sources.interleaved_runtime_admission_dir is not None
-    if interleaved:
-        _require(runtime.logical_node_id == "N7",
-                 "first interleaved pilot is pinned to N7")
     (
         admission_report,
         core_reports,
@@ -1380,6 +1380,10 @@ def assemble_full_flow_semantic_route_service(
     ) = (_verify_interleaved_sources(sources) if interleaved
          else _verify_sources(sources))
     admission = admission_report["document"]
+    if interleaved:
+        admitted_nodes = admission.get("coordinator_node_ids", ["N7"])
+        _require(runtime.logical_node_id in admitted_nodes,
+                 "route node is absent from the verified admission")
     index_report = core_reports["index"]
     oracle_report = core_reports["oracle"]
     if not interleaved:
@@ -1567,9 +1571,14 @@ def assemble_full_flow_semantic_route_service(
         bound_trials=trials,
         bound_stages=stages,
         bound_cache_episodes=(
-            _interleaved_cache_episodes(
-                sources.interleaved_runtime_admission_dir
-            ) if interleaved else None
+            {key: episode for key, episode in
+             _interleaved_cache_episodes(
+                 sources.interleaved_runtime_admission_dir
+             ).items() if next(
+                 trial for trial in trials
+                 if trial["trial_key"] == key[1]
+             )["executor_node_id"] == runtime.logical_node_id}
+            if interleaved else None
         ),
     )
 
@@ -1581,8 +1590,9 @@ def assemble_full_flow_semantic_route_service(
     )
     _require(
         admission_report.get("status")
-        == ("VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED"
-            if interleaved else "VERIFIED_PUBLIC_LOCAL_RUNTIME_INPUTS")
+        in ({"VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED",
+             "VERIFIED_TEN_ROUTE_MULTIQ_ADMISSION_NOT_DEPLOYED"}
+            if interleaved else {"VERIFIED_PUBLIC_LOCAL_RUNTIME_INPUTS"})
         and admission.get("trial_template_flowmesh_submission_authorized")
         is True
         and authorized,

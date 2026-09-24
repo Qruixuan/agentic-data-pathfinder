@@ -84,9 +84,16 @@ def _identity(
     }
 
 
-def _stage_specs(arm: str) -> list[tuple[str, str, str | None, list[str],
-                                        list[str], dict[str, Any] | None]]:
+def _stage_specs(arm: str, *, executor_node_id: str = "N7",
+                 indexed_raw: bool = False) -> list[
+                     tuple[str, str, str | None, list[str], list[str],
+                           dict[str, Any] | None]
+                 ]:
     """Return named topological edges, with cache branches explicit."""
+
+    _require(executor_node_id in {"N7", "N8"},
+             "route executor must be N7 or N8")
+    node = executor_node_id
 
     specs = []
 
@@ -99,35 +106,38 @@ def _stage_specs(arm: str) -> list[tuple[str, str, str | None, list[str],
     if arm == "R":
         add("read-raw", "access-raw-artifact", "raw_video", ["N3"],
             ["schedule"])
-        add("transfer-raw", "transfer-bytes", "raw_video", ["N3", "N7"],
+        add("transfer-raw", "transfer-bytes", "raw_video", ["N3", node],
             ["read-raw"])
-        add("decode", "prepare-model-input", None, ["N7"],
+        add("decode", "prepare-model-input", None, [node],
             ["transfer-raw"])
-        add("send-model-input", "transfer-bytes", None, ["N7", "N6"],
+        add("send-model-input", "transfer-bytes", None, [node, "N6"],
             ["decode"])
         infer_deps = ["send-model-input"]
     elif arm == "I":
         add("query-index", "query-index", None, ["N2"], ["schedule"])
-        add("return-index", "transfer-bytes", None, ["N2", "N7"],
+        add("return-index", "transfer-bytes", None, ["N2", node],
             ["query-index"])
         add("read-selected", "access-raw-artifact", "raw_video", ["N3"],
             ["return-index"])
         add("transfer-selected", "transfer-bytes", "raw_video",
-            ["N3", "N7"], ["read-selected"])
-        add("read-digest", "access-derived-artifact", "multimodal_digest",
-            ["N4"], ["schedule"])
-        add("transfer-digest", "transfer-bytes", "multimodal_digest",
-            ["N4", "N7"], ["read-digest"])
-        infer_deps = ["transfer-selected", "transfer-digest"]
+            ["N3", node], ["read-selected"])
+        if indexed_raw:
+            infer_deps = ["transfer-selected"]
+        else:
+            add("read-digest", "access-derived-artifact", "multimodal_digest",
+                ["N4"], ["schedule"])
+            add("transfer-digest", "transfer-bytes", "multimodal_digest",
+                ["N4", node], ["read-digest"])
+            infer_deps = ["transfer-selected", "transfer-digest"]
     elif arm == "D":
         for rep, suffix in (("multimodal_digest", "digest"),
                             ("sampled_frame_bundle", "frames")):
             add(f"read-{suffix}", "access-derived-artifact", rep,
                 ["N4"], ["schedule"])
             add(f"transfer-{suffix}", "transfer-bytes", rep,
-                ["N4", "N7"], [f"read-{suffix}"])
+                ["N4", node], [f"read-{suffix}"])
             add(f"send-{suffix}", "transfer-bytes", rep,
-                ["N7", "N6"], [f"transfer-{suffix}"])
+                [node, "N6"], [f"transfer-{suffix}"])
         infer_deps = ["send-digest", "send-frames"]
     elif arm == "DC":
         for rep, suffix in (("multimodal_digest", "digest"),
@@ -136,18 +146,18 @@ def _stage_specs(arm: str) -> list[tuple[str, str, str | None, list[str],
             hit = {"cache_operation_id": lookup,
                    "cache_operation_key": lookup, "equals": "hit"}
             miss = {**hit, "equals": "miss"}
-            add(lookup, "lookup", rep, ["N7"], ["schedule"])
-            add(f"read-local-{suffix}", "read", rep, ["N7"], [lookup], hit)
+            add(lookup, "lookup", rep, [node], ["schedule"])
+            add(f"read-local-{suffix}", "read", rep, [node], [lookup], hit)
             add(f"read-remote-{suffix}", "access-derived-artifact", rep,
                 ["N4"], [lookup], miss)
             add(f"transfer-{suffix}", "transfer-bytes", rep,
-                ["N4", "N7"], [lookup, f"read-remote-{suffix}"], miss)
-            add(f"insert-{suffix}", "insert", rep, ["N7"],
+                ["N4", node], [lookup, f"read-remote-{suffix}"], miss)
+            add(f"insert-{suffix}", "insert", rep, [node],
                 [lookup, f"transfer-{suffix}"], miss)
             add(f"{suffix}-ready", "join-hit-or-miss-branch", None,
-                ["N7"], [f"read-local-{suffix}", f"insert-{suffix}"])
+                [node], [f"read-local-{suffix}", f"insert-{suffix}"])
             add(f"send-{suffix}", "transfer-bytes", rep,
-                ["N7", "N6"], [f"{suffix}-ready"])
+                [node, "N6"], [f"{suffix}-ready"])
         infer_deps = ["send-digest", "send-frames"]
     else:
         raise InterleavedTrialDagError("route arm is unsupported")
@@ -165,8 +175,10 @@ def build_interleaved_trial_dag(
     n3_catalog_version: str, n4_catalog_version: str,
     selected_policy: Mapping[str, Any] | None = None,
     worker_alias: str = "pathfinder_costaware_20260815a",
+    executor_node_id: str = "N7",
+    indexed_raw: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Build one N7 DAG and validate it against the actual route executor."""
+    """Build a source-bound DAG on N7 or N8, preserving old defaults."""
 
     arm = route["arm_id"]
     object_id = route["object_id"]
@@ -194,8 +206,9 @@ def build_interleaved_trial_dag(
         route_family = "raw"
         representations = ["raw_video"]
     elif arm == "I":
-        route_family = "indexed-derived"
-        representations = ["raw_video", "multimodal_digest"]
+        route_family = "indexed-raw" if indexed_raw else "indexed-derived"
+        representations = (["raw_video"] if indexed_raw else
+                           ["raw_video", "multimodal_digest"])
         _require(isinstance(selected_policy, Mapping),
                  "indexed arm lacks a question-bound N3 policy")
     else:
@@ -203,7 +216,8 @@ def build_interleaved_trial_dag(
                         else "remote-derived")
         representations = ["multimodal_digest", "sampled_frame_bundle"]
     trial_key = route["trial_key"]
-    specs = _stage_specs(arm)
+    specs = _stage_specs(arm, executor_node_id=executor_node_id,
+                         indexed_raw=indexed_raw)
     stages = []
     for index, (name, action, rep, nodes, deps, condition) in enumerate(specs):
         condition = None if condition is None else {
@@ -246,15 +260,17 @@ def build_interleaved_trial_dag(
     trial = {
         "schema_version": BOUND_TRIAL_SCHEMA_VERSION,
         "trial_key": trial_key,
-        "order_index": route["ordinal"] * 4
-        + ("R", "D", "DC", "I").index(arm),
+        "order_index": route.get(
+            "order_index", route["ordinal"] * 4
+            + ("R", "D", "DC", "I").index(arm),
+        ),
         "workload_id": question["question_id"],
         "workload_class": {"descriptive": "W1", "temporal": "W2",
                            "causal": "W3"}[question["stratum"]],
-        "design_id": arm,
-        "repetition": 0,
+        "design_id": route.get("design_id", arm),
+        "repetition": route.get("repetition", 0),
         "route_family": route_family,
-        "executor_node_id": "N7",
+        "executor_node_id": executor_node_id,
         "public_task_binding_sha256": public_task["task_binding_sha256"],
         "public_task_binding": public_task,
         "artifact_object_id": object_id,
@@ -289,8 +305,12 @@ def build_all_interleaved_trial_dags(
 
     root = Path(binding_dir)
     manifest = json.loads((root / "route-input-bindings.json").read_bytes())
-    _require(manifest["status"]
-             == "FROZEN_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED"
+    ten_route = (manifest["status"]
+                 == "FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED")
+    _require(manifest["status"] in {
+                 "FROZEN_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED",
+                 "FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED",
+             }
              and manifest["runtime_admission_created"] is False,
              "route binding is not a non-admitted frozen input")
     routes = [json.loads(line) for line in
@@ -326,6 +346,8 @@ def build_all_interleaved_trial_dags(
                                        question["public_task_sha256"])]
                              ["selection_policy"]
                              if route["arm_id"] == "I" else None),
+            executor_node_id=route.get("executor_node_id", "N7"),
+            indexed_raw=ten_route,
         )
         trials.append(trial)
         stages.extend(trial_stages)
@@ -353,8 +375,14 @@ def _package_contents(
     trial_bytes = _jsonl(trials)
     stage_bytes = _jsonl(stages)
     manifest = {
-        "schema_version": PACKAGE_SCHEMA,
-        "status": "FROZEN_INTERLEAVED_TRIAL_DAGS_NOT_ADMITTED",
+        "schema_version": ("pathfinder.ten-route-multiq-trial-dags/v1alpha1"
+                           if bound["status"]
+                           == "VERIFIED_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED"
+                           else PACKAGE_SCHEMA),
+        "status": ("FROZEN_TEN_ROUTE_MULTIQ_DAGS_NOT_ADMITTED"
+                   if bound["status"]
+                   == "VERIFIED_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED"
+                   else "FROZEN_INTERLEAVED_TRIAL_DAGS_NOT_ADMITTED"),
         "route_binding_manifest_sha256": bound["manifest_sha256"],
         "compiler_source_sha256": _sha(Path(__file__).read_bytes()
                                         .replace(b"\r\n", b"\n")),
@@ -423,7 +451,10 @@ def verify_interleaved_trial_dags(
     )
     manifest = json.loads(documents[PACKAGE_MANIFEST])
     return {
-        "status": "VERIFIED_INTERLEAVED_TRIAL_DAGS_NOT_ADMITTED",
+        "status": ("VERIFIED_TEN_ROUTE_MULTIQ_DAGS_NOT_ADMITTED"
+                   if manifest.get("status")
+                   == "FROZEN_TEN_ROUTE_MULTIQ_DAGS_NOT_ADMITTED"
+                   else "VERIFIED_INTERLEAVED_TRIAL_DAGS_NOT_ADMITTED"),
         "trial_count": manifest["trial_count"],
         "stage_count": manifest["stage_count"],
         "package_sha256": manifest["package_sha256"],

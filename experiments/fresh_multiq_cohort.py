@@ -33,7 +33,10 @@ def select(csv_path: Path, protocol: dict, media_raw: bytes | None = None) -> di
                 "official_csv_sha256", "excluded_object_ids",
                 "selection_rule"}
     media_sizes = None
-    if protocol.get("schema_version") == "pathfinder.fresh-multiq-selection/v2":
+    if protocol.get("schema_version") in {
+        "pathfinder.fresh-multiq-selection/v2",
+        "pathfinder.fresh-multiq-selection/v3",
+    }:
         required |= {"media_inventory_sha256", "max_direct_video_bytes"}
         if (media_raw is None or hashlib.sha256(media_raw).hexdigest()
                 != protocol.get("media_inventory_sha256")):
@@ -41,14 +44,21 @@ def select(csv_path: Path, protocol: dict, media_raw: bytes | None = None) -> di
         media_sizes = json.loads(media_raw)["objects"]
         if type(protocol["max_direct_video_bytes"]) is not int or protocol["max_direct_video_bytes"] <= 0:
             raise ValueError("direct video limit is invalid")
+    if protocol.get("schema_version") == "pathfinder.fresh-multiq-selection/v3":
+        required |= {"questions_per_video"}
     if (set(protocol) != required
             or protocol["schema_version"] not in {
                 "pathfinder.fresh-multiq-selection/v1",
-                "pathfinder.fresh-multiq-selection/v2"}
+                "pathfinder.fresh-multiq-selection/v2",
+                "pathfinder.fresh-multiq-selection/v3"}
             or protocol["strata"] != list(STRATA)
             or protocol["selection_rule"] != "sha256-seeded-public-fields-v1"
             or type(protocol["object_count"]) is not int
             or protocol["object_count"] < 2
+            or (protocol["schema_version"] == "pathfinder.fresh-multiq-selection/v3"
+                and (protocol["object_count"] != 3
+                     or type(protocol["questions_per_video"]) is not int
+                     or protocol["questions_per_video"] != 2))
             or not isinstance(protocol["seed"], str)
             or not protocol["seed"]):
         raise ValueError("selection protocol is invalid")
@@ -102,12 +112,24 @@ def select(csv_path: Path, protocol: dict, media_raw: bytes | None = None) -> di
     selected = sorted(eligible, key=lambda oid: (rank("video", oid), oid))[
         :protocol["object_count"]
     ]
-    questions = [
-        min(by_object[oid][stratum], key=lambda item: (
-            rank("question", item), item["question_id"],
+    if protocol["schema_version"] == "pathfinder.fresh-multiq-selection/v3":
+        omitted = sorted(STRATA, key=lambda stratum: (
+            rank("omitted-stratum", stratum), stratum,
         ))
-        for oid in selected for stratum in STRATA
-    ]
+        questions = [
+            min(by_object[oid][stratum], key=lambda item: (
+                rank("question", item), item["question_id"],
+            ))
+            for oid, missing in zip(selected, omitted)
+            for stratum in STRATA if stratum != missing
+        ]
+    else:
+        questions = [
+            min(by_object[oid][stratum], key=lambda item: (
+                rank("question", item), item["question_id"],
+            ))
+            for oid in selected for stratum in STRATA
+        ]
     return {
         "schema_version": "pathfinder.fresh-multiq-public-selection/v1",
         "protocol_sha256": hashlib.sha256(canonical(protocol)).hexdigest(),

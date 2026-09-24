@@ -83,6 +83,35 @@ class FreshCohortTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "inventory digest"):
             select(self.csv, self.protocol, b"{}")
 
+    def test_three_video_two_question_protocol_balances_strata(self):
+        media = canonical({"objects": {
+            "nextqa-val-" + str(1000000000 + i): {"bytes": 1_000_000}
+            for i in range(6)
+        }})
+        self.protocol.update({
+            "schema_version": "pathfinder.fresh-multiq-selection/v3",
+            "object_count": 3, "questions_per_video": 2,
+            "media_inventory_sha256": hashlib.sha256(media).hexdigest(),
+            "max_direct_video_bytes": 7_000_000,
+        })
+        selected = select(self.csv, self.protocol, media)
+        self.assertEqual(len(selected["tasks"]), 6)
+        self.assertEqual(len(selected["selected_object_ids"]), 3)
+        self.assertEqual(sorted(q["stratum"] for q in selected["tasks"]),
+                         sorted(["causal", "temporal", "descriptive"] * 2))
+        for oid in selected["selected_object_ids"]:
+            self.assertEqual(sum(q["object_id"] == oid
+                                 for q in selected["tasks"]), 2)
+        self.assertNotIn("SECRET", str(selected))
+        for row in self.rows:
+            row["answer"] = "DIFFERENT-HIDDEN"
+        self.write()
+        self.protocol["official_csv_sha256"] = hashlib.sha256(
+            self.csv.read_bytes()
+        ).hexdigest()
+        after = select(self.csv, self.protocol, media)
+        self.assertEqual(selected["tasks"], after["tasks"])
+
 
 if __name__ == "__main__":
     unittest.main()

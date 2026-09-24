@@ -11,7 +11,9 @@ import hashlib
 import json
 from pathlib import Path
 
-from experiments.multiq_prepare import measured, read, write
+from experiments.multiq_prepare import (
+    measured, read, verified_public_plan, write,
+)
 
 
 def rows(path):
@@ -39,8 +41,7 @@ def finalize(inputs: Path, paid: Path, output: Path, host: str):
         build_n2_index_package, verify_n2_index_package,
     )
 
-    plan = read(inputs / "plan/interleaved-plan.json")
-    questions = rows(inputs / "plan/public-questions.jsonl")
+    plan, questions = verified_public_plan(inputs / "plan")
     prep_root = inputs / "build/preparation"
     prep = verify_formal_temporal_index_preparation(prep_root)
     captions = verify_formal_temporal_caption_package(paid / "captions", prep_root)

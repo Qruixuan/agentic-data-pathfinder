@@ -22,7 +22,8 @@ ARCHIVE_URL = (
 )
 
 
-def _selection(root: Path) -> tuple[dict, str]:
+def _selection(root: Path, *, expected_objects: int = 2,
+               expected_questions: int = 6) -> tuple[dict, str]:
     raw = (root / "public-selection.json").read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     if (root / "SHA256SUMS").read_bytes() != (
@@ -30,7 +31,8 @@ def _selection(root: Path) -> tuple[dict, str]:
     ):
         raise ValueError("public selection checksum differs")
     doc = json.loads(raw)
-    if (len(doc["selected_object_ids"]) != 2 or len(doc["tasks"]) != 6
+    if (len(doc["selected_object_ids"]) != expected_objects
+            or len(doc["tasks"]) != expected_questions
             or doc["selection_uses_answers"] is not False
             or doc["label_values_included"] is not False):
         raise ValueError("public selection contract differs")
@@ -53,8 +55,18 @@ def _zip_module(path: Path):
 
 
 def freeze_media(selection_root: Path, output_root: Path,
-                 archive_reader: Path) -> None:
-    doc, selection_sha = _selection(selection_root)
+                 archive_reader: Path, *, expected_objects: int = 2,
+                 expected_questions: int = 6,
+                 min_video_bytes: int = 1_500_000,
+                 max_video_bytes: int = 7_000_000) -> None:
+    if (type(min_video_bytes) is not int
+            or type(max_video_bytes) is not int
+            or not 0 < min_video_bytes <= max_video_bytes):
+        raise ValueError("frozen media byte bounds are invalid")
+    doc, selection_sha = _selection(
+        selection_root, expected_objects=expected_objects,
+        expected_questions=expected_questions,
+    )
     target = output_root / "media"
     if target.exists():
         raise ValueError("media directory already exists")
@@ -71,7 +83,7 @@ def freeze_media(selection_root: Path, output_root: Path,
             if len(matches) != 1:
                 raise ValueError("selected object has no unique archive entry")
             entry = matches[0]
-            if not 1_500_000 <= entry.uncompressed_size <= 7_000_000:
+            if not min_video_bytes <= entry.uncompressed_size <= max_video_bytes:
                 raise ValueError("selected media size differs from frozen rule")
             artifact = target / (video_id + ".mp4")
             module.extract(reader, entry, artifact)
