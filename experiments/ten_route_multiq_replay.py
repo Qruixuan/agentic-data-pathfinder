@@ -18,8 +18,17 @@ from pathfinder.rsi_exam.cache_episode_state import ReplayCacheState
 REPRESENTATIONS = ("multimodal_digest", "sampled_frame_bundle")
 ARMS = ("R", "I", "D", "DC")
 NODES = ("N7", "N8")
-_BUILD = {"R": ("raw",), "I": ("raw", "index"),
-          "D": ("raw", "derived"), "DC": ("raw", "derived")}
+# Index and derived artifacts reuse the same question-independent captions.
+# Their provider API build charge must not be paid twice when a policy switches
+# representations for the same video; node-local materialization time is
+# accounted separately from this list-price component ledger.
+_BUILD_SHARED_CAPTION = {
+    "R": ("raw",), "I": ("raw", "caption", "index"),
+    "D": ("raw", "caption", "derived"),
+    "DC": ("raw", "caption", "derived"),
+}
+_BUILD_LEGACY = {"R": ("raw",), "I": ("raw", "index"),
+                 "D": ("raw", "derived"), "DC": ("raw", "derived")}
 
 
 def _money(value: object, name: str) -> Decimal | None:
@@ -78,6 +87,13 @@ class TenRouteEpisodeReplay:
             self._outcomes[row["question_id"], action].append(row)
         self._artifacts = artifact_by_object
         self._build_costs = build_cost_by_object
+        caption_flags = {"caption" in costs
+                         for costs in build_cost_by_object.values()}
+        if len(caption_flags) > 1:
+            raise ValueError("mixed shared-caption build-cost contracts")
+        self._build_components = (
+            _BUILD_SHARED_CAPTION if True in caption_flags else _BUILD_LEGACY
+        )
         self._namespace = namespace
         self._built: set[tuple[str, str]] = set()
         self._seen: Counter[str] = Counter()
@@ -199,7 +215,7 @@ class TenRouteEpisodeReplay:
         build_rows = self._build_costs.get(object_id)
         if build_rows is None:
             raise ValueError("video build-cost record is absent")
-        newly_built = [component for component in _BUILD[arm]
+        newly_built = [component for component in self._build_components[arm]
                        if (object_id, component) not in self._built]
         known_step = route_cost or Decimal(0)
         unknown = []

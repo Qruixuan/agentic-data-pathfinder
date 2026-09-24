@@ -56,7 +56,8 @@ def evaluator(schedule, observations, capacity=10):
         schedule=schedule, observations=observations,
         artifact_by_object=artifacts(),
         build_cost_by_object={
-            oid: {"raw": "0.1", "derived": "0.5", "index": "0.2"}
+            oid: {"raw": "0.1", "caption": "0.5", "derived": "0",
+                  "index": "0.2"}
             for oid in ("A", "B")
         },
         capacity_by_node={"N7": capacity, "N8": capacity},
@@ -82,7 +83,7 @@ class TenRouteMultiqReplayTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(result["complete_list_cost_usd"], "2.600000000")
         self.assertEqual(result["steps"][0]["newly_built_components"],
-                         ["raw", "derived"])
+                         ["raw", "caption", "derived"])
         self.assertEqual(result["steps"][1]["newly_built_components"], [])
 
     def test_unmeasured_partial_state_does_not_advance(self):
@@ -155,6 +156,32 @@ class TenRouteMultiqReplayTests(unittest.TestCase):
         self.assertEqual(result["known_list_cost_usd"], "0.100000000")
         self.assertEqual(result["missing_cost_fields"],
                          ["route/a1-N8/R-raw"])
+
+    def test_legacy_build_cost_contract_remains_accepted(self):
+        result = run_policy(TenRouteEpisodeReplay(
+            schedule=[question(0, "a1", "A")],
+            observations=[outcome("a1", "A", "N7/I", "index", [])],
+            artifact_by_object=artifacts(),
+            build_cost_by_object={
+                "A": {"raw": "0.1", "index": "0.2", "derived": "0.5"}
+            },
+            capacity_by_node={"N7": 10, "N8": 10}, namespace=NS,
+        ), fixed_policy("I"))
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["steps"][0]["newly_built_components"],
+                         ["raw", "index"])
+
+    def test_caption_build_is_shared_when_switching_d_to_i(self):
+        episode = evaluator(
+            [question(0, "a1", "A"), question(1, "a2", "A")],
+            [outcome("a1", "A", "N7/D", "derived", []),
+             outcome("a2", "A", "N7/I", "index", [])],
+        )
+        steps = [episode.step("N7/D"), episode.step("N7/I")]
+        result = episode.result(steps)
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["complete_list_cost_usd"], "2.800000000")
+        self.assertEqual(steps[1]["newly_built_components"], ["index"])
 
 
 if __name__ == "__main__":

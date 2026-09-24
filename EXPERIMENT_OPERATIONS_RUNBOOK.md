@@ -90,6 +90,11 @@ Record every value in a small run ledger before submitting:
 - [ ] Runtime source/admission/catalog/gate mounts are the intended immutable
       versions and are read-only where required.
 - [ ] N3/N4 advertised origins exactly match the origins used by N7/N8.
+- [ ] For a paired N7/N8 comparison, inspect the **actual N6 client origin**
+      configured in both coordinators, plus the resolved N6 container image,
+      model and runtime epoch. A `node_id=N6` health response alone does not
+      prove they use the same N6 instance. Record any deliberate replica
+      difference as a comparison confounder before submission.
 - [ ] Dependency health succeeds from every participating coordinator (both
       N7 and N8 for ten-case runs; N7 for the current interleaved pilot).
 - [ ] The valid-credential boundary probe reaches the known validation error;
@@ -103,6 +108,9 @@ Record every value in a small run ledger before submitting:
       never been used before.
 - [ ] The run budget, trial order, cache episode/namespace and cold/warm
       initial state are frozen; no other batch can write into that episode.
+      State explicitly whether measured miss/hit pairs use a namespace per
+      question or the cross-question namespace of the policy episode. Do not
+      equate those two treatments when reporting live cache reuse.
 - [ ] Public development/test splits and baseline policy are frozen before
       held-out outcomes. Previously inspected videos are not called unseen.
 - [ ] The command's real exit status will be captured without a pipeline
@@ -943,6 +951,12 @@ under the declared policy. A state transition in replay must have matching
 measured evidence; a DC cold miss cannot be replaced by a warm-hit observation.
 Count shared builds once per declared scope, not once per route, and do not
 add model-API costs twice when comparing N6 versus build buckets.
+When a video-level caption package feeds **both** the derived artifacts and
+the index, treat captioning as one shared build component. Charge index
+embedding separately, and query embedding only when an indexed query is
+selected. A baseline switching D to I must not pay for the same captions
+twice. Keep provider API list-price cost, VM-time allocation and actual
+invoice charges as separate quantities.
 
 Missing build compute/publication timing, required resource rates, or unknown
 provider usage makes the affected total **partial**. Mark the component and
@@ -1358,6 +1372,56 @@ Self-contained 60-slot and cache-pair tests now exercise both branches. Keep
 the old four-arm plan and ten-route plan as separate schema contracts; never
 infer a new admission failure from an old-field `KeyError` or relabel D3/D7
 without checking the arm. Neither defect reached a live route or model call.
+
+2026-09-25 — CONFIRMED after the sealed 60-route pilot: both coordinators
+returned healthy N6 dependencies, but N7's configured N6 origin reached the
+`:18886` replica while N8 reached the same host's `:8780` replica. Both
+reported N6 and qwen3.8-27b, yet their image digests and usage journals
+differed. The run remains valid as individual route observations, but an
+N7-versus-N8 latency difference is confounded. Exact result-SHA matching
+across both numeric journals recovered all 60 token records (30 per replica).
+Prevention: compare the literal configured N6 origins and resolved container
+identities on **both** routes in the no-call pre-submit gate; health status
+alone is insufficient. Do not silently rebind a frozen run afterwards.
+
+2026-09-25 — CONFIRMED after the same pilot: its cache miss/hit control pairs
+used one fresh namespace per question and node. Both durable caches recorded
+12 MISS, 12 STORE and 12 HIT events, and 10 LRU evictions each under the
+frozen capacity. This proves the physical branch and eviction mechanism, but
+not a live cross-question hit under a shared namespace. The reusable offline
+episode replayer may match the measured hit/miss branches under a separate
+shared policy namespace only when its finite-state transition and recorded
+eviction identities agree; label that result counterfactual replay, never a
+live shared-namespace trace. Reuse the route and cache verifiers rather than
+creating a new runner for each question set.
+
+2026-09-25 — RESOLVED after route execution, without resubmission: the
+interleaved runner writes route/timing files first and requires canonical
+`verify --seal` to create `SHA256SUMS`. A plain `verify` immediately after a
+successful 60-route execution rejected the not-yet-sealed file set. The
+correct `--seal` pass completed and an independent ordinary verification
+then passed; no route or LLM request was repeated. This differs from the
+older single ten-case runner, whose three-file receipt is already sealed
+and is verified **without** `--seal`. Check the selected runner schema before
+choosing the verification flag.
+
+2026-09-25 — RESOLVED before route submission: the first cache auth probe
+used POST on a cache retrieval endpoint and received 501. Routing/method
+rejection happens before the bearer-token check, so 501 proved nothing.
+After checking the endpoint method contract, GET with invalid token returned
+401 and GET with valid token plus invalid query returned 400 on both caches.
+Keep auth-boundary probes method-correct and harmless; never infer auth from
+an arbitrary 400/501.
+
+2026-09-25 — RESOLVED before route submission: N7's independent service
+image build stalled in package installation after N8 had built the same
+LF-clean source. Rather than waiting for a second unbounded build, the
+temporary N7 build was stopped and N8's image was transferred by Docker
+save/load. Both hosts then reported the **same pinned image digest**, and
+the source-bound in-image module digests matched the clean Git archive.
+Future multi-host builds should reuse one verified image when the runtime
+contract calls for identical images, and require digest verification after
+transfer; do not assume identical tags imply identical contents.
 
 ```text
 date_utc:

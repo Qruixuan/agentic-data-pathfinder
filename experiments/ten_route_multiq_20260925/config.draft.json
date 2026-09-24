@@ -1,0 +1,29 @@
+{
+  "schema_version": "pathfinder.ten-route-multiq-batch-config/v1",
+  "admission_dir": "t60-runtime-v1/admission",
+  "baseline_spec_dir": "t60-baseline-v1",
+  "source_dirs": {
+    "trial_dag_dir": "t60-runtime-v1/dags",
+    "binding_dir": "t60-runtime-v1/bindings",
+    "plan_dir": "ten-route-multiq-sealed-20260925-v1-plan-20260924t171621z",
+    "n1_public_commitment_dir": "t60-n1-public-v1/commitment",
+    "n2_index_package_dir": "t60-final-v1/n2",
+    "n3_package_dir": "t60-final-v1/n3",
+    "raw_package_dir": "t60-final-input-v1/build/raw",
+    "n4_package_dir": "t60-final-v1/n4",
+    "query_dir": "t60-paid-public-20260925-v1/query",
+    "video_index_dir": "t60-paid-public-20260925-v1/video-index",
+    "preparation_dir": "t60-final-input-v1/build/preparation",
+    "caption_dir": "t60-paid-public-20260925-v1/captions"
+  },
+  "coordinator_base_urls": {
+    "N7": "http://10.70.0.17:18781",
+    "N8": "http://10.70.0.18:18881"
+  },
+  "worker_alias": "pathfinder_costaware_20260815a",
+  "worker_node_alias": "pathfinder-n7",
+  "task_timeout_seconds": 900,
+  "expected_plan_sha256": "c7fd85adfbc47bec4ef722655f7bf6e5beb28e6e6fe7f5badac64264f9556530",
+  "expected_question_count": 6,
+  "expected_route_count": 60
+}
