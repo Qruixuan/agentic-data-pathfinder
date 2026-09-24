@@ -61,6 +61,34 @@ def _fixture(name: str) -> tuple[dict, dict, Path]:
 
 
 class ReusableBatchTests(unittest.TestCase):
+    def test_rotated_schedule_changes_order_not_requests(self):
+        trials = [{"workload_id": "q", "design_id": arm,
+                   "trial_key": arm, "order_index": i}
+                  for i, arm in enumerate(("R", "D", "DC", "I"))]
+        routes = {arm: {"run_id": "run-" + arm, "object_id": "video"}
+                  for arm in ("R", "D", "DC", "I")}
+        schedule = [{"ordinal": 0, "question_id": "q", "object_id": "video",
+                     "route_slots": [{"arm_id": arm, "run_id": "run-" + arm}
+                                     for arm in ("I", "R", "D", "DC")]}]
+        ordered = batch.schedule_trials(trials, schedule, routes)
+        self.assertEqual([t["design_id"] for t in ordered], ["I", "R", "D", "DC"])
+        self.assertIs(ordered[0], trials[3])
+        self.assertEqual(ordered[0]["order_index"], 3)
+        schedule[0]["route_slots"][0]["run_id"] = "wrong-run"
+        with self.assertRaisesRegex(ValueError, "identity differs"):
+            batch.schedule_trials(trials, schedule, routes)
+
+    def test_schedule_rejects_duplicate_and_missing_slots(self):
+        trials = [{"workload_id": "q", "design_id": "R", "trial_key": "r"}]
+        routes = {"r": {"run_id": "run-r", "object_id": "v"}}
+        question = {"ordinal": 0, "question_id": "q", "object_id": "v",
+                    "route_slots": [{"arm_id": "R", "run_id": "run-r"}]}
+        with self.assertRaisesRegex(ValueError, "omit"):
+            batch.schedule_trials(trials, [], routes)
+        question["route_slots"] *= 2
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            batch.schedule_trials(trials, [question], routes)
+
     def test_config_freeze_checksum_and_tamper_rejection(self) -> None:
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             frozen = Path(temporary) / "frozen"

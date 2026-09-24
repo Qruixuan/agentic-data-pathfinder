@@ -1122,6 +1122,14 @@ submitted workflow still requires a fresh run identity.
 
 ### Incident log
 
+2026-09-24 — RESOLVED: Windows `tar` could not read a mode-restricted public
+plan and returned nonzero, but an initial PowerShell wrapper continued to SCP.
+N1 refused the missing plan bind before the builder ran; no labels or model
+calls were processed. Gate every native archive command on its immediate
+exit status. Recover the public plan from the already checksummed, complete
+input archive, extract only the named plan directory on N1, and verify before
+building; do not loosen private-package permissions or re-freeze the plan.
+
 2026-09-24 — RESOLVED: N5 h48 offline preparation completed and canonically
 verified (4 videos, 36 windows), but packaging it with the login user failed
 on mode-700 package directories owned by runtime uid 10001. Keep the partial
@@ -1187,6 +1195,43 @@ full archival verification; do not rewrite the old profile. Preventive test:
 the incompatible raw profiles to be rejected. This is not a new runtime fault.
 
 Use this compact format for each new failure:
+
+2026-09-24 — CONFIRMED before holdout submissions: the interleaved DAG keeps
+legacy fixed R/D/DC/I `order_index` values, while the new plan explicitly
+rotates `route_slots` per question. A runner sorted only by DAG order would
+silently ignore the frozen counterbalancing. Preserve admitted requests and
+their identities; have the shared runner execute/verify them in the exact
+frozen schedule order, with bijective question/arm coverage checks. No
+outcomes or paid route calls existed when this discrepancy was discovered.
+
+2026-09-24 — CONFIRMED, N7 helper import boundary: an unrelated pre-existing
+`/tmp/re.py` shadowed Python's standard-library `re` when a helper was run
+from `/tmp`. No deployment code executed. Invoke standalone remote helpers
+with `python3 -I /tmp/helper.py` to exclude script/current-directory imports;
+do not delete the unrelated file or treat this as a runtime service defect.
+
+2026-09-24 — CONFIRMED, shell transport: PowerShell piping an LF script to
+`ssh ... bash -s` appended a CR-only final line. All four public package
+installations had already printed `PUBLIC_INPUT_CHECKSUMS_VERIFIED 169`,
+then bash exited 1 at the trailing line. This was not a checksum failure.
+Do not repeat installation or rebuild packages: inspect the completed state,
+then proceed to rendering. Transfer LF scripts by scp and execute the remote
+file (or use a binary subprocess stdin) instead of a PowerShell text pipe.
+
+2026-09-24 — CONFIRMED, pre-deploy rendering only: combining both independently
+generated N1 fragments in one Compose invocation failed with
+`volumes.full-flow-n1-hidden-score-state.labels must be a mapping`. Existing
+N1 services were created using one fragment at a time under one project.
+Keep that selective-instantiation contract: render/start scorer and verifier
+separately with the same explicitly named state volume. The failed rendering
+stopped before any old container was stopped or new one was created.
+
+2026-09-24 — RESOLVED (local invocation, no experiment submitted): bare
+`python` resolved to the inaccessible WindowsApps execution alias. Use the
+explicit verified `.venv-prep/Scripts/python.exe` interpreter for the fresh
+holdout tooling. The replacement command passed all 13 focused accounting
+and reusable-runner tests; do not infer any cloud or package failure from
+the Windows process-start error.
 
 ```text
 date_utc:

@@ -347,11 +347,46 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
         root, config["baseline_spec_dir"],
         report["admission_sha256"], plan["plan_sha256"],
     )
+    trials = schedule_trials(
+        trials, _rows(sources["plan_dir"] / "interleaved-schedule.jsonl"),
+        route_by_key,
+    )
     return {
         "report": report, "plan": plan, "trials": trials,
         "stages": stages, "routes": route_by_key,
         "episodes": episode_by_key, "baseline_sha256": baseline_sha,
     }
+
+
+def schedule_trials(trials: list[dict], schedule: list[dict],
+                    route_by_key: dict) -> list[dict]:
+    """Honor frozen route-slot order without changing admitted requests.
+
+    Historical DAG order_index values name a canonical layout, not the
+    counterbalanced execution order. Slot run IDs bind the latter exactly.
+    """
+    by_pair = {(t["workload_id"], t["design_id"]): t for t in trials}
+    if len(by_pair) != len(trials):
+        raise ValueError("admitted question/arm pair repeats")
+    ordered = []
+    seen = set()
+    for ordinal, question in enumerate(schedule):
+        if question["ordinal"] != ordinal:
+            raise ValueError("frozen question order is not contiguous")
+        for slot in question["route_slots"]:
+            pair = (question["question_id"], slot["arm_id"])
+            if pair not in by_pair or pair in seen:
+                raise ValueError("frozen route slots differ from admitted coverage")
+            trial = by_pair[pair]
+            route = route_by_key[trial["trial_key"]]
+            if (route["run_id"] != slot["run_id"]
+                    or route["object_id"] != question["object_id"]):
+                raise ValueError("frozen route slot identity differs")
+            seen.add(pair)
+            ordered.append(trial)
+    if seen != set(by_pair):
+        raise ValueError("frozen route slots omit an admitted trial")
+    return ordered
 
 
 def _utc() -> str:

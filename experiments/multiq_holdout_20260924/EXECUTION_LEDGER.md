@@ -1,8 +1,26 @@
 # Fresh video-disjoint multi-question experiment
 
-Status: OFFLINE_INPUTS_VERIFIED; no new workflow or provider request submitted.
+Status: PAID_PREPARATION_RUNNING; no route workflow submitted yet.
 
 ## Current resume state
+
+- Bounded N6 preparation is running under source `a00bb13`, SSH session
+  47820. Do not start a duplicate. Remote root:
+  `/home/pathfinder/h48-paid-20260924-v1`, output journal under
+  `output/provider-journal/`. The launcher runs captions, video-index, query
+  serially and stops on failure; cached paid responses survive interruptions.
+- N1 private 12-question oracle was built and verified on N1 only, at
+  `/opt/pathfinder/formal/private/h48-oracle-20260924-v1/oracle/n1-oracle-package`.
+  Public commitment archive is `.codex_build/h48-n1-public-commitment.tar`,
+  SHA-256 `a4e39dd73aa2e116f82806bccd2a21b02a948ab4dab19c66db612d9baf371945`.
+  Hidden values were not returned or copied off N1.
+- The complete plan/build input archive is `.codex_build/h48-paid-input.tar`,
+  SHA-256 `79d5994138a6f0cc9f880dd1b509cee2d5598e197d78535dfd167573e18b1c99`.
+  Use this verified archive; `.codex_build/h48-plan.tar` is an incomplete
+  failed Windows-ACL export and must not be used.
+- Next public finalizer: `experiments/finalize_multiq_inputs.py`, no network
+  calls. Captures per-question projection timings separately from verifier
+  re-decodes; N4 digest and frames reuse the caption-preparation products.
 
 - Active selection: `artifacts/multiq-fresh-holdout-20260924-v3-public-selection`.
 - Exposure inventory: 52 prior object IDs; zero unreadable public manifests.
