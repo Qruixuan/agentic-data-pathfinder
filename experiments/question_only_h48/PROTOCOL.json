@@ -1,0 +1,21 @@
+{
+  "schema_version": "pathfinder.question-only-development-diagnostic/v1",
+  "run_id": "question-only-h48-20260924-4f2d8a1c",
+  "cohort": "fresh-multiq-holdout-20260924-v2",
+  "question_count": 12,
+  "max_n6_requests": 12,
+  "max_n1_score_requests": 12,
+  "model": "qwen3.8-27b",
+  "temperature": 0,
+  "input_kind": "public-question-and-options-only",
+  "prompt_profile": "question-only-choice-v1",
+  "evaluation_role": "development-diagnostic-on-already-exposed-questions",
+  "claim_boundary": "single-call-answer-prior-check-not-a-new-test-set",
+  "question_file_sha256": "704835b8b544aaede45bc3fc0985d4b6e260aeee822df5933065d554ecdb3e8f",
+  "price_basis": "frozen-2026-09-23-singapore-usd-list-price",
+  "max_provider_attempts": 36,
+  "provider_retry_policy": "deployed-N6-semantic-endpoint",
+  "allow_question_replacement": false,
+  "credentials_recorded": false,
+  "hidden_labels_read": false
+}
