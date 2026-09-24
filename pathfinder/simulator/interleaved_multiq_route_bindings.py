@@ -97,7 +97,7 @@ def _expected(
         and commitment_doc["public_task_set_sha256"]
         == _sha(_canonical(public_tasks))
         and commitment["label_values_returned"] is False,
-        "N1 public commitment does not bind these six public tasks",
+        "N1 public commitment does not bind the public tasks",
     )
     policies = derive_n3_multiq_question_policies(
         plan_dir=plan_dir, public_questions=questions,
@@ -174,15 +174,16 @@ def _expected(
                 "cache_episode_id": slot["cache_episode_id"],
                 "inputs": inputs,
             })
-    _require(len(routes) == plan["route_count"] == 24,
+    _require(len(routes) == plan["route_count"],
              "route binding count differs from the plan")
     _require(Counter(row["arm_id"] for row in routes)
-             == {"R": 6, "D": 6, "DC": 6, "I": 6},
+             == {arm: len(questions) for arm in ("R", "D", "DC", "I")},
              "four-arm route coverage changed")
     _require(len({row["trial_key"] for row in routes}) == len(routes)
              and len({row["run_id"] for row in routes}) == len(routes),
              "route or run identity repeats")
-    _require(sum(len(row["inputs"]) for row in routes) == len(access) == 42,
+    _require(sum(len(row["inputs"]) for row in routes)
+             == len(access) == 7 * len(questions),
              "exact Data Agent binding count changed")
     manifest = {
         "schema_version": SCHEMA,
@@ -214,7 +215,7 @@ def _checksums(root: Path) -> bytes:
 def freeze_interleaved_route_bindings(
     *, output_dir: str | Path, **sources: str | Path,
 ) -> dict[str, Any]:
-    """Freeze all 24 real input identities, without authorizing execution."""
+    """Freeze all planned real inputs, without authorizing execution."""
 
     paths = {key: Path(value).resolve() for key, value in sources.items()}
     manifest, routes = _expected(**paths)
@@ -253,9 +254,9 @@ def verify_interleaved_route_bindings(
              "route input bindings differ from verified sources")
     return {
         "status": "VERIFIED_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED",
-        "route_count": 24,
-        "question_count": 6,
-        "data_agent_binding_count": 42,
+        "route_count": len(routes),
+        "question_count": manifest["question_count"],
+        "data_agent_binding_count": manifest["data_agent_binding_count"],
         "manifest_sha256": manifest["manifest_sha256"],
         "runtime_admission_created": False,
         "workflow_submitted": False,

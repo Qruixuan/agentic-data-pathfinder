@@ -220,9 +220,17 @@ def _schedule(
     for row in questions:
         by_object[row["object_id"]].append(row)
     _require(len(by_object) >= 2, "interleaving needs at least two videos")
+    sizes = sorted(len(rows) for rows in by_object.values())
+    _require(sizes == [3] * len(by_object)
+             or (len(by_object) == 2 and sizes == [3, 4]),
+             "interleaving requires one question per stratum, or a "
+             "two-video seven-question extension")
     _require(all({r["stratum"] for r in rows} == set(STRATA)
-                 and len(rows) == len(STRATA) for rows in by_object.values()),
-             "each video needs exactly one question per stratum")
+                 for rows in by_object.values()),
+             "each video needs all three question strata")
+    _require(all(len({r["question_id"] for r in rows}) == len(rows)
+                 for rows in by_object.values()),
+             "interleaved question IDs repeat")
     for object_id, rows in by_object.items():
         rows.sort(key=lambda row: (_rank(seed, "question", object_id,
                                             row["question_id"]), row["question_id"]))
@@ -237,14 +245,24 @@ def _schedule(
             order = order[1:] + order[:1]
         rounds.append(order)
         last_object = order[-1]
-    result = []
+    sequence: list[tuple[Mapping[str, Any], int]] = []
     for round_index, order in enumerate(rounds):
         for object_id in order:
-            row = by_object[object_id][round_index]
-            ordinal = len(result)
-            rotation = int(_rank(seed, "arm", row["question_id"])[:8], 16) % 4
-            arms = ARMS[rotation:] + ARMS[:rotation]
-            result.append({
+            sequence.append((by_object[object_id][round_index], round_index))
+    if len(by_object) == 2 and sizes == [3, 4]:
+        extra_object = next(object_id for object_id, rows in by_object.items()
+                            if len(rows) == 4)
+        extra = (by_object[extra_object][3], 3)
+        if sequence[-1][0]["object_id"] != extra_object:
+            sequence.append(extra)
+        else:
+            sequence.insert(0, extra)
+    result = []
+    for ordinal, (row, round_index) in enumerate(sequence):
+        object_id = row["object_id"]
+        rotation = int(_rank(seed, "arm", row["question_id"])[:8], 16) % 4
+        arms = ARMS[rotation:] + ARMS[:rotation]
+        result.append({
                 "ordinal": ordinal,
                 "round": round_index,
                 "question_id": row["question_id"],
@@ -263,7 +281,7 @@ def _schedule(
                     }
                     for arm in arms
                 ],
-            })
+        })
     _require(all(a["object_id"] != b["object_id"]
                  for a, b in zip(result, result[1:])),
              "adjacent questions reference the same video")

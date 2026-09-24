@@ -79,6 +79,46 @@ class InterleavedMultiQuestionPlanTest(unittest.TestCase):
         self.assertTrue(all(key[1].endswith("|DC") for key in bindings))
         self.assertEqual(6, len({key[0] for key in bindings}))
 
+    def test_seventh_public_question_yields_28_interleaved_routes(self) -> None:
+        import json
+
+        source = _questions(2)
+        extra = dict(source[0])
+        extra["question_id"] = "video-0-extra-temporal"
+        extra["stratum"] = "temporal"
+        extra["question"] = "What happened after the second event?"
+        extra["public_task_sha256"] = build_n1_public_task_binding(
+            workload_id=extra["question_id"],
+            object_id=extra["object_id"],
+            task_class_id=extra["stratum"],
+            question=extra["question"],
+            answer_options=extra["answer_options"],
+            success_scoring_rule=MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE,
+        )["task_binding_sha256"]
+        source.append(extra)
+        output = self.root / "seven"
+        report = freeze_interleaved_plan(
+            source, seed="seven-seed", experiment_id="seven-test",
+            public_source_sha256=SOURCE_SHA256, output_dir=output,
+        )
+        self.assertEqual(7, report["question_count"])
+        self.assertEqual(28, report["route_count"])
+        rows = [json.loads(line) for line in (
+            output / "interleaved-schedule.jsonl"
+        ).read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(list(range(7)), [row["ordinal"] for row in rows])
+        self.assertTrue(all(a["object_id"] != b["object_id"]
+                            for a, b in zip(rows, rows[1:])))
+        self.assertEqual(28, len({slot["run_id"] for row in rows
+                                  for slot in row["route_slots"]}))
+        self.assertEqual(7, len(interleaved_cache_episode_bindings(
+            output, source, public_source_sha256=SOURCE_SHA256,
+        )))
+        self.assertEqual(report, verify_interleaved_plan(
+            output, list(reversed(source)),
+            public_source_sha256=SOURCE_SHA256,
+        ))
+
     def test_four_video_schedule_is_reproducible_and_interleaved(self) -> None:
         import json
 

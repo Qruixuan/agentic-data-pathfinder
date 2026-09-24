@@ -113,11 +113,11 @@ def _expected(
     routes = _rows(binding_dir / "route-inputs.jsonl")
     dag_trials = _rows(trial_dag_dir / "interleaved-trials.jsonl")
     stages = _rows(trial_dag_dir / "interleaved-stages.jsonl")
-    _require(len(routes) == len(dag_trials) == 24,
-             "route or DAG coverage is not 24")
+    _require(len(routes) == len(dag_trials) == plan["route_count"],
+             "route or DAG coverage differs from the plan")
     by_route = {row["trial_key"]: row for row in routes}
     by_stage = {row["stage_key"]: row for row in stages}
-    _require(len(by_route) == 24 and len(by_stage) == len(stages),
+    _require(len(by_route) == len(routes) and len(by_stage) == len(stages),
              "route or stage identities repeat")
     cache = interleaved_cache_episode_bindings(
         plan_dir, public_questions,
@@ -201,8 +201,10 @@ def _expected(
                 "artifact_sha256": source["artifact_sha256"],
                 "artifact_size_bytes": source["artifact_size_bytes"],
             })
-    _require(len(admitted) == 24 and len(index_plans) == 6
-             and len(access_plans) == 42 and len(cache) == 6,
+    _require(len(admitted) == plan["route_count"]
+             and len(index_plans) == plan["question_count"]
+             and len(access_plans) == 7 * plan["question_count"]
+             and len(cache) == plan["question_count"],
              "runtime plan or cache coverage changed")
     admitted.sort(key=lambda row: row["order_index"])
     index_plans.sort(key=lambda row: row["trial_key"])
@@ -299,11 +301,15 @@ def verify_interleaved_runtime_admission(
     return {
         "status": "VERIFIED_INTERLEAVED_RUNTIME_ADMISSION_NOT_DEPLOYED",
         "admission_sha256": manifest["admission_sha256"],
-        "trial_count": 24,
+        "trial_count": manifest["trial_count"],
         "stage_count": manifest["stage_count"],
-        "index_query_plan_count": 6,
-        "data_agent_plan_binding_count": 42,
-        "cache_episode_binding_count": 6,
+        "index_query_plan_count": manifest["index_query_plan_count"],
+        "data_agent_plan_binding_count": manifest[
+            "data_agent_plan_binding_count"
+        ],
+        "cache_episode_binding_count": manifest[
+            "cache_episode_binding_count"
+        ],
         "workflow_submitted": False,
         "credentials_recorded": False,
     }

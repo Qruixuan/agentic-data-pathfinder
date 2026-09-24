@@ -20,7 +20,10 @@ class InterleavedRuntimeAdmissionTests(unittest.TestCase):
         return {
             "interleaved-runtime-admission.json": (
                 b'{"admission_sha256":"' + b"a" * 64 + b'",'
-                b'"stage_count":276}'
+                b'"trial_count":24,"stage_count":276,'
+                b'"index_query_plan_count":6,'
+                b'"data_agent_plan_binding_count":42,'
+                b'"cache_episode_binding_count":6}'
             ),
             "admitted-trials.jsonl": b'{"trial_key":"trial-1"}\n',
             "admitted-stages.jsonl": b'{"stage_key":"stage-1"}\n',

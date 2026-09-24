@@ -21,6 +21,7 @@ class InterleavedRouteBindingTests(unittest.TestCase):
         return ({
             "schema_version": "fixture",
             "route_count": 24,
+            "question_count": 6,
             "data_agent_binding_count": 42,
             "manifest_sha256": "a" * 64,
         }, [{"trial_key": f"trial-{index}"} for index in range(24)])

@@ -285,7 +285,7 @@ def build_all_interleaved_trial_dags(
     *, binding_dir: str | Path, plan_dir: str | Path,
     n3_package_dir: str | Path, n4_package_dir: str | Path,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Build all 24 endpoint-free DAGs from one already-verified binding."""
+    """Build all endpoint-free DAGs from one already-verified binding."""
 
     root = Path(binding_dir)
     manifest = json.loads((root / "route-input-bindings.json").read_bytes())
@@ -329,9 +329,10 @@ def build_all_interleaved_trial_dags(
         )
         trials.append(trial)
         stages.extend(trial_stages)
-    _require(len(trials) == 24
-             and len({row["trial_key"] for row in trials}) == 24,
-             "24-route trial DAG coverage changed")
+    _require(len(trials) == manifest["route_count"]
+             and len({row["trial_key"] for row in trials}) == len(trials)
+             and len(questions) == manifest["question_count"],
+             "trial DAG coverage changed")
     return trials, stages
 
 
@@ -385,7 +386,7 @@ def _checksums(documents: Mapping[str, bytes]) -> bytes:
 def freeze_interleaved_trial_dags(
     *, output_dir: str | Path, **sources: str | Path,
 ) -> dict[str, Any]:
-    """Freeze 24 validated DAGs, with submission authority still withheld."""
+    """Freeze validated DAGs, with submission authority still withheld."""
 
     documents = _package_contents(**sources)
     target = Path(output_dir).resolve()
