@@ -7,6 +7,7 @@ itself need not be part of that archive; all verifiers must be imported from it.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from pathfinder.rsi_exam.interleaved_multiq_plan import (
@@ -54,7 +55,8 @@ def main() -> None:
     import pathfinder
 
     source = str(Path(pathfinder.__file__).resolve())
-    if "f92f184-src" not in source:
+    archive = Path(os.environ["PF_CLEAN_SOURCE_ROOT"]).resolve()
+    if not Path(source).is_relative_to(archive):
         raise ValueError("verifier did not import the clean Git archive")
     questions = [json.loads(line) for line in (
         PLAN / "public-questions.jsonl"
