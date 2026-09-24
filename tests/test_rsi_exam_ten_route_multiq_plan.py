@@ -113,6 +113,62 @@ class TenRouteMultiQuestionPlanTests(unittest.TestCase):
                     output_dir=Path(temp) / "rejected",
                 )
 
+    def test_eight_video_five_question_schedule_is_interleaved(self):
+        options = [{"option_id": chr(65 + i), "text": f"choice {i}"}
+                   for i in range(5)]
+        selected = []
+        for video_index in range(8):
+            object_id = f"video-{video_index}"
+            for question_index in range(5):
+                stratum = "causal" if question_index == 0 else "temporal"
+                question_id = f"{object_id}-q{question_index}"
+                question = f"What happened in {object_id}?"
+                binding = build_n1_public_task_binding(
+                    workload_id=question_id, object_id=object_id,
+                    task_class_id=stratum, question=question,
+                    answer_options=options,
+                    success_scoring_rule=(
+                        MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE
+                    ),
+                )
+                selected.append({
+                    "question_id": question_id,
+                    "object_id": object_id,
+                    "stratum": stratum,
+                    "question": question,
+                    "answer_options": options,
+                    "public_task_sha256": binding["task_binding_sha256"],
+                })
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "new-plan"
+            report = freeze_ten_route_multiq_plan(
+                selected, seed="seed-8x5", experiment_id="episode-8x5",
+                public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+                output_dir=root,
+            )
+            self.assertEqual(report["object_count"], 8)
+            self.assertEqual(report["question_count"], 40)
+            self.assertEqual(report["route_observation_count"], 400)
+            self.assertEqual(report, verify_ten_route_multiq_plan(
+                root, selected, public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+            ))
+            schedule = [json.loads(line) for line in (
+                root / "ten-route-multiq-schedule.jsonl"
+            ).read_bytes().splitlines()]
+            self.assertEqual(len(schedule), 40)
+            for round_index in range(5):
+                block = schedule[round_index * 8:(round_index + 1) * 8]
+                self.assertEqual({row["object_id"] for row in block},
+                                 {f"video-{i}" for i in range(8)})
+                self.assertTrue(all(row["round"] == round_index
+                                    for row in block))
+            self.assertTrue(all(a["object_id"] != b["object_id"]
+                                for a, b in zip(schedule, schedule[1:])))
+            self.assertEqual(len({slot["run_id"] for row in schedule
+                                  for slot in row["route_slots"]}), 400)
+
 
 if __name__ == "__main__":
     unittest.main()

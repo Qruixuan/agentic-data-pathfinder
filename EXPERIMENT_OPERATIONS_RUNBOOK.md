@@ -1235,6 +1235,18 @@ probe succeeded; Root, N1 and N3 containers were healthy. No workflow or
 provider request was made. Ledger:
 `experiments/multiq_holdout_20260924/EXECUTION_LEDGER.md`.
 
+2026-09-25 — RESOLVED before media download, ATP-Hard 8x5 preparation:
+the local selective public ZIP reader failed at its first HTTPS HEAD with
+`WinError 10013`, before any archive bytes were transferred. This repeats the
+local network-sandbox boundary above; it is not a missing video or invalid
+archive. The reader had already created an empty staging directory, which is
+retained as an attempt record. The same pinned public URL succeeded in a new
+directory with approved network access: all six new files passed the archive
+reader's size/CRC-32 checks, and the complete eight-file media set passed an
+independent inventory size/CRC-32 check (22,280,429 bytes). For future runs,
+test public-source network permission before creating an output directory.
+No FlowMesh workflow, LLM request, or UpCloud operation occurred.
+
 2026-09-24 — RESOLVED BEFORE INFERENCE: exposure inventory must support
 variable-length NExT-QA video IDs, not assume ten digits. V1 used a ten-digit
 regex and recorded three public manifests denied by the sandbox. The

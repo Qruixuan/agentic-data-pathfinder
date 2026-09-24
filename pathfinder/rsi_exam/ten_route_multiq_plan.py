@@ -1,4 +1,4 @@
-"""Outcome-blind public schedule for the small multi-question ten-route pilot.
+"""Outcome-blind public schedule for multi-question ten-route cohorts.
 
 This is an additive plan format. The existing four-arm and single-question
 ten-route frozen formats retain their original verifiers and meanings.
@@ -101,32 +101,54 @@ def _schedule(rows: Sequence[Mapping[str, Any]], *, seed: str,
     by_object: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in questions:
         by_object[row["object_id"]].append(row)
-    _require(len(by_object) == 3 and all(len(rows) == 2
-                                         for rows in by_object.values()),
-             "ten-route pilot requires three videos with two questions each")
-    _require(Counter(row["stratum"] for row in questions)
-             == {stratum: 2 for stratum in STRATA},
-             "ten-route pilot strata are not balanced")
+    legacy = (len(by_object) == 3
+              and all(len(group) == 2 for group in by_object.values())
+              and Counter(row["stratum"] for row in questions)
+              == {stratum: 2 for stratum in STRATA})
+    if not legacy:
+        counts = {len(group) for group in by_object.values()}
+        _require(len(by_object) >= 2 and len(counts) == 1
+                 and next(iter(counts)) >= 3,
+                 "ten-route cohort needs equal multi-question videos")
+        _require(all({"causal", "temporal"}
+                     <= {row["stratum"] for row in group}
+                     for group in by_object.values()),
+                 "ten-route cohort needs both causal and temporal questions")
     for object_id, video_rows in by_object.items():
         video_rows.sort(key=lambda row: (
             _rank(seed, "ten-route-question-order", object_id,
                   row["question_id"]), row["question_id"],
         ))
     videos = tuple(sorted(by_object))
-    first = min(permutations(videos), key=lambda order: (
-        _rank(seed, "ten-route-first-round", *order), order,
-    ))
-    possible = [order for order in permutations(videos)
-                if order[0] != first[-1]
-                and len({3 + order.index(oid) - first.index(oid)
-                         for oid in videos}) > 1]
-    _require(bool(possible), "interleaved revisit distances cannot vary")
-    second = min(possible, key=lambda order: (
-        _rank(seed, "ten-route-second-round", *order), order,
-    ))
+    if legacy:
+        first = min(permutations(videos), key=lambda order: (
+            _rank(seed, "ten-route-first-round", *order), order,
+        ))
+        possible = [order for order in permutations(videos)
+                    if order[0] != first[-1]
+                    and len({3 + order.index(oid) - first.index(oid)
+                             for oid in videos}) > 1]
+        _require(bool(possible), "interleaved revisit distances cannot vary")
+        second = min(possible, key=lambda order: (
+            _rank(seed, "ten-route-second-round", *order), order,
+        ))
+        visits = [(round_index, oid)
+                  for round_index, order in enumerate((first, second))
+                  for oid in order]
+    else:
+        visits = []
+        previous = None
+        for round_index in range(next(iter(counts))):
+            order = sorted(videos, key=lambda oid: (
+                _rank(seed, "ten-route-video-order", str(round_index), oid),
+                oid,
+            ))
+            if order[0] == previous:
+                order = order[1:] + order[:1]
+            visits.extend((round_index, oid) for oid in order)
+            previous = order[-1]
     schedule = []
-    for ordinal, object_id in enumerate((*first, *second)):
-        round_index = ordinal // 3
+    for ordinal, (round_index, object_id) in enumerate(visits):
         question = by_object[object_id][round_index]
         blocks = ("N7", "N8")
         if int(_rank(seed, "ten-route-node-order",
@@ -205,7 +227,7 @@ def freeze_ten_route_multiq_plan(
         "public_source_sha256": public_source_sha256,
         "exposure_inventory_sha256": exposure_inventory_sha256,
         "question_count": len(rows),
-        "object_count": 3,
+        "object_count": len({row["object_id"] for row in rows}),
         "route_observation_count": len(rows) * len(_OBSERVATIONS),
         "public_questions_sha256": _sha(question_bytes),
         "schedule_sha256": _sha(schedule_bytes),
@@ -265,7 +287,7 @@ def verify_ten_route_multiq_plan(
             "public_source_sha256": public_source_sha256,
             "exposure_inventory_sha256": exposure_inventory_sha256,
             "question_count": len(rows),
-            "object_count": 3,
+            "object_count": len({row["object_id"] for row in rows}),
             "route_observation_count": 10 * len(rows),
             "public_questions_sha256": _sha(_jsonl(rows)),
             "schedule_sha256": _sha(_jsonl(schedule)),
@@ -283,7 +305,7 @@ def verify_ten_route_multiq_plan(
         "status": "VERIFIED_TEN_ROUTE_MULTIQ_PLAN_NOT_ADMITTED",
         "plan_sha256": digest,
         "question_count": len(rows),
-        "object_count": 3,
+        "object_count": len({row["object_id"] for row in rows}),
         "route_observation_count": len(schedule) * 10,
         "workflow_submitted": False,
         "credentials_recorded": False,

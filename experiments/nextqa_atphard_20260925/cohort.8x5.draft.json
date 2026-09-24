@@ -1,0 +1,28 @@
+{
+  "schema_version": "pathfinder.nextqa-atphard-multiq-selection-config/v1",
+  "seed": "pathfinder-nextqa-atphard-multiq-v1",
+  "min_video_bytes": 1500000,
+  "max_video_bytes": 7000000,
+  "questions_per_video": 5,
+  "development": [
+    {
+      "video": "7288107396",
+      "required_qids": ["1", "3"],
+      "question_count": 5
+    },
+    {
+      "video": "7059877301",
+      "required_qids": [],
+      "question_count": 5
+    }
+  ],
+  "test_video_count": 6,
+  "source_sha256": {
+    "official_val": "43198bdef8436b8d64a9b75d846b0987c10cbf94ebf4be325c4a4e54634d66b8",
+    "atp_hard": "82aa5a5dc453fce28151002dc5d1a9179dee3cbfee14aa860949071fc49e4db2",
+    "grounding": "4feb23e53102cb2d4779e857ff8f9fd9b552fc38435621406b2ed9b0bf76204b",
+    "inventory": "9987435684959abdb4131a3a3e1026cf295f69490aac53fd871706fa97fd0d3c",
+    "exposure": "237793bda98637a02b4179947757c8d3feb5485de83c5c46014e957fabfa2838",
+    "prior_selection": "b0026ac141f3647646848f86387b4132328014fe519ea58013a72fee96ddab38"
+  }
+}

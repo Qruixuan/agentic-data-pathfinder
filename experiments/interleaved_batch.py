@@ -128,8 +128,9 @@ def _validate_config(config: dict) -> dict:
         old_shape["coordinator_base_url"] = origins["N7"]
         del old_shape["coordinator_base_urls"]
         _validate_config(old_shape)
-        if (config["expected_question_count"] != 6
-                or config["expected_route_count"] != 60):
+        if config["expected_route_count"] != (
+            10 * config["expected_question_count"]
+        ):
             raise ValueError("ten-route multi-question cardinality differs")
         return config
     if not isinstance(config, dict) or set(config) != CONFIG_KEYS:
