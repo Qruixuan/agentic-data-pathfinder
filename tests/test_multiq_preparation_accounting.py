@@ -1,12 +1,16 @@
 import io
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.request import Request
+import zlib
 
-from experiments.multiq_prepare import BudgetedTransport, measured
+from experiments.multiq_prepare import (
+    BudgetedTransport, freeze_cohort_media, measured, offline, verify_sums,
+)
 
 
 class PreparationAccountingTests(unittest.TestCase):
@@ -69,6 +73,46 @@ class PreparationAccountingTests(unittest.TestCase):
         self.assertEqual(rows[-1]["status"], "FAILED")
         self.assertGreaterEqual(rows[-1]["wall_seconds"], 0)
         self.assertEqual(rows[-1]["physical_host"], "N5")
+
+    def test_short_source_commit_fails_before_creating_output(self):
+        target = self.root / "unused-output"
+        with self.assertRaisesRegex(ValueError, "full Git SHA-1"):
+            offline(self.root, target, "0c4f7f8", "workstation")
+        self.assertFalse(target.exists())
+
+    def test_public_cohort_media_adapter_binds_exact_bytes(self):
+        cohort = self.root / "cohort"
+        (cohort / "media").mkdir(parents=True)
+        video = b"synthetic-video-bytes"
+        (cohort / "media" / "123.mp4").write_bytes(video)
+        selection = {
+            "development_object_ids": ["nextqa-val-123"],
+            "test_object_ids": [],
+            "video_media": {"123": {
+                "bytes": len(video),
+                "sha256": hashlib.sha256(video).hexdigest(),
+                "crc32": zlib.crc32(video) & 0xFFFFFFFF,
+                "archive_entry": "NExTVideo/123.mp4",
+            }},
+            "label_values_included": False,
+            "credentials_recorded": False,
+            "quality_outcomes_used_for_test_selection": False,
+        }
+        raw = json.dumps(selection).encode()
+        (cohort / "selection.json").write_bytes(raw)
+        with (cohort / "SHA256SUMS").open("wb") as handle:
+            for name in ("selection.json", "media/123.mp4"):
+                digest = hashlib.sha256((cohort / name).read_bytes()).hexdigest()
+                handle.write(f"{digest}  {name}\n".encode())
+        output = self.root / "adapted"
+        report = freeze_cohort_media(cohort, output)
+        self.assertEqual(report["object_count"], 1)
+        verify_sums(output)
+        self.assertEqual((output / "123.mp4").read_bytes(), video)
+        media = json.loads((output / "media.json").read_bytes())
+        self.assertFalse(media["credentials_recorded"])
+        self.assertEqual(media["objects"][0]["sha256"],
+                         hashlib.sha256(video).hexdigest())
 
 
 if __name__ == "__main__":

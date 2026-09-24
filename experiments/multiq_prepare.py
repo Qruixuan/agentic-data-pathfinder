@@ -14,9 +14,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import socket
 from time import monotonic, process_time
 import urllib.request
+import zlib
 
 
 def read(path: Path):
@@ -78,7 +81,70 @@ def verified_public_plan(plan_dir: Path) -> tuple[dict, list[dict]]:
     return manifest, questions
 
 
+def freeze_cohort_media(cohort_dir: Path, output: Path) -> dict:
+    """Adapt a verified public ATP-Hard cohort to the reusable prep input."""
+
+    from experiments.complexity_dev_inputs import ARCHIVE_URL
+
+    verify_sums(cohort_dir)
+    selection_bytes = (cohort_dir / "selection.json").read_bytes()
+    selection = json.loads(selection_bytes)
+    if (selection.get("label_values_included") is not False
+            or selection.get("credentials_recorded") is not False
+            or selection.get("quality_outcomes_used_for_test_selection") is not False):
+        raise ValueError("cohort is not public-only and outcome-blind")
+    object_ids = set(selection["development_object_ids"])
+    object_ids.update(selection["test_object_ids"])
+    if len(object_ids) != (len(selection["development_object_ids"])
+                           + len(selection["test_object_ids"])):
+        raise ValueError("cohort development and test videos overlap")
+    media = selection["video_media"]
+    if set(media) != {oid.removeprefix("nextqa-val-") for oid in object_ids}:
+        raise ValueError("cohort media and question objects differ")
+    if output.exists():
+        raise ValueError("fresh media output already exists")
+    output.mkdir(parents=True)
+    rows = []
+    for video in sorted(media):
+        source = cohort_dir / "media" / f"{video}.mp4"
+        expected = media[video]
+        payload = source.read_bytes()
+        if (len(payload) != expected["bytes"]
+                or hashlib.sha256(payload).hexdigest() != expected["sha256"]
+                or zlib.crc32(payload) & 0xFFFFFFFF != expected["crc32"]):
+            raise ValueError(f"cohort media differs: {video}")
+        target = output / source.name
+        shutil.copyfile(source, target)
+        if hashlib.sha256(target.read_bytes()).hexdigest() != expected["sha256"]:
+            raise ValueError(f"copied media differs: {video}")
+        rows.append({"object_id": f"nextqa-val-{video}",
+                     "filename": target.name,
+                     "archive_entry": expected["archive_entry"],
+                     "bytes": expected["bytes"],
+                     "sha256": expected["sha256"]})
+    write(output / "media.json", {
+        "selection_sha256": hashlib.sha256(selection_bytes).hexdigest(),
+        "archive_url": ARCHIVE_URL, "objects": rows,
+        "llm_called": False, "credentials_recorded": False,
+    })
+    with (output / "SHA256SUMS").open("xb") as handle:
+        for artifact in sorted(output.iterdir()):
+            if artifact.name != "SHA256SUMS":
+                handle.write(
+                    f"{hashlib.sha256(artifact.read_bytes()).hexdigest()}  "
+                    f"{artifact.name}\n".encode("ascii"))
+    verify_sums(output)
+    return {"status": "VERIFIED_PUBLIC_COHORT_MEDIA",
+            "object_count": len(rows),
+            "selection_sha256": hashlib.sha256(selection_bytes).hexdigest()}
+
+
 def offline(input_dir: Path, output: Path, source_commit: str, host: str):
+    # The canonical membership freezer requires a full commit identity.
+    # Check before creating any output so an abbreviated SHA cannot leave
+    # a partial preparation directory behind.
+    if re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
+        raise ValueError("source_commit must be a full Git SHA-1")
     from pathfinder.simulator.raw_cold_data_plane import (
         RawColdObjectBinding, build_raw_cold_data_plane_package,
         verify_raw_cold_data_plane_package,
@@ -292,14 +358,17 @@ def paid(input_dir: Path, output: Path, protocol_path: Path, phase: str, host: s
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("phase", choices=("offline", "captions", "video-index", "query"))
+    parser.add_argument("phase", choices=("media", "offline", "captions", "video-index", "query"))
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--physical-host", required=True)
     parser.add_argument("--protocol", type=Path)
     args = parser.parse_args()
-    if args.phase == "offline":
+    if args.phase == "media":
+        print(json.dumps(freeze_cohort_media(args.input_dir,
+                                             args.output_dir), sort_keys=True))
+    elif args.phase == "offline":
         offline(args.input_dir, args.output_dir, args.source_commit, args.physical_host)
     else:
         paid(args.input_dir, args.output_dir, args.protocol, args.phase, args.physical_host)
