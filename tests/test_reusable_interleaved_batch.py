@@ -61,6 +61,48 @@ def _fixture(name: str) -> tuple[dict, dict, Path]:
 
 
 class ReusableBatchTests(unittest.TestCase):
+    def test_observation_output_keeps_rejection_out_of_answer_accuracy(self):
+        config, context, _ = _fixture("sealed-28.draft.json")
+        old = ARTIFACTS / "multiq-sealed-28route-20260924t080919z-c7df0003/routes"
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            out = Path(temporary) / "out"
+            shutil.copytree(old, out)
+            start, summary = batch._read(out / "start.json"), batch._read(out / "summary.json")
+            start["config_sha256"] = summary["config_sha256"] = "config"
+            summary["status"] = "RECORDED_INTERLEAVED_BATCH_OBSERVATIONS"
+            (out / "start.json").write_bytes(batch._pretty(start))
+            (out / "summary.json").write_bytes(batch._pretty(summary))
+            trial = context["trials"][0]
+            route = context["routes"][trial["trial_key"]]
+            diagnosis = {
+                "run_id": route["run_id"], "trial_key": trial["trial_key"],
+                "execution_id": batch._hash(batch._canonical({
+                    "domain": "pathfinder.generic-semantic-route-id/v1",
+                    "run_id": route["run_id"], "trial_key": trial["trial_key"]})),
+                "provider_code": "data_inspection_failed", "http_status": 400,
+                "workflow_status": "FAILED", "durable_state": "FAILED",
+                "failure_sha256": "a" * 64, "n6_error_sha256": "b" * 64,
+                "retry_authorized": False, "credentials_recorded": False,
+            }
+            terminal = {**batch._read(out / "timing-00.json"),
+                        "status": "OBSERVED_PROVIDER_REJECTION", "task_success": None,
+                        "diagnosis": diagnosis}
+            (out / "route-00.json").unlink()
+            (out / "terminal-00.json").write_bytes(batch._pretty(terminal))
+            (out / "continuation.json").write_bytes(batch._pretty({
+                "schema_version": "pathfinder.batch-continuation/v1",
+                "previous_submissions_repeated": False, "credentials_recorded": False}))
+            _refresh_checksums(out)
+            verified = batch.verify_output(config, "config", context, out)
+            self.assertEqual(verified["status"], "VERIFIED_INTERLEAVED_BATCH_OBSERVATIONS")
+            self.assertEqual(sum(verified["unavailable_by_arm"].values()), 1)
+            self.assertEqual(sum(sum(x.values()) for x in verified["success_by_arm"].values()), 27)
+            terminal["task_success"] = False
+            (out / "terminal-00.json").write_bytes(batch._pretty(terminal))
+            _refresh_checksums(out)
+            with self.assertRaisesRegex(ValueError, "terminal failure"):
+                batch.verify_output(config, "config", context, out)
+
     def test_continuation_validates_prefix_and_never_retries_terminal(self):
         config, context, _ = _fixture("sealed-28.draft.json")
         context = copy.deepcopy(context)

@@ -1114,6 +1114,43 @@ also terminal, with no retry/input alteration. Preserve each continuation
 point so operator pauses can be subtracted from path-time allocation while
 remaining visible in the full observed fleet-window cost.
 
+2026-09-24 — RESOLVED, Windows execution identity boundary: a public frozen
+route-binding file was readable by the sandbox but not by the approved
+network process identity. The supervisor stopped before any network call.
+Stage only that public file in the accessible build directory and pin its
+SHA-256; never loosen private-package ACLs or copy credentials as a fix.
+This is a local permission issue, not evidence that UpCloud is unavailable.
+
+2026-09-24 — RESOLVED, operator continuation wrapper: the shared batch CLI
+returns exit 2 for `STOPPED_AT_FIRST_FAILURE`, while the outer wrapper had
+expected 1. This stopped supervision after ordinal 34; it did not retry or
+lose any request. Accept both wrapper/CLI nonzero terminal statuses only as
+a signal to read `failure.json`; still require the exact durable state,
+FlowMesh binding and N6 provider-rejection diagnostic before continuing.
+An exit code alone is never sufficient authorization to skip a slot.
+
+2026-09-24 — CONFIRMED, ordinal 34: the initial wrapper reported
+`flowmesh-result-retrieval-failed`, not `flowmesh-workflow-terminal-failure`.
+Read-only checks nevertheless show the exact route FAILED with the same
+N6 executor-wrapper digest; its exact-time N6 log is HTTP 400
+`data_inspection_failed`; the task AND workflow are currently FAILED.
+Do not resubmit to recover a nonexistent answer. Classify using all three
+durable boundaries, preserve the original outer code and final statuses.
+The SDK exposes `workflows.retrieve`, not `workflows.get`; inspect its public
+methods before writing diagnostics. No FlowMesh repository change is needed.
+
+2026-09-24 — PREVENTED before accounting: the transport aggregate has
+checksummed subpackages, not a root `SHA256SUMS`. Do not assume every
+directory is itself a package and do not add files to an exact-set frozen
+package. Verify canonical inputs and bind the relative-path checksum tree
+for the aggregate, alongside route/N6-export/paid-journal digests.
+
+2026-09-24 — RESOLVED, read-only lineage audit: substring membership matched
+every D run/trial against both D and DC (`-d`/`-dc`, `|D`/`|DC`), falsely
+reporting duplicates. Use complete identifier-token boundaries for BOTH
+run ID and trial key. This was an audit bug, not evidence of resubmission.
+The prefix verifier and execution runner use exact dictionary identities.
+
 The ledger may contain identities and non-secret metadata. It must never
 contain API keys, bearer tokens, HMAC secrets, signed URLs, private prompts,
 hidden labels, or environment dumps.

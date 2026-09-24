@@ -91,6 +91,38 @@ Status: PAID_PREPARATION_RUNNING; no route workflow submitted yet.
 
 ### Current resume point (supersedes the initial entry steps below)
 
+**COMPLETE:** all 48 frozen slots were submitted exactly once. Final N7
+output is `/home/pathfinder/h48-runner-20260924-v1/output/routes-cont4`;
+local copy `artifacts/h48-final-observations-v1/routes-cont4`. Canonical
+verification: `VERIFIED_INTERLEAVED_BATCH_OBSERVATIONS`, 44 COMPLETE and
+four provider refusals (ordinals 13, 14, 20, 34), no retries/replacements.
+Exact FlowMesh lineage independently proves 48 unique workflows, all on
+wkr-2, 44 DONE and 4 FAILED. Each refusal has a durable route hash and
+same-interval N6 HTTP 400 `data_inspection_failed` diagnostic.
+
+Fixed-policy cost replay is `artifacts/h48-cost-replay-v2`: all 44 successful
+N6 usages bind exact request/result digests and each has one provider attempt.
+36 caption + 4 video-embedding + 12 query-embedding preparation calls have
+usage and active-host wall time. Four refusal charges remain unknown.
+Known recorded-window API list price is $0.336024780; nine-VM wall allocation
+from first preparation to final route is $0.157722118, known subtotal
+$0.493746898, **not invoice payment or a complete total**. Operator pauses
+remain in this observed window but are removed from policy-time costs.
+
+Results: D 12 correct/12; DC 11 correct, 1 incorrect/12; I 11 correct and
+1 unavailable; R 9 correct and 3 unavailable. DC has 4 misses and 8 hits.
+The single D/DC disagreement has an identical semantic-content digest;
+do not claim that representation changes caused it. The four newly selected
+videos are still too easy to establish a rich quality decision problem.
+No further experiments are authorized/in flight in this continuation.
+
+Final reproducible report bundle and numeric inputs are frozen separately;
+the older partial runs, packages and cost-report v1 are retained unchanged.
+Only targeted tests were run (28), not the full suite. No FlowMesh repository
+was changed and no hidden-label values were exported. The prior unrelated
+user edits remain untouched. The source and operators below document how
+the now-completed run was produced; they are not instructions to rerun it.
+
 - Fresh outcome-blind v3 selection: 4 new videos, 12 questions, 48 routes.
   Public packages: `artifacts/h48-runtime-v1`, 169 checked files; remote
   `/home/pathfinder/h48-public-20260924-v1` on N2/N3/N4/N6/N7.
@@ -103,7 +135,7 @@ Status: PAID_PREPARATION_RUNNING; no route workflow submitted yet.
 - Both source-bound gates and 12 dependency/auth probes passed. Worker is
   wkr-2 under the pinned alias. Original route output on N7:
   `/home/pathfinder/h48-runner-20260924-v1/output/routes`.
-- 13 routes COMPLETE, ordinal 13 terminal provider rejection, not a bug:
+- At the first checkpoint: 13 routes COMPLETE, ordinal 13 terminal provider rejection, not a bug:
   `400 data_inspection_failed`. Exact binding and sanitized diagnostic are
   in `provider-rejection-13.json`. No accuracy outcomes inspected to choose
   a repair or sample. No retry or input modification is permitted.
