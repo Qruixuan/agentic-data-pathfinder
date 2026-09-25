@@ -203,6 +203,27 @@ class TenRouteMultiQuestionPlanTests(unittest.TestCase):
                 exposure_inventory_sha256="b" * 64,
             ))
 
+    def test_single_summary_fusion_preserves_six_slots_and_two_artifacts(self):
+        selected = self.cohort()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "summary-plan"
+            report = freeze_ten_route_multiq_plan(
+                selected, seed="seed-summary", experiment_id="summary-episode",
+                public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+                output_dir=root, derived_profile="single-summary-fusion",
+            )
+            self.assertEqual(report["route_observation_count"], 36)
+            manifest = json.loads((root / "ten-route-multiq-plan.json").read_bytes())
+            self.assertEqual(manifest["derived_representation_ids"],
+                             ["multimodal_digest", "sampled_frame_bundle"])
+            self.assertEqual(manifest["profile"],
+                             "light-derived-fusion-supplement")
+            self.assertEqual(report, verify_ten_route_multiq_plan(
+                root, selected, public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()

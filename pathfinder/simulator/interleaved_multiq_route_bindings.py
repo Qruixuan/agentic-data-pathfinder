@@ -85,6 +85,9 @@ def _expected(
         TEN_ROUTE_PLAN_SCHEMA, LIGHT_D_SCHEMA,
     }
     light_d = plan_document["schema_version"] == LIGHT_D_SCHEMA
+    frame_only = light_d and plan_document["derived_representation_ids"] == [
+        "sampled_frame_bundle"
+    ]
     commitment = verify_n1_oracle_preselection_commitment(
         n1_public_commitment_dir,
     )
@@ -161,7 +164,7 @@ def _expected(
                 required = tuple(
                     ("N4", representation, derived[(object_id, representation)])
                     for representation in (("sampled_frame_bundle",)
-                                           if light_d else
+                                           if frame_only else
                                            ("multimodal_digest",
                                             "sampled_frame_bundle"))
                 )
@@ -216,7 +219,7 @@ def _expected(
              and len({row["run_id"] for row in routes}) == len(routes),
              "route or run identity repeats")
     expected_bindings = (
-        6 if light_d else 16 if ten_route else 7
+        6 if frame_only else 12 if light_d else 16 if ten_route else 7
     ) * len(questions)
     _require(sum(len(row["inputs"]) for row in routes)
              == len(access) == expected_bindings,

@@ -358,6 +358,9 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
     plan, questions, plan_report = load_verified_multiq_plan(
         sources["plan_dir"]
     )
+    frame_only = light_d and plan.get("derived_representation_ids") == [
+        "sampled_frame_bundle"
+    ]
     if ten_multiq != (plan["schema_version"] in {
         TEN_PLAN_SCHEMA, LIGHT_D_PLAN_SCHEMA,
     }) or (light_d != (plan["schema_version"] == LIGHT_D_PLAN_SCHEMA)):
@@ -373,7 +376,8 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
         or report["index_query_plan_count"]
         != (0 if light_d else 2 if ten_multiq else 1) * plan["question_count"]
         or (ten_multiq and report["data_agent_plan_binding_count"]
-            != (6 if light_d else 16) * plan["question_count"])
+            != (6 if frame_only else 12 if light_d else 16)
+            * plan["question_count"])
         or (ten_multiq and report["cache_episode_binding_count"]
             != 4 * plan["question_count"])
     ):

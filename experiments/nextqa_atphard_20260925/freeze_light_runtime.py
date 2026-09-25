@@ -70,7 +70,9 @@ def main() -> int:
             or admission["trial_count"] != 6 * plan["question_count"]
             or admission["index_query_plan_count"] != 0
             or admission["data_agent_plan_binding_count"]
-            != admission["trial_count"]):
+            != admission["trial_count"] * len(
+                plan["derived_representation_ids"]
+            )):
         raise ValueError("light-D canonical coverage differs")
     print(json.dumps({
         "status": "VERIFIED_LIGHT_D_RUNTIME_INPUTS",

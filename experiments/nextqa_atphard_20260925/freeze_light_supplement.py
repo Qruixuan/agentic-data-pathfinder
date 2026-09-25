@@ -16,6 +16,10 @@ def main() -> int:
     parser.add_argument("--source-plan-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--experiment-id", required=True)
+    parser.add_argument(
+        "--derived-profile", choices=("frame-only", "single-summary-fusion"),
+        default="frame-only",
+    )
     args = parser.parse_args()
     original, questions, _ = load_verified_multiq_plan(args.source_plan_dir)
     if original["schema_version"] != SCHEMA:
@@ -27,7 +31,7 @@ def main() -> int:
         public_source_sha256=original["public_source_sha256"],
         exposure_inventory_sha256=original["exposure_inventory_sha256"],
         output_dir=args.output_dir,
-        derived_profile="frame-only",
+        derived_profile=args.derived_profile,
     )
     if report["question_count"] != original["question_count"] or (
         report["route_observation_count"] != 6 * original["question_count"]

@@ -137,6 +137,9 @@ def interleaved_data_agent_plan_bindings(
         raise MultiQuestionSelectionError("public source digest differs")
     ten_route = manifest["schema_version"] in {TEN_ROUTE_SCHEMA, LIGHT_D_SCHEMA}
     light_d = manifest["schema_version"] == LIGHT_D_SCHEMA
+    frame_only = light_d and manifest["derived_representation_ids"] == [
+        "sampled_frame_bundle"
+    ]
     n3_root = Path(n3_package_dir).resolve()
     n3 = MultiQuestionExactSelectionCatalog(
         n3_root, raw_package_dir=raw_package_dir,
@@ -221,7 +224,7 @@ def interleaved_data_agent_plan_bindings(
             representations = (
                 ("multimodal_digest",)
                 if arm == "I"
-                else (("sampled_frame_bundle",) if light_d else
+                else (("sampled_frame_bundle",) if frame_only else
                       ("multimodal_digest", "sampled_frame_bundle"))
             )
             for representation in representations:
@@ -238,7 +241,8 @@ def interleaved_data_agent_plan_bindings(
                     trial_key, "N3", object_id,
                     INDEXED_REPRESENTATION_ID,
                 )] = n3_plan_id
-    expected = (6 if light_d else 16 if ten_route else 7) * len(questions)
+    expected = (6 if frame_only else 12 if light_d
+                else 16 if ten_route else 7) * len(questions)
     if len(bindings) != expected:
         # New ten-slot profile: both nodes have R=1, I=1, D=2,
         # and two DC repetitions of two entries (eight per node).

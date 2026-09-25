@@ -46,6 +46,13 @@ _OBSERVATIONS = (
 _LIGHT_D_OBSERVATIONS = tuple(
     row for row in _OBSERVATIONS if row[2] in {"D", "DC"}
 )
+_LIGHT_PROFILES = {
+    "frame-only": ("light-derived-supplement", ["sampled_frame_bundle"]),
+    "single-summary-fusion": (
+        "light-derived-fusion-supplement",
+        ["multimodal_digest", "sampled_frame_bundle"],
+    ),
+}
 
 
 def is_ten_route_family(schema_version: str) -> bool:
@@ -236,7 +243,7 @@ def freeze_ten_route_multiq_plan(
     target = Path(output_dir).resolve()
     _require(not target.exists(), "plan output already exists")
     rows = _public_questions(public_questions)
-    _require(derived_profile in {"caption-fusion", "frame-only"},
+    _require(derived_profile in {"caption-fusion", *_LIGHT_PROFILES},
              "derived profile is unsupported")
     schema = SCHEMA if derived_profile == "caption-fusion" else LIGHT_D_SCHEMA
     observations = observations_for_schema(schema)
@@ -261,8 +268,9 @@ def freeze_ten_route_multiq_plan(
         "credentials_recorded": False,
     }
     if schema == LIGHT_D_SCHEMA:
-        manifest["derived_representation_ids"] = ["sampled_frame_bundle"]
-        manifest["profile"] = "light-derived-supplement"
+        profile_name, representations = _LIGHT_PROFILES[derived_profile]
+        manifest["derived_representation_ids"] = representations
+        manifest["profile"] = profile_name
     manifest["plan_sha256"] = _sha(_canonical(manifest))
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.",
@@ -306,6 +314,10 @@ def verify_ten_route_multiq_plan(
     rows = _public_questions(public_questions)
     schema = manifest.get("schema_version")
     observations = observations_for_schema(schema)
+    light_profile = next((value for value in _LIGHT_PROFILES.values()
+                          if manifest.get("profile") == value[0]), None)
+    _require(schema != LIGHT_D_SCHEMA or light_profile is not None,
+             "light-derived profile is unsupported")
     schedule = _schedule(rows, seed=manifest["seed"],
                          experiment_id=manifest["experiment_id"],
                          observations=observations)
@@ -326,8 +338,8 @@ def verify_ten_route_multiq_plan(
             "workflow_submitted": False,
             "credentials_recorded": False,
             "plan_sha256": digest,
-            **({"derived_representation_ids": ["sampled_frame_bundle"],
-                "profile": "light-derived-supplement"}
+            **({"derived_representation_ids": light_profile[1],
+                "profile": light_profile[0]}
                if schema == LIGHT_D_SCHEMA else {}),
         }
         and (root / QUESTIONS).read_bytes() == _jsonl(rows)

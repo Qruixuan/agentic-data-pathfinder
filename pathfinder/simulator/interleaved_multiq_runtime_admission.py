@@ -126,6 +126,9 @@ def _expected(
         TEN_ROUTE_PLAN_SCHEMA, LIGHT_D_SCHEMA,
     }
     light_d = plan_doc["schema_version"] == LIGHT_D_SCHEMA
+    frame_only = light_d and plan_doc["derived_representation_ids"] == [
+        "sampled_frame_bundle"
+    ]
     if ten_route:
         origins = _ten_route_origins(coordinator_base_urls)
         _require(coordinator_base_url is None,
@@ -272,7 +275,10 @@ def _expected(
     _require(len(admitted) == expected_routes
              and len(index_plans) == (0 if light_d else 2 if ten_route else 1)
              * plan["question_count"]
-             and len(access_plans) == (6 if light_d else 16 if ten_route else 7)
+             and len(access_plans) == (
+                 6 if frame_only else 12 if light_d
+                 else 16 if ten_route else 7
+             )
              * plan["question_count"]
              and len(cache) == (4 if ten_route else 1)
              * plan["question_count"],

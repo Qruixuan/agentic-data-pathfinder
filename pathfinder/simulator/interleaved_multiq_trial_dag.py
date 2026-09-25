@@ -319,6 +319,13 @@ def build_all_interleaved_trial_dags(
     ten_route = (manifest["status"]
                  == "FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED")
     light_d = manifest.get("plan_schema_version") == LIGHT_D_SCHEMA
+    plan_document = json.loads((Path(plan_dir) /
+                                "ten-route-multiq-plan.json").read_bytes()) if (
+        light_d
+    ) else {}
+    frame_only = light_d and plan_document.get(
+        "derived_representation_ids"
+    ) == ["sampled_frame_bundle"]
     _require(manifest["status"] in {
                  "FROZEN_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED",
                  "FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED",
@@ -351,7 +358,7 @@ def build_all_interleaved_trial_dags(
             raw_artifact=raw[object_id],
             derived_artifacts={rep: derived[(object_id, rep)]
                                for rep in (("sampled_frame_bundle",)
-                                           if light_d else
+                                           if frame_only else
                                            ("multimodal_digest",
                                             "sampled_frame_bundle"))},
             n3_catalog_version=n3["catalog_version"],
@@ -362,7 +369,7 @@ def build_all_interleaved_trial_dags(
                              if route["arm_id"] == "I" else None),
             executor_node_id=route.get("executor_node_id", "N7"),
             indexed_raw=ten_route,
-            derived_frame_only=light_d,
+            derived_frame_only=frame_only,
         )
         trials.append(trial)
         stages.extend(trial_stages)
