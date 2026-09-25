@@ -53,7 +53,9 @@ def main() -> int:
         if target.exists():
             raise ValueError("immutable summary output already exists")
         command = [
-            "sudo", "-n", "docker", "run", "--rm", "--network", "host",
+            "sudo", "-n",
+            "--preserve-env=" + ",".join(PROVIDER_KEYS),
+            "docker", "run", "--rm", "--network", "host",
             "--read-only", "--user", "1000:1000", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m,mode=1777",
@@ -77,9 +79,20 @@ def main() -> int:
             text=True, check=False,
         )
         if result.returncode != 0:
+            diagnostic = {}
+            try:
+                parsed = json.loads(result.stdout)
+                if parsed.get("status") == "LIGHTWEIGHT_FUSION_STOPPED":
+                    diagnostic = {
+                        "error_class": parsed.get("error_class"),
+                        "http_status": parsed.get("http_status"),
+                    }
+            except (json.JSONDecodeError, AttributeError):
+                pass
             print(json.dumps({"status": "SUMMARY_STOPPED",
                               "exit_code": result.returncode,
-                              "credentials_recorded": False}))
+                              "credentials_recorded": False,
+                              **diagnostic}, sort_keys=True))
             return 2
         report = json.loads(result.stdout)
         if (report["status"] != "VERIFIED_VIDEO_SUMMARIES"

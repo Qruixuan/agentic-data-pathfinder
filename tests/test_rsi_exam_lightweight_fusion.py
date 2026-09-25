@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -60,6 +63,27 @@ def _bundle(object_id: str, root: Path) -> bytes:
 
 
 class LightweightFusionTests(unittest.TestCase):
+    def test_cli_reports_only_sanitized_failure_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = subprocess.run([
+                sys.executable, "-m", "pathfinder.rsi_exam.lightweight_fusion",
+                "summarize", "--frame-n4-dir", str(root / "absent"),
+                "--cache-dir", str(root / "cache"),
+                "--output-dir", str(root / "output"),
+            ], env={**os.environ,
+                    "PATHFINDER_SEMANTIC_LLM_MODEL": "test-model",
+                    "PATHFINDER_SEMANTIC_LLM_BASE_URL":
+                        "https://example.invalid/v1",
+                    "PATHFINDER_SEMANTIC_LLM_API_KEY": "private-test-key"},
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 2)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "LIGHTWEIGHT_FUSION_STOPPED")
+            self.assertEqual(report["error_class"], "N4DerivedDataPlaneError")
+            self.assertNotIn("private-test-key", result.stdout)
+
     def test_one_summary_call_per_video_then_fuse_existing_frames(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

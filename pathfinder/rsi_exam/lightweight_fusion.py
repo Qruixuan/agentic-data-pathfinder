@@ -528,4 +528,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        status = getattr(exc, "code", None)
+        print(json.dumps({
+            "status": "LIGHTWEIGHT_FUSION_STOPPED",
+            "error_class": type(exc).__name__,
+            "http_status": status if type(status) is int else None,
+            "credentials_recorded": False,
+        }, sort_keys=True))
+        raise SystemExit(2) from None
