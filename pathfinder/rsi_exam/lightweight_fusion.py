@@ -9,17 +9,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+from dataclasses import dataclass
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tarfile
 import tempfile
 from time import monotonic_ns
 from typing import Any, Callable
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .lightweight_derived import PLAN_IDS, _canonical, _pretty, _sha
 from ..simulator.n4_derived_data_plane import (
@@ -43,12 +45,42 @@ MODEL_FRAME_INDICES = tuple(1 + 3 * index for index in range(8))
 SCHEMA = "pathfinder.rsi-exam-lightweight-video-summary/v1"
 FUSION_SCHEMA = "pathfinder.rsi-exam-lightweight-fusion-build/v1"
 SUMMARY_DERIVATION_ID = "rsi-exam-question-independent-single-summary-v1"
-Transport = Callable[[Request, float], bytes]
 
 
-def _default_transport(request: Request, timeout: float) -> bytes:
-    with urlopen(request, timeout=timeout) as response:
-        return response.read()
+@dataclass(frozen=True)
+class ProviderResponse:
+    body: bytes
+    request_id: str | None = None
+    dashscope_request_id: str | None = None
+
+
+Transport = Callable[[Request, float], bytes | ProviderResponse]
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+def _default_transport(request: Request, timeout: float) -> ProviderResponse:
+    # urllib's default redirect handler can forward the bearer token.
+    with build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
+        return ProviderResponse(
+            response.read(), response.headers.get("X-Request-Id"),
+            response.headers.get("X-DashScope-RequestId"),
+        )
+
+
+_REQUEST_ID = re.compile(
+    r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+)
+
+
+def _provider_id_sha256(value: str | None, api_key: str) -> str | None:
+    if (not isinstance(value, str) or value == api_key
+            or _REQUEST_ID.fullmatch(value) is None):
+        return None
+    return _sha(value.encode("ascii"))
 
 
 def _bundle_frames(bundle: bytes) -> tuple[dict[str, Any], list[bytes]]:
@@ -172,8 +204,16 @@ def materialize_video_summaries(
                 },
             )
             start = monotonic_ns()
-            response = transport(request, timeout_seconds)
+            delivered = transport(request, timeout_seconds)
             new_requests += 1
+            response = (delivered if isinstance(delivered, bytes)
+                        else delivered.body)
+            request_id = (None if isinstance(delivered, bytes)
+                          else delivered.request_id)
+            dashscope_request_id = (None if isinstance(delivered, bytes)
+                                    else delivered.dashscope_request_id)
+            if api_key.encode("utf-8") in response:
+                raise ValueError("provider response echoed a credential")
             record = {
                 "schema_version": SCHEMA,
                 "object_id": object_id,
@@ -182,6 +222,10 @@ def materialize_video_summaries(
                 "source_bundle_sha256": _sha(bundle),
                 "request_input_sha256": input_sha,
                 "response_sha256": _sha(response),
+                "provider_request_id_sha256": _provider_id_sha256(
+                    request_id, api_key),
+                "provider_dashscope_request_id_sha256": _provider_id_sha256(
+                    dashscope_request_id, api_key),
                 "response_utf8": response.decode("utf-8"),
                 "service_wall_ns": monotonic_ns() - start,
                 "credentials_recorded": False,
@@ -198,6 +242,10 @@ def materialize_video_summaries(
             "source_bundle_sha256": _sha(bundle),
             "request_input_sha256": input_sha,
             "response_sha256": record["response_sha256"],
+            "provider_request_id_sha256": record.get(
+                "provider_request_id_sha256"),
+            "provider_dashscope_request_id_sha256": record.get(
+                "provider_dashscope_request_id_sha256"),
             "summary": summary,
             "summary_sha256": _sha(summary.encode("utf-8")),
             "usage": usage,

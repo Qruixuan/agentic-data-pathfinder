@@ -12,7 +12,7 @@ import unittest
 from PIL import Image
 
 from pathfinder.rsi_exam.lightweight_fusion import (
-    PROMPT_SHA256, freeze_lightweight_fusion,
+    PROMPT_SHA256, ProviderResponse, freeze_lightweight_fusion,
     materialize_video_summaries, verify_lightweight_fusion,
 )
 from pathfinder.rsi_exam.formal_foundation import _frame_bundle
@@ -95,7 +95,7 @@ class LightweightFusionTests(unittest.TestCase):
                 self.assertIn("question-independent", content[0]["text"])
                 self.assertEqual(len(content), 17)
                 calls.append(request.full_url)
-                return json.dumps({
+                payload = json.dumps({
                     "choices": [{"message": {"content": json.dumps({
                         "summary": "A person moves across the room.",
                     })}}],
@@ -103,6 +103,9 @@ class LightweightFusionTests(unittest.TestCase):
                               "completion_tokens": 8,
                               "total_tokens": 20},
                 }).encode()
+                return ProviderResponse(
+                    payload, f"00000000-0000-0000-0000-{len(calls):012d}",
+                )
 
             report = materialize_video_summaries(
                 root / "frames", cache_dir=root / "cache",
@@ -115,6 +118,13 @@ class LightweightFusionTests(unittest.TestCase):
             self.assertEqual(report["prompt_tokens"], 96)
             self.assertEqual(report["completion_tokens"], 64)
             self.assertEqual(len(PROMPT_SHA256), 64)
+            summaries = [json.loads(line) for line in
+                         (root / "summaries/video-summaries.jsonl")
+                         .read_bytes().splitlines()]
+            self.assertEqual(len({row["provider_request_id_sha256"]
+                                  for row in summaries}), 8)
+            self.assertTrue(all(row["provider_request_id_sha256"]
+                                for row in summaries))
             for path in (root / "cache").iterdir():
                 self.assertNotIn(b"test-key", path.read_bytes())
 
