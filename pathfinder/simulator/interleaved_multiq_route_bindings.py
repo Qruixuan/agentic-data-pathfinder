@@ -24,6 +24,7 @@ from ..rsi_exam.interleaved_multiq_plan import (
 )
 from ..rsi_exam.ten_route_multiq_plan import (
     SCHEMA as TEN_ROUTE_PLAN_SCHEMA,
+    LIGHT_D_SCHEMA,
     SCHEDULE as TEN_ROUTE_SCHEDULE,
     load_verified_multiq_plan,
     ten_route_trial_key,
@@ -80,7 +81,10 @@ def _expected(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     questions = _rows(plan_dir / QUESTIONS)
     plan_document, _, plan = load_verified_multiq_plan(plan_dir, questions)
-    ten_route = plan_document["schema_version"] == TEN_ROUTE_PLAN_SCHEMA
+    ten_route = plan_document["schema_version"] in {
+        TEN_ROUTE_PLAN_SCHEMA, LIGHT_D_SCHEMA,
+    }
+    light_d = plan_document["schema_version"] == LIGHT_D_SCHEMA
     commitment = verify_n1_oracle_preselection_commitment(
         n1_public_commitment_dir,
     )
@@ -156,8 +160,10 @@ def _expected(
             else:
                 required = tuple(
                     ("N4", representation, derived[(object_id, representation)])
-                    for representation in ("multimodal_digest",
-                                           "sampled_frame_bundle")
+                    for representation in (("sampled_frame_bundle",)
+                                           if light_d else
+                                           ("multimodal_digest",
+                                            "sampled_frame_bundle"))
                 )
             inputs = []
             for node, representation, artifact in required:
@@ -188,17 +194,20 @@ def _expected(
                     "executor_node_id": slot["executor_node_id"],
                     "repetition": slot["repetition"],
                     "cache_expectation": slot["cache_expectation"],
-                    "order_index": round_row["ordinal"] * 10
-                    + len(routes) % 10,
+                    "order_index": round_row["ordinal"] * (
+                        6 if light_d else 10
+                    ) + len(routes) % (6 if light_d else 10),
                 })
             routes.append(route)
     expected_routes = (plan["route_observation_count"] if ten_route
                        else plan["route_count"])
     _require(len(routes) == expected_routes,
              "route binding count differs from the plan")
-    expected_coverage = ({arm: 2 * len(questions) for arm in
-                          ("R", "I", "D")}
-                         | {"DC": 4 * len(questions)}) if ten_route else {
+    expected_coverage = (
+        {"D": 2 * len(questions), "DC": 4 * len(questions)} if light_d else
+        ({arm: 2 * len(questions) for arm in ("R", "I", "D")}
+         | {"DC": 4 * len(questions)})
+    ) if ten_route else {
                              arm: len(questions) for arm in ("R", "D", "DC", "I")
                          }
     _require(Counter(row["arm_id"] for row in routes)
@@ -206,7 +215,9 @@ def _expected(
     _require(len({row["trial_key"] for row in routes}) == len(routes)
              and len({row["run_id"] for row in routes}) == len(routes),
              "route or run identity repeats")
-    expected_bindings = (16 if ten_route else 7) * len(questions)
+    expected_bindings = (
+        6 if light_d else 16 if ten_route else 7
+    ) * len(questions)
     _require(sum(len(row["inputs"]) for row in routes)
              == len(access) == expected_bindings,
              "exact Data Agent binding count changed")
@@ -232,7 +243,7 @@ def _expected(
     manifest["routes_sha256"] = _sha(b"".join(_canonical(row) + b"\n"
                                            for row in routes))
     if ten_route:
-        manifest["plan_schema_version"] = TEN_ROUTE_PLAN_SCHEMA
+        manifest["plan_schema_version"] = plan_document["schema_version"]
     manifest["manifest_sha256"] = _sha(_canonical(manifest))
     return manifest, routes
 

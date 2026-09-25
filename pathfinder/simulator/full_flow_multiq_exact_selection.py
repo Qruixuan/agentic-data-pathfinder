@@ -15,6 +15,7 @@ from ..rsi_exam.interleaved_multiq_plan import (
 )
 from ..rsi_exam.ten_route_multiq_plan import (
     SCHEMA as TEN_ROUTE_SCHEMA,
+    LIGHT_D_SCHEMA,
     SCHEDULE as TEN_ROUTE_SCHEDULE,
     load_verified_multiq_plan,
     ten_route_trial_key,
@@ -134,7 +135,8 @@ def interleaved_data_agent_plan_bindings(
     )
     if manifest["public_source_sha256"] != public_source_sha256:
         raise MultiQuestionSelectionError("public source digest differs")
-    ten_route = manifest["schema_version"] == TEN_ROUTE_SCHEMA
+    ten_route = manifest["schema_version"] in {TEN_ROUTE_SCHEMA, LIGHT_D_SCHEMA}
+    light_d = manifest["schema_version"] == LIGHT_D_SCHEMA
     n3_root = Path(n3_package_dir).resolve()
     n3 = MultiQuestionExactSelectionCatalog(
         n3_root, raw_package_dir=raw_package_dir,
@@ -219,7 +221,8 @@ def interleaved_data_agent_plan_bindings(
             representations = (
                 ("multimodal_digest",)
                 if arm == "I"
-                else ("multimodal_digest", "sampled_frame_bundle")
+                else (("sampled_frame_bundle",) if light_d else
+                      ("multimodal_digest", "sampled_frame_bundle"))
             )
             for representation in representations:
                 n4_row = n4_rows.get((object_id, representation))
@@ -235,7 +238,7 @@ def interleaved_data_agent_plan_bindings(
                     trial_key, "N3", object_id,
                     INDEXED_REPRESENTATION_ID,
                 )] = n3_plan_id
-    expected = (16 if ten_route else 7) * len(questions)
+    expected = (6 if light_d else 16 if ten_route else 7) * len(questions)
     if len(bindings) != expected:
         # New ten-slot profile: both nodes have R=1, I=1, D=2,
         # and two DC repetitions of two entries (eight per node).

@@ -169,6 +169,40 @@ class TenRouteMultiQuestionPlanTests(unittest.TestCase):
             self.assertEqual(len({slot["run_id"] for row in schedule
                                   for slot in row["route_slots"]}), 400)
 
+    def test_light_derived_supplement_has_only_six_frame_only_slots(self):
+        selected = self.cohort()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "light-plan"
+            report = freeze_ten_route_multiq_plan(
+                selected, seed="seed-light", experiment_id="light-episode",
+                public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+                output_dir=root, derived_profile="frame-only",
+            )
+            self.assertEqual(report["route_observation_count"], 36)
+            manifest = json.loads((root / "ten-route-multiq-plan.json").read_bytes())
+            self.assertEqual(manifest["derived_representation_ids"],
+                             ["sampled_frame_bundle"])
+            schedule = [json.loads(line) for line in (
+                root / "ten-route-multiq-schedule.jsonl"
+            ).read_bytes().splitlines()]
+            for row in schedule:
+                self.assertEqual(len(row["route_slots"]), 6)
+                self.assertEqual(
+                    {slot["design_id"] for slot in row["route_slots"]},
+                    {"D2", "D3", "D6", "D7"},
+                )
+                for node in ("N7", "N8"):
+                    cache = [slot for slot in row["route_slots"]
+                             if slot["executor_node_id"] == node
+                             and slot["arm_id"] == "DC"]
+                    self.assertEqual([slot["cache_expectation"]
+                                      for slot in cache], ["miss", "hit"])
+            self.assertEqual(report, verify_ten_route_multiq_plan(
+                root, selected, public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()

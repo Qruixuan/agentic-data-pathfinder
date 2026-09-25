@@ -23,6 +23,86 @@ def canonical(value):
 
 
 class TenRouteMultiqBindingsTests(unittest.TestCase):
+    def test_light_derived_binds_one_n4_artifact_per_supplemental_route(self):
+        omitted = {"video-a": "causal", "video-b": "temporal",
+                   "video-c": "descriptive"}
+        questions = [row for row in public_questions()
+                     if row["object_id"] in omitted
+                     and row["stratum"] != omitted[row["object_id"]]]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = root / "plan"
+            freeze_ten_route_multiq_plan(
+                questions, seed="light-bind-seed", experiment_id="light-bind",
+                public_source_sha256="a" * 64,
+                exposure_inventory_sha256="b" * 64,
+                output_dir=plan, derived_profile="frame-only",
+            )
+            for name in ("n1", "n3", "n4"):
+                (root / name).mkdir()
+            public_tasks = sorted(({
+                "object_id": row["object_id"],
+                "task_binding_sha256": row["public_task_sha256"],
+                "success_scoring_rule": (
+                    MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE),
+                "answer_option_ids": [option["option_id"]
+                                      for option in row["answer_options"]],
+            } for row in questions), key=lambda row: (
+                row["object_id"], row["task_binding_sha256"],
+            ))
+            (root / "n1/n1-oracle-preselection-commitment.json").write_bytes(
+                canonical({"public_task_set_sha256": hashlib.sha256(
+                    canonical(public_tasks)).hexdigest()}))
+            (root / "n3/raw-cold-data-plane.json").write_bytes(canonical({
+                "raw_objects": [], "question_selections": [],
+            }))
+            (root / "n4/n4-derived-data-package.json").write_bytes(canonical({
+                "objects": [{
+                    "object_id": object_id,
+                    "representation_id": "sampled_frame_bundle",
+                    "artifact_sha256": "3" * 64,
+                    "artifact_size_bytes": 31,
+                } for object_id in omitted],
+            }))
+            schedule = [json.loads(line) for line in (
+                plan / "ten-route-multiq-schedule.jsonl"
+            ).read_bytes().splitlines()]
+            access = {
+                (ten_route_trial_key(
+                    "light-bind", item["question_id"], slot["design_id"],
+                    slot["repetition"],
+                ), "N4", item["object_id"], "sampled_frame_bundle"):
+                    "plan-bound"
+                for item in schedule for slot in item["route_slots"]
+            }
+            with (patch(
+                    "pathfinder.simulator.interleaved_multiq_route_bindings."
+                    "verify_n1_oracle_preselection_commitment",
+                    return_value={"label_count": 6,
+                                  "label_values_returned": False,
+                                  "commitment_sha256": "4" * 64},
+                  ), patch(
+                    "pathfinder.simulator.interleaved_multiq_route_bindings."
+                    "derive_n3_multiq_question_policies", return_value=[],
+                  ), patch(
+                    "pathfinder.simulator.interleaved_multiq_route_bindings."
+                    "interleaved_data_agent_plan_bindings",
+                    return_value=access,
+                  )):
+                manifest, routes = _expected(
+                    plan_dir=plan, n1_public_commitment_dir=root / "n1",
+                    n3_package_dir=root / "n3", raw_package_dir=root,
+                    n4_package_dir=root / "n4", query_dir=root,
+                    video_index_dir=root, preparation_dir=root,
+                    caption_dir=root,
+                )
+            self.assertEqual(len(routes), 36)
+            self.assertEqual(manifest["data_agent_binding_count"], 36)
+            self.assertEqual({row["arm_id"] for row in routes}, {"D", "DC"})
+            self.assertTrue(all(len(row["inputs"]) == 1
+                                and row["inputs"][0]["representation_id"]
+                                == "sampled_frame_bundle" for row in routes))
+
     def test_sixty_routes_have_ninety_six_exact_agent_plans(self):
         omitted = {"video-a": "causal", "video-b": "temporal",
                    "video-c": "descriptive"}

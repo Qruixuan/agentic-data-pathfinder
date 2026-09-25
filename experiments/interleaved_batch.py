@@ -35,6 +35,7 @@ from pathfinder.rsi_exam.ten_route_multiq_plan import (
     MANIFEST as TEN_PLAN_MANIFEST,
     SCHEDULE as TEN_PLAN_SCHEDULE,
     SCHEMA as TEN_PLAN_SCHEMA,
+    LIGHT_D_SCHEMA as LIGHT_D_PLAN_SCHEMA,
     load_verified_multiq_plan,
     ten_route_trial_key,
 )
@@ -54,6 +55,7 @@ from pathfinder.simulator.interleaved_multiq_runtime_admission import (
 
 SCHEMA = "pathfinder.interleaved-batch-config/v1"
 TEN_MULTIQ_SCHEMA = "pathfinder.ten-route-multiq-batch-config/v1"
+LIGHT_D_BATCH_SCHEMA = "pathfinder.light-derived-supplement-batch-config/v1"
 SOURCE_KEYS = frozenset({
     "trial_dag_dir", "binding_dir", "plan_dir", "n1_public_commitment_dir",
     "n2_index_package_dir", "n3_package_dir", "raw_package_dir",
@@ -114,9 +116,9 @@ def _validate_config(config: dict) -> dict:
     ):
         from experiments.ten_route_batch import validate_config
         return validate_config(config)
-    if isinstance(config, dict) and config.get("schema_version") == (
-        TEN_MULTIQ_SCHEMA
-    ):
+    if isinstance(config, dict) and config.get("schema_version") in {
+        TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }:
         if set(config) != TEN_MULTIQ_CONFIG_KEYS:
             raise ValueError("ten-route multi-question config keys differ")
         from pathfinder.simulator.interleaved_multiq_runtime_admission import (
@@ -128,8 +130,10 @@ def _validate_config(config: dict) -> dict:
         old_shape["coordinator_base_url"] = origins["N7"]
         del old_shape["coordinator_base_urls"]
         _validate_config(old_shape)
+        per_question = (6 if config["schema_version"] == LIGHT_D_BATCH_SCHEMA
+                        else 10)
         if config["expected_route_count"] != (
-            10 * config["expected_question_count"]
+            per_question * config["expected_question_count"]
         ):
             raise ValueError("ten-route multi-question cardinality differs")
         return config
@@ -232,10 +236,15 @@ def _baseline(root: Path, relative: str | None,
 def freeze_inputs(config: dict, artifact_root: Path) -> dict:
     """Freeze route bindings, DAGs, and admission from prepared inputs."""
 
-    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
+    if config["schema_version"] not in {
+        SCHEMA, TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }:
         from experiments.ten_route_batch import freeze_inputs as freeze_ten
         return freeze_ten(config, artifact_root)
-    ten_multiq = config["schema_version"] == TEN_MULTIQ_SCHEMA
+    ten_multiq = config["schema_version"] in {
+        TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }
+    light_d = config["schema_version"] == LIGHT_D_BATCH_SCHEMA
     root = artifact_root.resolve()
     sources = {
         key: _path(root, value)
@@ -250,7 +259,9 @@ def freeze_inputs(config: dict, artifact_root: Path) -> dict:
     plan_dir = sources["plan_dir"]
     if ten_multiq:
         plan, questions, verified_plan = load_verified_multiq_plan(plan_dir)
-        if plan["schema_version"] != TEN_PLAN_SCHEMA:
+        if plan["schema_version"] != (
+            LIGHT_D_PLAN_SCHEMA if light_d else TEN_PLAN_SCHEMA
+        ):
             raise ValueError("batch and public plan profiles differ")
     else:
         plan = _read(plan_dir / "interleaved-plan.json")
@@ -317,10 +328,15 @@ def freeze_inputs(config: dict, artifact_root: Path) -> dict:
 
 
 def load_inputs(config: dict, artifact_root: Path) -> dict:
-    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
+    if config["schema_version"] not in {
+        SCHEMA, TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }:
         from experiments.ten_route_batch import load_inputs as load_ten
         return load_ten(config, artifact_root)
-    ten_multiq = config["schema_version"] == TEN_MULTIQ_SCHEMA
+    ten_multiq = config["schema_version"] in {
+        TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }
+    light_d = config["schema_version"] == LIGHT_D_BATCH_SCHEMA
     root = artifact_root.resolve()
     sources = {
         key: _path(root, value)
@@ -342,7 +358,9 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
     plan, questions, plan_report = load_verified_multiq_plan(
         sources["plan_dir"]
     )
-    if ten_multiq != (plan["schema_version"] == TEN_PLAN_SCHEMA):
+    if ten_multiq != (plan["schema_version"] in {
+        TEN_PLAN_SCHEMA, LIGHT_D_PLAN_SCHEMA,
+    }) or (light_d != (plan["schema_version"] == LIGHT_D_PLAN_SCHEMA)):
         raise ValueError("batch and public plan profiles differ")
     route_count = (plan["route_observation_count"] if ten_multiq
                    else plan["route_count"])
@@ -353,9 +371,9 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
         or route_count != config["expected_route_count"]
         or report["trial_count"] != route_count
         or report["index_query_plan_count"]
-        != (2 if ten_multiq else 1) * plan["question_count"]
+        != (0 if light_d else 2 if ten_multiq else 1) * plan["question_count"]
         or (ten_multiq and report["data_agent_plan_binding_count"]
-            != 16 * plan["question_count"])
+            != (6 if light_d else 16) * plan["question_count"])
         or (ten_multiq and report["cache_episode_binding_count"]
             != 4 * plan["question_count"])
     ):
@@ -369,14 +387,16 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
     episodes = _rows(admission / "cache-episode-bindings.jsonl")
     route_by_key = {row["trial_key"]: row for row in routes}
     episode_by_key = {row["trial_key"]: row for row in episodes}
-    arms = tuple(("R", "I", "D", "DC") if ten_multiq
+    arms = tuple(("D", "DC") if light_d else
+                 ("R", "I", "D", "DC") if ten_multiq
                  else plan["arm_ids"])
     question_ids = {row["question_id"] for row in questions}
     pairs = Counter((row["workload_id"], row["design_id"],
                      row.get("repetition", 0)) for row in trials)
     coverage = (
         Counter({(q, f"D{i}", repetition): 1
-                 for q in question_ids for i in range(8)
+                 for q in question_ids
+                 for i in ((2, 3, 6, 7) if light_d else range(8))
                  for repetition in ((0, 1) if i in (3, 7) else (0,))})
         if ten_multiq else
         Counter({(q, arm, 0): 1 for q in question_ids for arm in arms})
@@ -389,7 +409,8 @@ def load_inputs(config: dict, artifact_root: Path) -> dict:
         or len(route_by_key) != len(trials)
         or len(episode_by_key) != report["cache_episode_binding_count"]
         or len(set(arms)) != len(arms)
-        or len(trials) != len(questions) * (10 if ten_multiq else len(arms))
+        or len(trials) != len(questions) * (
+            6 if light_d else 10 if ten_multiq else len(arms))
         or pairs != coverage
         or [row["order_index"] for row in trials] != list(range(len(trials)))
     ):
@@ -446,7 +467,7 @@ def schedule_trials(trials: list[dict], schedule: list[dict],
         for ordinal, question in enumerate(schedule):
             if question["ordinal"] != ordinal or len(
                 question["route_slots"]
-            ) != 10:
+            ) not in {6, 10}:
                 raise ValueError("frozen ten-route question order differs")
             for slot in question["route_slots"]:
                 key = ten_route_trial_key(
@@ -655,7 +676,9 @@ def run(config: dict, config_sha: str, context: dict,
         failure_diagnosis: Path | None = None) -> dict:
     if (resume_from is None) != (failure_diagnosis is None):
         raise ValueError("continuation needs both parent and diagnosis")
-    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
+    if config["schema_version"] not in {
+        SCHEMA, TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }:
         if resume_from is not None:
             raise ValueError("continuation is only supported for interleaved batches")
         from experiments.ten_route_batch import run as run_ten
@@ -787,7 +810,9 @@ def _timestamp(value: object) -> datetime:
 
 def verify_output(config: dict, config_sha: str, context: dict,
                   output_dir: Path, *, seal: bool = False) -> dict:
-    if config["schema_version"] not in {SCHEMA, TEN_MULTIQ_SCHEMA}:
+    if config["schema_version"] not in {
+        SCHEMA, TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }:
         from experiments.ten_route_batch import verify_output as verify_ten
         return verify_ten(config, context, output_dir, seal=seal)
     root = output_dir.resolve()
@@ -871,8 +896,12 @@ def verify_output(config: dict, config_sha: str, context: dict,
             raise ValueError("batch end precedes start")
         prior_end = batch_start
     stages = {row["stage_key"]: row for row in context["stages"]}
-    ten_multiq = config["schema_version"] == TEN_MULTIQ_SCHEMA
-    designs = (tuple(f"D{i}" for i in range(8)) if ten_multiq
+    ten_multiq = config["schema_version"] in {
+        TEN_MULTIQ_SCHEMA, LIGHT_D_BATCH_SCHEMA,
+    }
+    light_d = config["schema_version"] == LIGHT_D_BATCH_SCHEMA
+    designs = (tuple(f"D{i}" for i in ((2, 3, 6, 7) if light_d else range(8)))
+               if ten_multiq
                else tuple(context["plan"]["arm_ids"]))
     success = {arm: {True: 0, False: 0} for arm in designs}
     unavailable = {arm: 0 for arm in success}

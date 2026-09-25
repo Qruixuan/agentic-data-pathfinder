@@ -25,6 +25,7 @@ from ..rsi_exam.interleaved_multiq_plan import (
 )
 from ..rsi_exam.ten_route_multiq_plan import (
     SCHEMA as TEN_ROUTE_PLAN_SCHEMA,
+    LIGHT_D_SCHEMA,
     SCHEDULE as TEN_ROUTE_SCHEDULE,
     load_verified_multiq_plan,
     ten_route_trial_key,
@@ -121,7 +122,10 @@ def _expected(
     coordinator_base_urls: Mapping[str, str] | None = None,
 ) -> dict[str, bytes]:
     plan_doc, public_questions, plan = load_verified_multiq_plan(plan_dir)
-    ten_route = plan_doc["schema_version"] == TEN_ROUTE_PLAN_SCHEMA
+    ten_route = plan_doc["schema_version"] in {
+        TEN_ROUTE_PLAN_SCHEMA, LIGHT_D_SCHEMA,
+    }
+    light_d = plan_doc["schema_version"] == LIGHT_D_SCHEMA
     if ten_route:
         origins = _ten_route_origins(coordinator_base_urls)
         _require(coordinator_base_url is None,
@@ -266,9 +270,9 @@ def _expected(
                 "artifact_size_bytes": source["artifact_size_bytes"],
             })
     _require(len(admitted) == expected_routes
-             and len(index_plans) == (2 if ten_route else 1)
+             and len(index_plans) == (0 if light_d else 2 if ten_route else 1)
              * plan["question_count"]
-             and len(access_plans) == (16 if ten_route else 7)
+             and len(access_plans) == (6 if light_d else 16 if ten_route else 7)
              * plan["question_count"]
              and len(cache) == (4 if ten_route else 1)
              * plan["question_count"],
@@ -322,6 +326,7 @@ def _expected(
     if ten_route:
         manifest["coordinator_base_urls"] = origins
         manifest["coordinator_node_ids"] = ["N7", "N8"]
+        manifest["plan_schema_version"] = plan_doc["schema_version"]
     else:
         manifest["coordinator_node_id"] = "N7"
         manifest["coordinator_base_url"] = coordinator_base_url

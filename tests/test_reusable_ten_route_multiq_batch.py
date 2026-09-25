@@ -76,6 +76,14 @@ class TenRouteMultiQuestionBatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cardinality"):
             batch._validate_config(larger)
 
+        light = copy.deepcopy(config)
+        light["schema_version"] = batch.LIGHT_D_BATCH_SCHEMA
+        light["expected_route_count"] = 36
+        self.assertEqual(batch._validate_config(light), light)
+        light["expected_route_count"] = 60
+        with self.assertRaisesRegex(ValueError, "cardinality"):
+            batch._validate_config(light)
+
     def test_frozen_plan_orders_all_sixty_unique_trials(self):
         with tempfile.TemporaryDirectory() as directory:
             plan = self._plan(Path(directory))

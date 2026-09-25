@@ -223,6 +223,7 @@ def _frame_bundle(
     frame_rows: Sequence[Mapping[str, Any]],
     preparation_root: Path,
     preparation_sha256: str,
+    frame_description_path: str = "caption-frames.jsonl",
 ) -> bytes:
     frames: list[dict[str, Any]] = []
     members: list[tuple[str, bytes]] = []
@@ -264,7 +265,7 @@ def _frame_bundle(
         },
         "source_frame_descriptions": {
             "representation_id": "sampled_frames",
-            "path": "caption-frames.jsonl",
+            "path": frame_description_path,
             "sha256": _sha256(source_description),
         },
         "generation_manifest_sha256": preparation_sha256,

@@ -24,6 +24,7 @@ from .interleaved_multiq_plan import (
 
 
 SCHEMA = "pathfinder.rsi-exam-ten-route-multiq-plan/v1alpha1"
+LIGHT_D_SCHEMA = "pathfinder.rsi-exam-light-derived-supplement-plan/v1alpha1"
 MANIFEST = "ten-route-multiq-plan.json"
 QUESTIONS = "public-questions.jsonl"
 SCHEDULE = "ten-route-multiq-schedule.jsonl"
@@ -42,6 +43,21 @@ _OBSERVATIONS = (
     ("D7", "N8", "DC", 0, "miss"),
     ("D7", "N8", "DC", 1, "hit"),
 )
+_LIGHT_D_OBSERVATIONS = tuple(
+    row for row in _OBSERVATIONS if row[2] in {"D", "DC"}
+)
+
+
+def is_ten_route_family(schema_version: str) -> bool:
+    return schema_version in {SCHEMA, LIGHT_D_SCHEMA}
+
+
+def observations_for_schema(schema_version: str) -> tuple:
+    if schema_version == SCHEMA:
+        return _OBSERVATIONS
+    if schema_version == LIGHT_D_SCHEMA:
+        return _LIGHT_D_OBSERVATIONS
+    raise TenRouteMultiQuestionPlanError("unsupported ten-route-family schema")
 
 
 class TenRouteMultiQuestionPlanError(ValueError):
@@ -96,7 +112,9 @@ def ten_route_trial_key(experiment_id: str, question_id: str,
 
 
 def _schedule(rows: Sequence[Mapping[str, Any]], *, seed: str,
-              experiment_id: str) -> list[dict[str, Any]]:
+              experiment_id: str,
+              observations: Sequence[tuple] = _OBSERVATIONS,
+              ) -> list[dict[str, Any]]:
     questions = _public_questions(rows)
     by_object: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in questions:
@@ -156,12 +174,12 @@ def _schedule(rows: Sequence[Mapping[str, Any]], *, seed: str,
             blocks = tuple(reversed(blocks))
         slots = []
         for node in blocks:
-            noncache = [row for row in _OBSERVATIONS
+            noncache = [row for row in observations
                         if row[1] == node and row[2] != "DC"]
             rotation = int(_rank(seed, "ten-route-arm-order", node,
-                                 question["question_id"])[:8], 16) % 3
+                                 question["question_id"])[:8], 16) % len(noncache)
             noncache = noncache[rotation:] + noncache[:rotation]
-            cache = [row for row in _OBSERVATIONS
+            cache = [row for row in observations
                      if row[1] == node and row[2] == "DC"]
             for design, node_id, arm, repetition, expectation in (
                 *noncache, *cache,
@@ -206,6 +224,7 @@ def freeze_ten_route_multiq_plan(
     public_questions: Sequence[Mapping[str, Any]], *, seed: str,
     experiment_id: str, public_source_sha256: str,
     exposure_inventory_sha256: str, output_dir: str | Path,
+    derived_profile: str = "caption-fusion",
 ) -> dict[str, Any]:
     _require(isinstance(seed, str) and _ID.fullmatch(seed), "seed is invalid")
     _require(isinstance(experiment_id, str) and _ID.fullmatch(experiment_id)
@@ -217,18 +236,23 @@ def freeze_ten_route_multiq_plan(
     target = Path(output_dir).resolve()
     _require(not target.exists(), "plan output already exists")
     rows = _public_questions(public_questions)
-    schedule = _schedule(rows, seed=seed, experiment_id=experiment_id)
+    _require(derived_profile in {"caption-fusion", "frame-only"},
+             "derived profile is unsupported")
+    schema = SCHEMA if derived_profile == "caption-fusion" else LIGHT_D_SCHEMA
+    observations = observations_for_schema(schema)
+    schedule = _schedule(rows, seed=seed, experiment_id=experiment_id,
+                         observations=observations)
     question_bytes = _jsonl(rows)
     schedule_bytes = _jsonl(schedule)
     manifest = {
-        "schema_version": SCHEMA,
+        "schema_version": schema,
         "seed": seed,
         "experiment_id": experiment_id,
         "public_source_sha256": public_source_sha256,
         "exposure_inventory_sha256": exposure_inventory_sha256,
         "question_count": len(rows),
         "object_count": len({row["object_id"] for row in rows}),
-        "route_observation_count": len(rows) * len(_OBSERVATIONS),
+        "route_observation_count": len(rows) * len(observations),
         "public_questions_sha256": _sha(question_bytes),
         "schedule_sha256": _sha(schedule_bytes),
         "hidden_label_values_read": False,
@@ -236,6 +260,9 @@ def freeze_ten_route_multiq_plan(
         "workflow_submitted": False,
         "credentials_recorded": False,
     }
+    if schema == LIGHT_D_SCHEMA:
+        manifest["derived_representation_ids"] = ["sampled_frame_bundle"]
+        manifest["profile"] = "light-derived-supplement"
     manifest["plan_sha256"] = _sha(_canonical(manifest))
     target.parent.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.",
@@ -277,18 +304,21 @@ def verify_ten_route_multiq_plan(
     _require(digest == _sha(_canonical(manifest)), "plan digest differs")
     manifest["plan_sha256"] = digest
     rows = _public_questions(public_questions)
+    schema = manifest.get("schema_version")
+    observations = observations_for_schema(schema)
     schedule = _schedule(rows, seed=manifest["seed"],
-                         experiment_id=manifest["experiment_id"])
+                         experiment_id=manifest["experiment_id"],
+                         observations=observations)
     _require(
         manifest == {
-            "schema_version": SCHEMA,
+            "schema_version": schema,
             "seed": manifest["seed"],
             "experiment_id": manifest["experiment_id"],
             "public_source_sha256": public_source_sha256,
             "exposure_inventory_sha256": exposure_inventory_sha256,
             "question_count": len(rows),
             "object_count": len({row["object_id"] for row in rows}),
-            "route_observation_count": 10 * len(rows),
+            "route_observation_count": len(observations) * len(rows),
             "public_questions_sha256": _sha(_jsonl(rows)),
             "schedule_sha256": _sha(_jsonl(schedule)),
             "hidden_label_values_read": False,
@@ -296,6 +326,9 @@ def verify_ten_route_multiq_plan(
             "workflow_submitted": False,
             "credentials_recorded": False,
             "plan_sha256": digest,
+            **({"derived_representation_ids": ["sampled_frame_bundle"],
+                "profile": "light-derived-supplement"}
+               if schema == LIGHT_D_SCHEMA else {}),
         }
         and (root / QUESTIONS).read_bytes() == _jsonl(rows)
         and (root / SCHEDULE).read_bytes() == _jsonl(schedule),
@@ -306,7 +339,7 @@ def verify_ten_route_multiq_plan(
         "plan_sha256": digest,
         "question_count": len(rows),
         "object_count": len({row["object_id"] for row in rows}),
-        "route_observation_count": len(schedule) * 10,
+        "route_observation_count": len(schedule) * len(observations),
         "workflow_submitted": False,
         "credentials_recorded": False,
     }

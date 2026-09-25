@@ -121,6 +121,42 @@ class InterleavedTrialDagTests(unittest.TestCase):
             {"hit", "miss"},
         )
 
+    def test_light_derived_and_cache_bind_only_source_decoded_frames(self):
+        question = _question()
+        profiles = []
+        for arm in ("D", "DC"):
+            route = {
+                "arm_id": arm, "object_id": OBJECT_ID,
+                "public_task_sha256": question["public_task_sha256"],
+                "trial_key": f"light|{QUESTION_ID}|{arm}", "ordinal": 0,
+            }
+            trial, stages = build_interleaved_trial_dag(
+                route, question,
+                raw_artifact=_artifact("raw_video", "a"),
+                derived_artifacts={
+                    "sampled_frame_bundle": _artifact(
+                        "sampled_frame_bundle", "c"),
+                },
+                n3_catalog_version="n3-test", n4_catalog_version="n4-test",
+                derived_frame_only=True,
+            )
+            profiles.append(trial["semantic_input_profile"])
+            self.assertEqual(
+                [row["representation_id"] for row in
+                 trial["representation_identities"]],
+                ["sampled_frame_bundle"],
+            )
+            self.assertFalse(any("digest" in row["stage_key"]
+                                 for row in stages))
+            if arm == "DC":
+                self.assertEqual(
+                    [row["object_representation_identity"]["representation_id"]
+                     for row in stages if row["action"] == "lookup"],
+                    ["sampled_frame_bundle"],
+                )
+        self.assertEqual(profiles[0], profiles[1])
+        self.assertEqual(profiles[0]["input_mode"], "frame-bundle")
+
     def test_indexed_fusion_binds_query_aware_raw_and_digest(self) -> None:
         trial, stages = _build("I")
         self.assertEqual(

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..distributed.scoring import MULTIPLE_CHOICE_CANONICAL_OPTION_SCORING_RULE
+from ..rsi_exam.ten_route_multiq_plan import LIGHT_D_SCHEMA
 from .full_flow_semantic_execution_admission import (
     BOUND_STAGE_SCHEMA_VERSION,
     BOUND_TRIAL_SCHEMA_VERSION,
@@ -85,7 +86,8 @@ def _identity(
 
 
 def _stage_specs(arm: str, *, executor_node_id: str = "N7",
-                 indexed_raw: bool = False) -> list[
+                 indexed_raw: bool = False,
+                 derived_frame_only: bool = False) -> list[
                      tuple[str, str, str | None, list[str], list[str],
                            dict[str, Any] | None]
                  ]:
@@ -130,18 +132,24 @@ def _stage_specs(arm: str, *, executor_node_id: str = "N7",
                 ["N4", node], ["read-digest"])
             infer_deps = ["transfer-selected", "transfer-digest"]
     elif arm == "D":
-        for rep, suffix in (("multimodal_digest", "digest"),
-                            ("sampled_frame_bundle", "frames")):
+        derived = (("sampled_frame_bundle", "frames"),) if (
+            derived_frame_only
+        ) else (("multimodal_digest", "digest"),
+                ("sampled_frame_bundle", "frames"))
+        for rep, suffix in derived:
             add(f"read-{suffix}", "access-derived-artifact", rep,
                 ["N4"], ["schedule"])
             add(f"transfer-{suffix}", "transfer-bytes", rep,
                 ["N4", node], [f"read-{suffix}"])
             add(f"send-{suffix}", "transfer-bytes", rep,
                 [node, "N6"], [f"transfer-{suffix}"])
-        infer_deps = ["send-digest", "send-frames"]
+        infer_deps = [f"send-{suffix}" for _, suffix in derived]
     elif arm == "DC":
-        for rep, suffix in (("multimodal_digest", "digest"),
-                            ("sampled_frame_bundle", "frames")):
+        derived = (("sampled_frame_bundle", "frames"),) if (
+            derived_frame_only
+        ) else (("multimodal_digest", "digest"),
+                ("sampled_frame_bundle", "frames"))
+        for rep, suffix in derived:
             lookup = f"lookup-{suffix}"
             hit = {"cache_operation_id": lookup,
                    "cache_operation_key": lookup, "equals": "hit"}
@@ -158,7 +166,7 @@ def _stage_specs(arm: str, *, executor_node_id: str = "N7",
                 [node], [f"read-local-{suffix}", f"insert-{suffix}"])
             add(f"send-{suffix}", "transfer-bytes", rep,
                 [node, "N6"], [f"{suffix}-ready"])
-        infer_deps = ["send-digest", "send-frames"]
+        infer_deps = [f"send-{suffix}" for _, suffix in derived]
     else:
         raise InterleavedTrialDagError("route arm is unsupported")
     add("infer", "infer", None, ["N6"], infer_deps)
@@ -177,6 +185,7 @@ def build_interleaved_trial_dag(
     worker_alias: str = "pathfinder_costaware_20260815a",
     executor_node_id: str = "N7",
     indexed_raw: bool = False,
+    derived_frame_only: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Build a source-bound DAG on N7 or N8, preserving old defaults."""
 
@@ -214,10 +223,12 @@ def build_interleaved_trial_dag(
     else:
         route_family = ("local-cache-derived" if arm == "DC"
                         else "remote-derived")
-        representations = ["multimodal_digest", "sampled_frame_bundle"]
+        representations = (["sampled_frame_bundle"] if derived_frame_only else
+                           ["multimodal_digest", "sampled_frame_bundle"])
     trial_key = route["trial_key"]
     specs = _stage_specs(arm, executor_node_id=executor_node_id,
-                         indexed_raw=indexed_raw)
+                         indexed_raw=indexed_raw,
+                         derived_frame_only=derived_frame_only)
     stages = []
     for index, (name, action, rep, nodes, deps, condition) in enumerate(specs):
         condition = None if condition is None else {
@@ -307,6 +318,7 @@ def build_all_interleaved_trial_dags(
     manifest = json.loads((root / "route-input-bindings.json").read_bytes())
     ten_route = (manifest["status"]
                  == "FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED")
+    light_d = manifest.get("plan_schema_version") == LIGHT_D_SCHEMA
     _require(manifest["status"] in {
                  "FROZEN_INTERLEAVED_ROUTE_INPUTS_NOT_ADMITTED",
                  "FROZEN_TEN_ROUTE_MULTIQ_INPUTS_NOT_ADMITTED",
@@ -338,8 +350,10 @@ def build_all_interleaved_trial_dags(
             route, question,
             raw_artifact=raw[object_id],
             derived_artifacts={rep: derived[(object_id, rep)]
-                               for rep in ("multimodal_digest",
-                                           "sampled_frame_bundle")},
+                               for rep in (("sampled_frame_bundle",)
+                                           if light_d else
+                                           ("multimodal_digest",
+                                            "sampled_frame_bundle"))},
             n3_catalog_version=n3["catalog_version"],
             n4_catalog_version=n4["catalog_version"],
             selected_policy=(selected[(object_id,
@@ -348,6 +362,7 @@ def build_all_interleaved_trial_dags(
                              if route["arm_id"] == "I" else None),
             executor_node_id=route.get("executor_node_id", "N7"),
             indexed_raw=ten_route,
+            derived_frame_only=light_d,
         )
         trials.append(trial)
         stages.extend(trial_stages)
