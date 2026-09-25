@@ -6,13 +6,13 @@ credential value on a command line. The running N6 service is not modified.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 import subprocess
 
 
-ROOT = Path("/home/pathfinder/atphard-light-fusion-20260925-v1")
 N6 = (
     "pathfinder-multiq-d328726-n6-"
     "pathfinder-full-flow-n6-semantic-inference-1"
@@ -28,6 +28,9 @@ PROVIDER_KEYS = (
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stage-root", required=True, type=Path)
+    root = parser.parse_args().stage_root.resolve()
     try:
         details = json.loads(subprocess.check_output(
             ["sudo", "-n", "docker", "inspect", N6],
@@ -42,11 +45,11 @@ def main() -> int:
         if (not all(selected.values()) or selected[PROVIDER_KEYS[0]]
                 != "qwen3.8-27b"):
             raise ValueError("N6 provider contract is incomplete")
-        for path in (ROOT / "source", ROOT / "frames/n4", ROOT / "output",
-                     ROOT / "cache"):
+        for path in (root / "source", root / "frames/n4", root / "output",
+                     root / "cache"):
             if not path.is_dir():
                 raise ValueError("summary staging directory is absent")
-        target = ROOT / "output/summaries-v1"
+        target = root / "output/summaries-v1"
         if target.exists():
             raise ValueError("immutable summary output already exists")
         command = [
@@ -55,10 +58,10 @@ def main() -> int:
             "--security-opt", "no-new-privileges",
             "--tmpfs", "/tmp:rw,nosuid,nodev,size=128m,mode=1777",
             "--workdir", "/src", "--entrypoint", "python",
-            "-v", f"{ROOT / 'source'}:/src:ro",
-            "-v", f"{ROOT / 'frames/n4'}:/frames:ro",
-            "-v", f"{ROOT / 'output'}:/out:rw",
-            "-v", f"{ROOT / 'cache'}:/cache:rw",
+            "-v", f"{root / 'source'}:/src:ro",
+            "-v", f"{root / 'frames/n4'}:/frames:ro",
+            "-v", f"{root / 'output'}:/out:rw",
+            "-v", f"{root / 'cache'}:/cache:rw",
             "-e", "PYTHONPATH=/src",
         ]
         for key in PROVIDER_KEYS:
