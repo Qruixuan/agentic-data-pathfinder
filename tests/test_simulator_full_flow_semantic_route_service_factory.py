@@ -692,6 +692,30 @@ class SemanticRouteServiceFactoryTests(unittest.TestCase):
 
 
 class InterleavedCatalogCountTests(unittest.TestCase):
+    def test_zero_index_admission_accepts_only_empty_file_and_fails_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "interleaved-runtime-admission.json").write_text(
+                json.dumps({"index_query_plan_count": 0}), encoding="utf-8",
+            )
+            query_file = root / "index-query-plans.jsonl"
+            query_file.write_bytes(b"")
+            catalog = _interleaved_index_plan_catalog(root)
+            with self.assertRaisesRegex(
+                FullFlowSemanticRouteServiceFactoryError,
+                "zero-index admission cannot resolve",
+            ):
+                catalog.resolve(trial={"trial_key": "unexpected"},
+                                public_task={})
+            query_file.write_bytes(b"{}\n")
+            with self.assertRaisesRegex(
+                FullFlowSemanticRouteServiceFactoryError,
+                "nonempty index query plans",
+            ):
+                _interleaved_index_plan_catalog(root)
+
     def test_catalog_counts_come_from_admission_not_six_question_defaults(
         self,
     ) -> None:

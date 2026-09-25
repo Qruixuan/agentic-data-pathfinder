@@ -1242,13 +1242,32 @@ def _index_plan_catalog(
     return FrozenIndexQueryPlanCatalog(plans)
 
 
+class _NoIndexQueryPlans:
+    """Fail closed if an index operation reaches a zero-index admission."""
+
+    def resolve(
+        self, *, trial: Mapping[str, Any], public_task: Mapping[str, Any],
+    ) -> FrozenIndexQueryPlan:
+        raise FullFlowSemanticRouteServiceFactoryError(
+            "zero-index admission cannot resolve an index query"
+        )
+
+
 def _interleaved_index_plan_catalog(
     root: Path,
-) -> FrozenIndexQueryPlanCatalog:
-    rows = _strict_jsonl(root / MULTIQ_INDEX_PLANS,
-                         "interleaved index query plans")
+) -> FrozenIndexQueryPlanCatalog | _NoIndexQueryPlans:
     admission = _strict_json(root / MULTIQ_ADMISSION_MANIFEST,
                              "interleaved runtime admission")
+    count = admission["index_query_plan_count"]
+    if count == 0:
+        path = root / MULTIQ_INDEX_PLANS
+        _require(path.is_file() and not path.is_symlink(),
+                 "interleaved index query plans is missing")
+        _require(path.read_bytes() == b"",
+                 "zero-index admission has nonempty index query plans")
+        return _NoIndexQueryPlans()
+    rows = _strict_jsonl(root / MULTIQ_INDEX_PLANS,
+                         "interleaved index query plans")
     _require(len(rows) == admission["index_query_plan_count"],
              "interleaved index query count changed")
     return FrozenIndexQueryPlanCatalog(tuple(
