@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from experiments.upcloud_ppd_20260925.run_engineering_session import (
     _explicit_final_option_format,
@@ -38,6 +39,21 @@ class PpdAgentAnswerFormatTests(unittest.TestCase):
         for answer in rejected:
             with self.subTest(answer=answer):
                 self.assertIsNone(_explicit_final_option_format(answer))
+
+    def test_letter_only_prompt_preserves_public_question_and_options(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        prompt_dir = root / "experiments" / "upcloud_ppd_20260925"
+        original = (prompt_dir / "engineering-q5.txt").read_text(
+            encoding="utf-8"
+        ).strip()
+        updated = (prompt_dir / "engineering-q5-letter-only-v2.txt").read_text(
+            encoding="utf-8"
+        ).strip()
+        self.assertTrue(updated.startswith(original + "\n\n"))
+        suffix = updated[len(original) + 2:]
+        self.assertIn("After completing the required tool calls", suffix)
+        self.assertIn("final message must be exactly", suffix)
+        self.assertIn("Do not include Markdown", suffix)
 
 
 if __name__ == "__main__":

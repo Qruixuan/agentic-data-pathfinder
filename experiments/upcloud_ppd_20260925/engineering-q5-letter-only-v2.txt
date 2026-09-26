@@ -1,0 +1,12 @@
+Answer this video question by choosing one option ID only.
+
+How many people are speaking on the microphone?
+A. one
+B. five
+C. nine
+D. six
+E. three
+
+After completing the required tool calls, your final message must be exactly
+one uppercase ASCII letter: A, B, C, D, or E. Do not include Markdown,
+brackets, punctuation, explanation, confidence, or any additional text.
