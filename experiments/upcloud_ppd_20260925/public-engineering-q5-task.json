@@ -1,0 +1,17 @@
+{
+  "answer_options": [
+    {"option_id": "A", "text": "one"},
+    {"option_id": "B", "text": "five"},
+    {"option_id": "C", "text": "nine"},
+    {"option_id": "D", "text": "six"},
+    {"option_id": "E", "text": "three"}
+  ],
+  "credentials_recorded": false,
+  "object_id": "nextqa-val-11584566583",
+  "question": "How many people are speaking on the microphone?",
+  "schema_version": "pathfinder.n1-public-task-binding/v1alpha1",
+  "success_scoring_rule": "multiple-choice-option-id-canonical-match-v1",
+  "task_binding_sha256": "63460126d2df5a8661eca1d175d4978d1caa5932f379f7c56439510bd53dd85d",
+  "task_class_id": "video_qa",
+  "workload_id": "ppd-public-nextqa-val-11584566583-q5-v1"
+}
