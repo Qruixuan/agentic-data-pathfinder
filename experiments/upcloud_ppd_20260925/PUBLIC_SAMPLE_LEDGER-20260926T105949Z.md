@@ -200,10 +200,18 @@ prompt, answer, signed URL or environment dump.
   Markdown-bold final-line format; no raw answer was printed.
 - Sanitized Gateway tool-boundary lines for this exact session show only
   `list_offers` and `access_representation`, both complete. There is no
-  `fetch_artifact` or `inspect_visual_artifact` call. Thus the Agent did not
-  redeem or inspect the accepted representation before finishing. This is
-  a tool-use/grounding failure, not proof that a stronger final-format prompt
-  would solve the full Agent closure. Do not resubmit this configuration.
+  `fetch_artifact` or `inspect_visual_artifact` call. A later read-only Gateway
+  query showed the accepted `multimodal_digest` was inline text: 10,586 bytes
+  read, content identity present, and no artifact handle issued. The text was
+  returned by `access_representation`, so no redemption call was required.
+  The earlier tool-use/grounding diagnosis was incorrect. The stored response
+  has three lines with one bare option on the final line and no other
+  standalone option marker. The isolated engineering parser previously
+  rejected that form; the amended parser extracts it as `bare-final-line`
+  without changing the original receipt or N1 scoring. Do not resubmit merely
+  to test answer formatting. A read-only local-parser recheck of the saved
+  answer returned `bare-final-line` with an extracted option, without showing
+  its text or option ID and without another workflow or model request.
 - A post-run read-only SSH checksum/health check was attempted twice and
   stopped at the Root/SSH banner exchange, before any remote command ran.
   The receipt path was reported by the runner, but its on-disk checksum and

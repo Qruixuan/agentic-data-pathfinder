@@ -2,7 +2,8 @@
 
 Preflight only reads the Root, configuration, and session database. Execute
 submits exactly one pinned FlowMesh workflow and never retries it implicitly.
-Receipts exclude the question, model response, credentials, and artifact URLs.
+Receipts exclude the question, raw model response, credentials, and artifact
+URLs. A uniquely parsed final option ID may be recorded separately.
 """
 
 from __future__ import annotations
@@ -40,23 +41,44 @@ EXPECTED_PLACEMENT = ("pathfinder", "upcloud-sg-sin1", "pathfinder-n7")
 _OPTION_TOKEN = re.compile(r"(?<![A-Za-z])[A-E](?![A-Za-z])")
 
 
-def _explicit_final_option_format(answer: str) -> str | None:
-    """Classify a narrow final-option form without rewriting the raw answer.
+def _extract_explicit_final_option(answer: str) -> tuple[str, str] | None:
+    """Extract a structurally unique option without rewriting the raw answer.
 
     This is an engineering closure check, not the frozen N1 scoring rule.
-    A verbose answer is accepted only when its final line is one bold option
-    and no other standalone option marker occurs anywhere in the response.
+    A verbose answer needs one bare or bold option on its final line and no
+    other standalone option marker anywhere in the response.
     """
     stripped = answer.strip()
-    if re.fullmatch(r"[A-E]", stripped):
-        return "bare-option"
     if not stripped:
         return None
+    if re.fullmatch(r"[A-E]", stripped):
+        return stripped, "bare-option"
     final_line = stripped.splitlines()[-1].strip()
-    match = re.fullmatch(r"\*\*([A-E])\*\*", final_line)
-    if match and _OPTION_TOKEN.findall(stripped) == [match.group(1)]:
-        return "markdown-bold-final-line"
+    for pattern, format_name in (
+        (r"([A-E])", "bare-final-line"),
+        (r"\*\*([A-E])\*\*", "markdown-bold-final-line"),
+    ):
+        match = re.fullmatch(pattern, final_line)
+        if match and _OPTION_TOKEN.findall(stripped) == [match.group(1)]:
+            return match.group(1), format_name
     return None
+
+
+def _explicit_final_option_format(answer: str) -> str | None:
+    parsed = _extract_explicit_final_option(answer)
+    return None if parsed is None else parsed[1]
+
+
+def _answer_fields(answer: str) -> dict[str, object]:
+    parsed = _extract_explicit_final_option(answer)
+    return {
+        "answer_present": bool(answer.strip()),
+        "answer_is_single_option": parsed is not None
+        and parsed[1] == "bare-option",
+        "answer_has_explicit_final_option": parsed is not None,
+        "answer_format": None if parsed is None else parsed[1],
+        "extracted_option_id": None if parsed is None else parsed[0],
+    }
 
 
 def _session_absent(state_db: Path, session_id: str) -> None:
@@ -227,9 +249,10 @@ def _execute(
     )
     if not isinstance(request_count, int) or request_count < 0:
         request_count = None
-    answer_format = _explicit_final_option_format(result.final_answer)
-    answer_is_single_option = answer_format == "bare-option"
-    closure_verified = bool(accepted) and answer_format is not None
+    answer_fields = _answer_fields(result.final_answer)
+    closure_verified = bool(accepted) and bool(
+        answer_fields["answer_has_explicit_final_option"]
+    )
     return {
         **preflight,
         "status": result.status if closure_verified else "INCOMPLETE_AGENT_CLOSURE",
@@ -238,10 +261,7 @@ def _execute(
         "accepted_representations": [
             event.get("representation_id") for event in accepted
         ],
-        "answer_present": bool(result.final_answer.strip()),
-        "answer_is_single_option": answer_is_single_option,
-        "answer_has_explicit_final_option": answer_format is not None,
-        "answer_format": answer_format,
+        **answer_fields,
         "closure_verified": closure_verified,
         "agent_model_request_count": request_count,
         "llm_called": None if request_count is None else request_count > 0,

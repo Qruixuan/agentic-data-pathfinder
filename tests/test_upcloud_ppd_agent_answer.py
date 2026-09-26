@@ -6,13 +6,35 @@ import unittest
 from pathlib import Path
 
 from experiments.upcloud_ppd_20260925.run_engineering_session import (
+    _answer_fields,
     _explicit_final_option_format,
+    _extract_explicit_final_option,
 )
 
 
 class PpdAgentAnswerFormatTests(unittest.TestCase):
     def test_bare_option_remains_the_preferred_format(self) -> None:
         self.assertEqual(_explicit_final_option_format(" C\n"), "bare-option")
+        self.assertEqual(
+            _extract_explicit_final_option(" C\n"), ("C", "bare-option")
+        )
+
+    def test_unique_bare_final_line_is_extracted(self) -> None:
+        answer = "The visual evidence is sufficient.\nOne response fits.\nC"
+        self.assertEqual(
+            _extract_explicit_final_option(answer), ("C", "bare-final-line")
+        )
+        self.assertEqual(
+            _answer_fields(answer),
+            {
+                "answer_present": True,
+                "answer_is_single_option": False,
+                "answer_has_explicit_final_option": True,
+                "answer_format": "bare-final-line",
+                "extracted_option_id": "C",
+            },
+        )
+        self.assertEqual(answer.splitlines()[-1], "C")
 
     def test_unambiguous_markdown_final_line_is_accepted(self) -> None:
         answer = (
@@ -24,6 +46,10 @@ class PpdAgentAnswerFormatTests(unittest.TestCase):
             _explicit_final_option_format(answer),
             "markdown-bold-final-line",
         )
+        self.assertEqual(
+            _extract_explicit_final_option(answer),
+            ("C", "markdown-bold-final-line"),
+        )
 
     def test_ambiguous_or_nonfinal_markers_fail_closed(self) -> None:
         rejected = (
@@ -32,6 +58,12 @@ class PpdAgentAnswerFormatTests(unittest.TestCase):
             "**C**\nMore commentary",
             "A is possible, but\n**C**",
             "The response could be C or D.\n**C**",
+            "A is possible, but\nC",
+            "The answer might be [A].\nC",
+            "The answer is C\nC",
+            "Reasoning\nC.",
+            "Reasoning\n[C]",
+            "Reasoning\nAnswer: C",
             "**c**",
             "[C]",
             "",
@@ -39,6 +71,8 @@ class PpdAgentAnswerFormatTests(unittest.TestCase):
         for answer in rejected:
             with self.subTest(answer=answer):
                 self.assertIsNone(_explicit_final_option_format(answer))
+                self.assertIsNone(_extract_explicit_final_option(answer))
+                self.assertIsNone(_answer_fields(answer)["extracted_option_id"])
 
     def test_letter_only_prompt_preserves_public_question_and_options(self) -> None:
         root = Path(__file__).resolve().parents[1]
