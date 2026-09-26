@@ -181,3 +181,33 @@ prompt, answer, signed URL or environment dump.
   The old receipt remains `INCOMPLETE_AGENT_CLOSURE`; the retrospective
   result is an engineering-format recheck, not a task-success or scientific
   claim.
+
+## Isolated letter-only prompt trial
+
+- Commit `c67f39d` froze a new public prompt that preserves the original
+  question and options byte-for-byte and only adds an explicit final-message
+  format instruction. It is bound to a new versioned supervisor and does not
+  change the deployed worker, N6, N1, Gateway, or old prompt. Eight focused
+  tests pass. New prompt SHA-256:
+  `a29262cf30bc4ef77ce64122bf4f0654594086a2077412e788574ad202adf90e`.
+- Fresh run `ppd-qwen-first-20260926t161343z-letterv2-8f24` passed the
+  no-submit preflight (`wkr-8`) and submitted exactly one workflow
+  `wfl-34289769-60aa-48cd-9519-cea207749e2f` / task
+  `tsk-68fed547-ec17-483a-a52d-2367c41e68a1`. The saved sanitized runner
+  output reports `INCOMPLETE_AGENT_CLOSURE`, native runner status 2, one
+  accepted `multimodal_digest` access and one reported Agent model request.
+  The answer is present but neither a bare option nor the narrowly accepted
+  Markdown-bold final-line format; no raw answer was printed.
+- Sanitized Gateway tool-boundary lines for this exact session show only
+  `list_offers` and `access_representation`, both complete. There is no
+  `fetch_artifact` or `inspect_visual_artifact` call. Thus the Agent did not
+  redeem or inspect the accepted representation before finishing. This is
+  a tool-use/grounding failure, not proof that a stronger final-format prompt
+  would solve the full Agent closure. Do not resubmit this configuration.
+- A post-run read-only SSH checksum/health check was attempted twice and
+  stopped at the Root/SSH banner exchange, before any remote command ran.
+  The receipt path was reported by the runner, but its on-disk checksum and
+  post-run service health were not independently rechecked. Do not infer a
+  service failure from the SSH timeout; resume with one bounded read-only
+  check when the jump path is available. No other experiment service or
+  configuration was changed by this prompt-only test.
