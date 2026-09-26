@@ -149,3 +149,35 @@ prompt, answer, signed URL or environment dump.
   observed worker `wkr-8`. No FlowMesh workflow was submitted and no model
   request was made during the repair. Agent closure itself has not yet been
   rerun or claimed.
+
+## V4 smoke and engineering answer-format correction
+
+- Fresh smoke `ppd-qwen-first-20260926t151323z-bdf76c43` passed no-submit
+  preflight and submitted exactly one workflow
+  `wfl-add24190-f3c6-4d58-a034-e32cabe821bb` on the pinned worker (`wkr-8`).
+  The Gateway session reached `DONE`; one `sampled_frame_bundle` access was
+  accepted. The sanitized trace shows `list_offers`, `access_representation`
+  and `inspect_visual_artifact` all completed. The receipt is preserved at
+  `/home/pathfinder/ppd-runs/ppd-qwen-first-20260926t151323z-bdf76c43/receipt.json`
+  (SHA-256 `0783f5b21af93827aa3b1406543f977a105ed18323b68a1c76174f0102bafd78`).
+- The original runner reported `INCOMPLETE_AGENT_CLOSURE`, exit 2. A
+  content-free shape check established that the output has two prose lines
+  followed by a single Markdown-bold option on its final line; no other
+  standalone option marker occurs. The runner had required the whole output
+  to be one bare letter. No raw answer or hidden label was displayed.
+- Runner v6 classifies only a bare option or an unambiguous Markdown-bold
+  final line. It records `answer_format` and leaves the original answer in
+  Gateway state unchanged; the frozen N1 scoring rule is untouched. Seven
+  focused tests pass, including rejection of ambiguous and prose-only forms.
+  Runner SHA-256 is `072d6d3c1235f779bfd1fcdd3b01fa2b9bb2456abccf3848af7002125f3bbc05`.
+  The new versioned supervisor is
+  `/home/pathfinder/ppd-qwen-first-20260926-v1/run_qwen_binding_v5.py`
+  (SHA-256 `7d853fe1f03b1d8be54fd47d81e25eeb3bc3598fb80b9104ad1a0a23c7192022`).
+- A network-disabled, read-only container loaded the actual saved Gateway
+  session through runner v6 and returned
+  `closure_verified_under_v6=true`, `answer_format=markdown-bold-final-line`.
+  The v6 supervisor's no-submit preflight separately returned `PREFLIGHT_OK`
+  with the same unique worker. No second workflow or model request was made.
+  The old receipt remains `INCOMPLETE_AGENT_CLOSURE`; the retrospective
+  result is an engineering-format recheck, not a task-success or scientific
+  claim.

@@ -18,14 +18,14 @@ from pathlib import Path
 
 PACKAGE = Path("/home/pathfinder/upcloud-ppd-engineering-20260926-v4")
 OPERATOR = Path("/home/pathfinder/ppd-deploy-20260926-v1/operator")
-RUNNER = OPERATOR / "run_engineering_session_v5.py"
+RUNNER = OPERATOR / "run_engineering_session_v6.py"
 QUESTION = OPERATOR / "engineering-q5.txt"
 OUT_ROOT = Path("/home/pathfinder/ppd-runs")
 ENV_FILE = Path("/home/pathfinder/ppd-deploy-20260926-v1/secrets/gateway.env")
 SDK_SITE = Path("/opt/flowmesh/venv/lib/python3.12/site-packages")
 GATEWAY = "pathfinder-ppd-gateway-v1"
 WORKER = "pathfinder_ppd_visual_20260926e"
-RUNNER_SHA256 = "78e9a97fc4ccee804cffba02af1da12084b43faeb56150dbf36c3f9fb4dfd5c4"
+RUNNER_SHA256 = "072d6d3c1235f779bfd1fcdd3b01fa2b9bb2456abccf3848af7002125f3bbc05"
 QUESTION_SHA256 = "570b67ec01c1a78c65952657de2f95db58b27dd07595211529e4b035513d7841"
 DEFAULT_GATEWAY_IMAGE = "sha256:7e86efd423bc332b6908f6041f39aa5a834fc34f192a24b6abd88ed787f1ae52"
 WORKER_IMAGE = "sha256:f8f977fe69cea83a950c60f50b40c1787f332e3084d81f142c181336c9e299eb"
