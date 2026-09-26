@@ -86,6 +86,17 @@ class ProtectedOracleBuildTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "do not match uniquely"):
             _official_match(doubled, self.task)
 
+    def test_matches_punctuation_only_difference(self) -> None:
+        changed = self.csv.read_bytes().replace(
+            b"speaking on the microphone?", b"speaking on the microphone!"
+        )
+        self.assertEqual(_official_match(changed, self.task)["qid"], "5")
+
+    def test_rejects_different_question_with_same_options(self) -> None:
+        changed = self.csv.read_bytes().replace(b"How many people", b"Which people")
+        with self.assertRaisesRegex(ValueError, "do not match uniquely"):
+            _official_match(changed, self.task)
+
     def test_refuses_non_n1_host(self) -> None:
         with patch(
             "experiments.upcloud_ppd_20260925.build_oracle_n1.socket.gethostname",

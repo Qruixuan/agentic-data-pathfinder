@@ -14,6 +14,7 @@ import json
 import os
 import socket
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from pathfinder.simulator.hidden_oracle import (
@@ -59,6 +60,15 @@ def _load_public_task(path: Path) -> dict:
 def _official_match(
     csv_bytes: bytes, public_task: dict,
 ) -> dict[str, str]:
+    def public_question_words(value: str) -> tuple[str, ...]:
+        # The public prompt and official annotation may differ in punctuation.
+        # Preserve every letter and digit; never use the answer to choose a row.
+        without_punctuation = "".join(
+            " " if unicodedata.category(character).startswith("P") else character
+            for character in value.casefold()
+        )
+        return tuple(without_punctuation.split())
+
     video = public_task["object_id"].removeprefix("nextqa-val-")
     if public_task["object_id"] != f"nextqa-val-{video}" or not video.isdigit():
         raise ValueError("public task object is not a NextQA video")
@@ -69,7 +79,9 @@ def _official_match(
         raise ValueError("official annotation schema changed")
     matches = []
     for row in reader:
-        if row["video"] != video or row["question"] != public_task["question"]:
+        if row["video"] != video or public_question_words(
+            row["question"]
+        ) != public_question_words(public_task["question"]):
             continue
         options = [
             {"option_id": chr(65 + index), "text": row[f"a{index}"]}
