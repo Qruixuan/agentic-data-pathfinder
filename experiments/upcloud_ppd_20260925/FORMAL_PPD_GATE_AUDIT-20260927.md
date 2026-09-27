@@ -54,6 +54,15 @@ its fresh run ID and shared cache episode before the Agent chooses; only the
 chosen one may then be dispatched. Do not bypass the coordinator's cache
 binding or infer that a verified historical trial authorizes a fresh run.
 
+An additive candidate-schedule freezer now generates those potential
+session/action/run/cache identities from the verified public plan and quote
+package without reading outcomes. It freezes all four design orders and both
+possible cache states, while marking itself
+`FROZEN_CANDIDATES_NOT_RUNTIME_ADMISSION`. Six focused candidate tests pass;
+the full historical 40-question fixture yields 160 sessions and 1,120
+potential action/state bindings without submission. This is the input to,
+**not a substitute for**, the still-missing coordinator runtime admission.
+
 The previously supplied Model Studio workbook predates the successful
 15:59 UTC Agent sample. It cannot reconcile that sample's requests. A fresh
 request-audit export for that interval can validate the *old* sample; a new
