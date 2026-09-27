@@ -19,6 +19,7 @@ from ...data_agent import LocalDataAgent
 from ...models import AccessOffer, SystemConfig
 from ...resolver import AccessResolver
 from .contracts import FlowMeshAgentRunRequest
+from .visual_artifact import visual_request
 
 
 LOGGER = logging.getLogger(__name__)
@@ -665,10 +666,13 @@ class AccessGateway:
         config: SystemConfig,
         store: SQLiteSessionStore,
         backend: RepresentationBackend | None = None,
+        *,
+        visual_inference_client: Any | None = None,
     ):
         self.config = config
         self.store = store
         self.backend = backend or EmulatedRepresentationBackend()
+        self.visual_inference_client = visual_inference_client
         self._lock = threading.RLock()
 
     def register_session(
@@ -917,35 +921,10 @@ class AccessGateway:
         artifact_handle: str,
     ) -> dict[str, Any]:
         """Fetch one previously accepted artifact through a bound handle."""
-        if not isinstance(artifact_handle, str) or not artifact_handle.strip():
-            raise ArtifactHandleError(
-                "artifact handle must be a non-empty string"
-            )
-        if len(artifact_handle) > 256:
-            raise ArtifactHandleError("artifact handle is too long")
         with self._lock:
-            session = self.store.get_session(session_id)
-            if session.status not in {"CREATED", "RUNNING"}:
-                raise ArtifactHandleError(
-                    "artifact handle is not available after the session ends"
-                )
-            try:
-                event = self.store.get_artifact_event(
-                    session_id,
-                    artifact_handle,
-                )
-            except ArtifactHandleError:
-                # Never log the bearer-like handle itself. Fingerprints make
-                # an agent-side mutation distinguishable from missing state
-                # without turning logs into a reusable capability store.
-                LOGGER.warning(
-                    "Artifact handle rejected for session %s: "
-                    "received_sha256=%s expected_sha256=%s",
-                    session_id,
-                    artifact_handle_fingerprint(artifact_handle),
-                    self.store.list_artifact_handle_fingerprints(session_id),
-                )
-                raise
+            session, event = self._artifact_event(
+                session_id, artifact_handle,
+            )
             fetcher = getattr(self.backend, "fetch_artifact", None)
             if not callable(fetcher):
                 raise ArtifactFetchUnsupportedError(
@@ -984,6 +963,112 @@ class AccessGateway:
             "endpoint_id": event.endpoint_id,
             "source_node_id": event.source_node_id,
         }
+
+    def inspect_visual_artifact(
+        self,
+        session_id: str,
+        artifact_handle: str,
+    ) -> dict[str, Any]:
+        """Run N6 on bound MP4/frames without putting bytes in MCP output."""
+        if self.visual_inference_client is None:
+            raise ArtifactFetchUnsupportedError(
+                "visual inference is not configured"
+            )
+        media_types = {
+            "raw_video": frozenset({"video/mp4"}),
+            "sampled_frame_bundle": frozenset({"application/x-tar"}),
+        }
+        with self._lock:
+            session, event = self._artifact_event(
+                session_id, artifact_handle,
+            )
+            allowed = media_types.get(event.representation_id)
+            if allowed is None:
+                raise ArtifactFetchUnsupportedError(
+                    "representation is not a supported visual artifact"
+                )
+            if (
+                event.data_agent_access_id is None
+                or event.content_sha256 is None
+                or session.object_id is None
+                or event.object_id != session.object_id
+            ):
+                raise GatewayError(
+                    "visual access lacks a complete content/object binding"
+                )
+            fetcher = getattr(self.backend, "fetch_binary_artifact", None)
+            if not callable(fetcher):
+                raise ArtifactFetchUnsupportedError(
+                    "backend cannot fetch bounded binary artifacts"
+                )
+            artifact = fetcher(
+                config=self.config,
+                session=session,
+                event=event,
+                allowed_media_types=allowed,
+            )
+        if (
+            event.content_sha256 is None
+            or artifact.access_id != event.data_agent_access_id
+            or artifact.sha256 != event.content_sha256
+        ):
+            raise GatewayError(
+                "visual artifact does not match the accepted access event"
+            )
+        request = visual_request(
+            session_id=session_id,
+            question=session.question,
+            object_id=session.object_id,
+            representation_id=event.representation_id,
+            artifact=artifact,
+        )
+        # The inference client is fixed-origin; the agent supplies neither
+        # the model request nor the N6 endpoint or credential.
+        result = self.visual_inference_client.infer(request)
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "object_id": session.object_id,
+            "representation_id": event.representation_id,
+            "artifact_handle_sha256": artifact_handle_fingerprint(
+                artifact_handle
+            ),
+            "artifact_sha256": artifact.sha256,
+            "artifact_size_bytes": artifact.size_bytes,
+            "endpoint_id": event.endpoint_id,
+            "source_node_id": event.source_node_id,
+            **result,
+        }
+
+    def _artifact_event(
+        self,
+        session_id: str,
+        artifact_handle: str,
+    ) -> tuple[GatewaySession, GatewayAccessEvent]:
+        """Resolve a session-bound capability without logging its value."""
+        if not isinstance(artifact_handle, str) or not artifact_handle.strip():
+            raise ArtifactHandleError(
+                "artifact handle must be a non-empty string"
+            )
+        if len(artifact_handle) > 256:
+            raise ArtifactHandleError("artifact handle is too long")
+        session = self.store.get_session(session_id)
+        if session.status not in {"CREATED", "RUNNING"}:
+            raise ArtifactHandleError(
+                "artifact handle is not available after the session ends"
+            )
+        try:
+            event = self.store.get_artifact_event(session_id, artifact_handle)
+        except ArtifactHandleError:
+            LOGGER.warning(
+                "Artifact handle rejected for session %s: "
+                "received_sha256=%s expected_sha256=%s",
+                session_id,
+                artifact_handle_fingerprint(artifact_handle),
+                self.store.list_artifact_handle_fingerprints(session_id),
+            )
+            raise
+        return session, event
 
     def _reject(
         self,

@@ -47,6 +47,7 @@ def build_agent_workflow(
     settings: FlowMeshSettings,
     *,
     selected_worker_id: str | None = None,
+    task_prompt: str | None = None,
 ) -> dict[str, Any]:
     """Build one FlowMesh workflow for a Pathfinder Agent session.
 
@@ -56,6 +57,8 @@ def build_agent_workflow(
     """
     if selected_worker_id is not None and not selected_worker_id.strip():
         raise ValueError("selected_worker_id cannot be blank")
+    if task_prompt is not None and not task_prompt.strip():
+        raise ValueError("task_prompt cannot be blank")
 
     # FlowMesh v0.1.9 validates metadata.annotations with extra="forbid"
     # and permits only schedule_hint, description, and custom. Pathfinder
@@ -79,7 +82,8 @@ def build_agent_workflow(
     agent_spec: dict[str, Any] = {
         "taskType": "agent",
         "configName": settings.agent_config_name,
-        "task": build_agent_task_prompt(session_id, request),
+        "task": (task_prompt if task_prompt is not None else
+                 build_agent_task_prompt(session_id, request)),
         # On FlowMesh v0.1.9 these are scheduling requests used for
         # placement, not Docker worker-container limits: the supervisor does
         # not turn them into --cpus/--memory or cgroup constraints. They do

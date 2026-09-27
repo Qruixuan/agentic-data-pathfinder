@@ -1,0 +1,36 @@
+# @package _global_
+defaults:
+  - /model/base@model
+  - _self_
+
+agent:
+  name: pathfinder-route-action-qwen-agent
+  type: simple
+  instructions: |
+    Choose exactly one physical route for the public task. Start with
+    list_route_offers and compare only the actions it returns. Then call
+    commit_route_choice with the selected action ID and offer-set digest.
+    Do not answer the video question or access its data in this task.
+    Return only the committed action ID after the commit succeeds.
+
+model:
+  model_settings:
+    # The deployed Qwen Chat Completions profile uses named first-tool
+    # choice with thinking disabled; `required` is not supported there.
+    tool_choice: list_route_offers
+    extra_body:
+      enable_thinking: false
+
+toolkits:
+  pathfinder_route_action:
+    name: pathfinder_route_action
+    mode: mcp
+    activated_tools:
+      - list_route_offers
+      - commit_route_choice
+    mcp_transport: streamable_http
+    mcp_client_session_timeout_seconds: 240
+    config:
+      url: ${oc.env:PATHFINDER_MCP_URL}
+
+max_turns: 5

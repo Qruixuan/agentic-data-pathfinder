@@ -394,6 +394,83 @@ class FullFlowArtifactCacheTest(unittest.TestCase):
             [event["event_kind"] for event in cache.events()],
         )
 
+    def test_status_probe_is_authenticated_and_does_not_touch_cache(self) -> None:
+        cache = self._cache(capacity_bytes=64)
+        token = "cache-test-token-0123456789"
+        server = create_full_flow_cache_http_server(
+            cache,
+            FullFlowCacheServerSettings(
+                host="127.0.0.1", port=0, token=token,
+                max_artifact_bytes=64,
+            ),
+        )
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        client = HttpFullFlowArtifactCacheClient(
+            base_url=base_url, token=token,
+            expected_node_id="N7", expected_cache_id="N7.derived-cache",
+            max_artifact_bytes=64,
+        )
+        payload = b"bound-frame-bundle"
+        digest = hashlib.sha256(payload).hexdigest()
+        args = {
+            "cache_namespace": "episode-test",
+            "object_id": "video",
+            "representation_id": "sampled_frame_bundle",
+            "expected_sha256": digest,
+        }
+        with _serving(server):
+            self.assertEqual("MISS", client.peek(**args)["status"])
+            self.assertEqual([], cache.events())
+            client.put(
+                cache_namespace="episode-test", request_id="store-peek-1",
+                object_id="video",
+                representation_id="sampled_frame_bundle",
+                payload=payload, expected_sha256=digest,
+            )
+            before = cache.events()
+            with closing(sqlite3.connect(self.root / "state/cache.sqlite3")) as db:
+                sequence_before = db.execute(
+                    "SELECT access_sequence FROM cache_state"
+                ).fetchone()[0]
+            hit = client.peek(**args)
+            self.assertEqual("HIT", hit["status"])
+            self.assertEqual(len(payload), hit["size_bytes"])
+            self.assertFalse(hit["payload_included"])
+            self.assertEqual("MISS", client.peek(
+                **{**args, "cache_namespace": "episode-other"}
+            )["status"])
+            self.assertEqual(before, cache.events())
+            with closing(sqlite3.connect(self.root / "state/cache.sqlite3")) as db:
+                self.assertEqual(sequence_before, db.execute(
+                    "SELECT access_sequence FROM cache_state"
+                ).fetchone()[0])
+            wrong = HttpFullFlowArtifactCacheClient(
+                base_url=base_url, token="wrong-token-0123456789",
+                expected_node_id="N7",
+                expected_cache_id="N7.derived-cache",
+            )
+            with self.assertRaisesRegex(
+                FullFlowCacheError, "returned HTTP 401"
+            ):
+                wrong.peek(**args)
+
+    def test_status_probe_rejects_corrupted_resident_bytes(self) -> None:
+        cache = self._cache(capacity_bytes=64)
+        payload = b"bound-frame-bundle"
+        digest = hashlib.sha256(payload).hexdigest()
+        cache.put(
+            cache_namespace="episode-test", request_id="store-peek-2",
+            object_id="video", representation_id="sampled_frame_bundle",
+            payload=payload, expected_sha256=digest,
+        )
+        (self.root / "state/objects" / digest).write_bytes(b"corrupted")
+        with self.assertRaisesRegex(FullFlowCacheError, "identity changed"):
+            cache.peek(
+                cache_namespace="episode-test", object_id="video",
+                representation_id="sampled_frame_bundle",
+                expected_sha256=digest,
+            )
+
     def test_http_service_rejects_missing_token(self) -> None:
         cache = self._cache()
         server = create_full_flow_cache_http_server(

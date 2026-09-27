@@ -1,2 +1,3 @@
 data/fixtures/rsi_exam_offline_replay/** text eol=lf
 configs/rsi_exam_*collection*.json text eol=lf
+artifacts/route-action-quotes-t60-dev-20260927-v2-draft/** text eol=lf

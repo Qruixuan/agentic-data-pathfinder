@@ -448,7 +448,7 @@ class FullFlowCacheRequestHandler(http.server.BaseHTTPRequestHandler):
                 self._json_response(200, self.server.cache.health())
                 return
             _require(
-                parsed.path == "/v1/cache/artifact",
+                parsed.path in {"/v1/cache/artifact", "/v1/cache/status"},
                 "not found",
             )
             if not self._require_auth():
@@ -477,6 +477,16 @@ class FullFlowCacheRequestHandler(http.server.BaseHTTPRequestHandler):
                 and all(len(values) == 1 for values in query.values()),
                 "cache artifact query is invalid",
             )
+            if parsed.path == "/v1/cache/status":
+                self._json_response(200, self.server.cache.peek(
+                    cache_namespace=query.get(
+                        "cache_namespace", [LEGACY_CACHE_NAMESPACE]
+                    )[0],
+                    object_id=query["object_id"][0],
+                    representation_id=query["representation_id"][0],
+                    expected_sha256=query.get("expected_sha256", [None])[0],
+                ))
+                return
             artifact = self.server.cache.lookup(
                 cache_namespace=query.get(
                     "cache_namespace", [LEGACY_CACHE_NAMESPACE]
@@ -796,6 +806,67 @@ class HttpFullFlowArtifactCacheClient:
             cache_namespace=cache_namespace,
         )
 
+    def peek(
+        self,
+        *,
+        cache_namespace: str,
+        object_id: str,
+        representation_id: str,
+        expected_sha256: str,
+    ) -> dict[str, Any]:
+        """Read authenticated cache status without fetching or touching LRU."""
+        query = {
+            "cache_namespace": _identifier(cache_namespace, "cache_namespace"),
+            "object_id": _identifier(object_id, "object_id"),
+            "representation_id": _identifier(
+                representation_id, "representation_id"
+            ),
+            "expected_sha256": _digest(expected_sha256, "expected_sha256"),
+        }
+        request = urllib.request.Request(
+            self._base + "/v1/cache/status?" + urllib.parse.urlencode(query),
+            headers={
+                "Accept": "application/json",
+                "Authorization": self._authorization(),
+            },
+            method="GET",
+        )
+        try:
+            with self._opener(request, timeout=self._timeout) as response:
+                raw = response.read(_MAX_JSON_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            raise FullFlowCacheError(
+                f"cache status request returned HTTP {exc.code}"
+            ) from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise FullFlowCacheError("cache status request failed") from exc
+        value = _strict_json(raw, "cache status response")
+        _require(
+            value.get("status") in {"HIT", "MISS"}
+            and value.get("node_id") == self._node
+            and value.get("cache_id") == self._cache
+            and value.get("cache_namespace") == cache_namespace
+            and value.get("object_id") == object_id
+            and value.get("representation_id") == representation_id
+            and value.get("cache_key") == cache_key(
+                object_id, representation_id,
+                cache_namespace=cache_namespace,
+            )
+            and value.get("expected_sha256") == expected_sha256
+            and value.get("payload_included") is False
+            and value.get("state_mutated") is False
+            and value.get("credentials_recorded") is False,
+            "cache status identity is invalid",
+        )
+        if value["status"] == "HIT":
+            _require(
+                value.get("content_sha256") == expected_sha256
+                and type(value.get("size_bytes")) is int
+                and value["size_bytes"] > 0,
+                "cache status hit differs from expected content",
+            )
+        return value
+
     def put(
         self,
         *,
@@ -869,6 +940,59 @@ class HttpFullFlowArtifactCacheClient:
 
 class FullFlowArtifactCache(_FullFlowArtifactCacheBase):
     """Complete local cache store, layered over the service configuration."""
+
+    def peek(
+        self,
+        *,
+        cache_namespace: str,
+        object_id: str,
+        representation_id: str,
+        expected_sha256: str,
+    ) -> dict[str, Any]:
+        """Verify resident bytes without recording a hit/miss or moving LRU."""
+        cache_namespace = _identifier(cache_namespace, "cache_namespace")
+        object_id = _identifier(object_id, "object_id")
+        representation_id = _identifier(representation_id, "representation_id")
+        expected_sha256 = _digest(expected_sha256, "expected_sha256")
+        key = cache_key(
+            object_id, representation_id, cache_namespace=cache_namespace,
+        )
+        common = {
+            "schema_version": FULL_FLOW_CACHE_RESULT_SCHEMA_VERSION,
+            "node_id": self.node_id,
+            "cache_id": self.cache_id,
+            "cache_key": key,
+            "cache_namespace": cache_namespace,
+            "object_id": object_id,
+            "representation_id": representation_id,
+            "expected_sha256": expected_sha256,
+            "payload_included": False,
+            "state_mutated": False,
+            "credentials_recorded": False,
+        }
+        with self._lock, closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT content_sha256, size_bytes FROM cache_entries "
+                "WHERE cache_key = ?", (key,),
+            ).fetchone()
+            if row is None or row["content_sha256"] != expected_sha256:
+                return {**common, "status": "MISS"}
+            try:
+                payload = self._content_path(expected_sha256).read_bytes()
+            except OSError as exc:
+                raise FullFlowCacheError(
+                    "cached payload is not readable"
+                ) from exc
+            _require(
+                len(payload) == row["size_bytes"]
+                and _sha256(payload) == expected_sha256,
+                "cached payload identity changed",
+            )
+            return {
+                **common, "status": "HIT",
+                "content_sha256": expected_sha256,
+                "size_bytes": int(row["size_bytes"]),
+            }
 
     def lookup(
         self,

@@ -1406,6 +1406,14 @@ def _parser() -> argparse.ArgumentParser:
             "registry instead of a single --data-agent-url"
         ),
     )
+    gateway.add_argument(
+        "--route-action-preview-config",
+        type=Path,
+        help=(
+            "enable cost-only route tools on a loopback-only development "
+            "Gateway; never authorizes workflow submission"
+        ),
+    )
 
     data_agent = subcommands.add_parser(
         "serve-data-agent",
@@ -7313,6 +7321,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             from .integrations.flowmesh.mcp_server import run_mcp_server
 
+            route_action_gateway = None
+            if args.route_action_preview_config is not None:
+                from .integrations.flowmesh.route_action_bootstrap import (
+                    load_route_action_preview,
+                    require_preview_loopback,
+                )
+
+                require_preview_loopback(args.host)
+                route_action_gateway = load_route_action_preview(
+                    args.route_action_preview_config
+                )
             run_mcp_server(
                 config_path=args.config,
                 state_db=args.state_db,
@@ -7325,6 +7344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.telemetry_quiescence_timeout
                 ),
                 endpoint_registry=args.endpoint_registry,
+                route_action_gateway=route_action_gateway,
             )
             return 0
     except (ConfigError, OSError, RuntimeError, ValueError) as exc:

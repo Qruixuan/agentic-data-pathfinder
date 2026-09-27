@@ -5,6 +5,7 @@ import uuid
 from ...data_agent_client import (
     DataAgentAccessRequest,
     DataAgentAccessTelemetry,
+    DataAgentBinaryArtifact,
     DataAgentClientProtocol,
     DataAgentFetchedArtifact,
     DataAgentProtocolError,
@@ -105,6 +106,35 @@ class RemoteDataAgentBackend:
                 "deterministic request"
             )
         return self.client.fetch_artifact(request)
+
+    def fetch_binary_artifact(
+        self,
+        *,
+        config: SystemConfig,
+        session: GatewaySession,
+        event: GatewayAccessEvent,
+        allowed_media_types: frozenset[str],
+    ) -> DataAgentBinaryArtifact:
+        """Redeem the same bound access for internal visual inference only."""
+        if event.data_agent_access_id is None:
+            raise ValueError("gateway event has no Data Agent access ID")
+        request = self._access_request(
+            config=config,
+            session=session,
+            representation_id=event.representation_id,
+            event_index=event.event_index,
+        )
+        if request.access_id != event.data_agent_access_id:
+            raise ValueError(
+                "gateway event Data Agent access ID does not match its "
+                "deterministic request"
+            )
+        fetcher = getattr(self.client, "fetch_binary_artifact", None)
+        if not callable(fetcher):
+            raise DataAgentProtocolError(
+                "Data Agent client cannot fetch bounded binary artifacts"
+            )
+        return fetcher(request, allowed_media_types=allowed_media_types)
 
     def _access_request(
         self,
