@@ -561,11 +561,19 @@ def register_full_flow_semantic_commands(
         "interleaved-video-index-dir",
         "interleaved-preparation-dir",
         "interleaved-caption-dir",
+    ):
+        semantic_route_serve.add_argument("--" + flag, type=Path)
+    for flag in (
         "route-action-runtime-admission-dir",
         "route-action-candidate-dir",
         "route-action-quote-dir",
     ):
-        semantic_route_serve.add_argument("--" + flag, type=Path)
+        env_name = "PATHFINDER_" + flag.upper().replace("-", "_")
+        env_value = os.environ.get(env_name)
+        semantic_route_serve.add_argument(
+            "--" + flag, type=Path,
+            default=Path(env_value) if env_value else None,
+        )
     for flag in (
         "n2-index-base-url",
         "n7-index-base-url",

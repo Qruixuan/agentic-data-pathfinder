@@ -1303,6 +1303,17 @@ class FullFlowCliTest(unittest.TestCase):
             "--port",
             "19089",
         ]
+        with mock.patch.dict("os.environ", {
+            "PATHFINDER_ROUTE_ACTION_RUNTIME_ADMISSION_DIR": "run-admission",
+            "PATHFINDER_ROUTE_ACTION_CANDIDATE_DIR": "candidates",
+            "PATHFINDER_ROUTE_ACTION_QUOTE_DIR": "quotes",
+        }):
+            parsed = _parser().parse_args(arguments)
+        self.assertEqual(Path("run-admission"),
+                         parsed.route_action_runtime_admission_dir)
+        self.assertEqual(Path("candidates"),
+                         parsed.route_action_candidate_dir)
+        self.assertEqual(Path("quotes"), parsed.route_action_quote_dir)
         environment_names = (
             "PATHFINDER_N2_INDEX_TOKEN",
             "PATHFINDER_N7_INDEX_TOKEN",
