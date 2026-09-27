@@ -1345,7 +1345,8 @@ class FullFlowCliTest(unittest.TestCase):
         ):
             status = cli_main(arguments)
         self.assertEqual(0, status)
-        source_type.assert_called_once_with(
+        source_type.assert_called_once()
+        expected_sources = dict(
             local_admission_dir=Path("local-admission"),
             n1_public_commitment_dir=Path("n1-public"),
             artifact_binding_dir=Path("artifact-bindings"),
@@ -1355,6 +1356,11 @@ class FullFlowCliTest(unittest.TestCase):
             exact_range_catalog_dir=Path("exact-ranges"),
             provisioning_catalog_dir=Path("provisioning"),
             index_query_plan_catalog_dir=Path("query-plans"),
+        )
+        self.assertEqual(
+            expected_sources,
+            {key: value for key, value in source_type.call_args.kwargs.items()
+             if value is not None},
         )
         runtime = runtime_type.call_args.kwargs
         self.assertEqual("N8", runtime["logical_node_id"])

@@ -561,6 +561,9 @@ def register_full_flow_semantic_commands(
         "interleaved-video-index-dir",
         "interleaved-preparation-dir",
         "interleaved-caption-dir",
+        "route-action-runtime-admission-dir",
+        "route-action-candidate-dir",
+        "route-action-quote-dir",
     ):
         semantic_route_serve.add_argument("--" + flag, type=Path)
     for flag in (
@@ -1325,6 +1328,11 @@ def dispatch_full_flow_semantic_command(
             interleaved_video_index_dir=args.interleaved_video_index_dir,
             interleaved_preparation_dir=args.interleaved_preparation_dir,
             interleaved_caption_dir=args.interleaved_caption_dir,
+            route_action_runtime_admission_dir=(
+                args.route_action_runtime_admission_dir
+            ),
+            route_action_candidate_dir=args.route_action_candidate_dir,
+            route_action_quote_dir=args.route_action_quote_dir,
         )
         runtime = RuntimeSemanticServiceInputs(
             logical_node_id=args.node_id,

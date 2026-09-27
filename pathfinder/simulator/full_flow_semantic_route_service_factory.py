@@ -35,6 +35,9 @@ from typing import Any, Callable, Mapping, Sequence
 
 from ..data_agent_client import DataAgentClientSettings, HttpDataAgentClient
 from ..frame_bundle_ingest import FRAME_BUNDLE_MEDIA_TYPE
+from ..integrations.flowmesh.route_action_runtime_admission import (
+    verify_route_action_runtime_admission,
+)
 from ..integrations.flowmesh.semantic_matrix_trial import (
     GenericSemanticRouteRequestHandler,
     validate_semantic_route_request,
@@ -271,6 +274,9 @@ class FrozenSemanticRouteServiceSources:
     interleaved_video_index_dir: Path | None = None
     interleaved_preparation_dir: Path | None = None
     interleaved_caption_dir: Path | None = None
+    route_action_runtime_admission_dir: Path | None = None
+    route_action_candidate_dir: Path | None = None
+    route_action_quote_dir: Path | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -305,6 +311,20 @@ class FrozenSemanticRouteServiceSources:
         _require(all(configured) or not any(configured),
                  "interleaved source directories must be all present or absent")
         for name in multiq:
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, Path(value).resolve())
+        route_action = (
+            "route_action_runtime_admission_dir",
+            "route_action_candidate_dir",
+            "route_action_quote_dir",
+        )
+        selected = [getattr(self, name) is not None for name in route_action]
+        _require(all(selected) or not any(selected),
+                 "route-action source directories must be all present or absent")
+        _require(not any(selected) or all(configured),
+                 "route-action sources require interleaved admission")
+        for name in route_action:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, Path(value).resolve())
@@ -1459,6 +1479,22 @@ def assemble_full_flow_semantic_route_service(
     ) = (_verify_interleaved_sources(sources) if interleaved
          else _verify_sources(sources))
     admission = admission_report["document"]
+    route_run_bindings = None
+    if sources.route_action_runtime_admission_dir is not None:
+        try:
+            route_run_bindings = verify_route_action_runtime_admission(
+                sources.route_action_runtime_admission_dir,
+                candidate_dir=sources.route_action_candidate_dir,
+                plan_dir=sources.interleaved_plan_dir,
+                quote_dir=sources.route_action_quote_dir,
+                admitted_trials=trials,
+                admission_sha256=admission["admission_sha256"],
+            )["bindings"][runtime.logical_node_id]
+        except Exception as exc:
+            raise FullFlowSemanticRouteServiceFactoryError(
+                "route-action runtime admission verification failed: "
+                f"{type(exc).__name__}"
+            ) from exc
     if interleaved:
         admitted_nodes = admission.get("coordinator_node_ids", ["N7"])
         _require(runtime.logical_node_id in admitted_nodes,
@@ -1657,8 +1693,9 @@ def assemble_full_flow_semantic_route_service(
                  trial for trial in trials
                  if trial["trial_key"] == key[1]
              )["executor_node_id"] == runtime.logical_node_id}
-            if interleaved else None
+            if interleaved and route_run_bindings is None else None
         ),
+        bound_route_runs=route_run_bindings,
     )
 
     gaps: list[dict[str, Any]] = []
