@@ -18,6 +18,9 @@ model:
     # The deployed Qwen Chat Completions profile uses named first-tool
     # choice with thinking disabled; `required` is not supported there.
     tool_choice: list_route_offers
+    # The worker streams Chat Completions; request the final usage chunk so
+    # Agent selection can be priced from provider-reported token counts.
+    include_usage: true
     extra_body:
       enable_thinking: false
 

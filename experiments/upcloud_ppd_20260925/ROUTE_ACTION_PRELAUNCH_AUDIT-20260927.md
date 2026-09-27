@@ -165,3 +165,46 @@ all three checksum-bound quote payloads verified again inside that archive.
 The skipped tests require the separate historical public-plan fixture; they
 passed in the working tree where that frozen fixture is available. The branch
 has not been deployed or used to produce a new source-bound admission.
+
+## Cost-input recheck — 2026-09-27
+
+Read-only UpCloud API calls confirmed the current nine-server roster remains
+ROOT and N1–N8, all `started` in `sg-sin1`, with the plan types pinned in the
+development rate card. The live `/1.3/price?zone=sg-sin1` response again
+returned raw plan prices 0.8184, 1.4136, 3.125 and 4.3154 for the four
+deployed DEV plan types. Under the rate card's declared divisor of 100, the
+nine-plan list-price sum is USD 0.166662/hour. This is a dated allocation
+rate, not an invoice or a per-route marginal charge.
+
+Each VM has exactly one attached standard storage device. The sizes are
+20 GB on N1/N2/N3/N4/N6, 30 GB on N5/N8, and 40 GB on N7/ROOT. The API marks
+all nine attached devices `part_of_plan=yes`. Thus the current nine-device
+roster must not acquire a separate additional-block-storage charge; occupied
+bytes and retention time still need recording for capacity and later design
+changes. The separate `/1.3/storage` list also contains templates and CD-ROMs;
+its item count is not an attached-volume billing count.
+
+The source t60 build journals that are locally available identify
+`physical_host=local-windows`, so they do not measure an UpCloud build-host
+interval. Historical build-machine cost remains unknown rather than zero.
+The t60 provider-token and route-time evidence remains available for bounded
+development estimates, but a prospective host-timed build and Agent-session
+usage ledger is required for complete new episode cost.
+
+A strict-host-key, batch-mode read-only Root SSH probe timed out during SSH
+banner exchange after the API state/address check. No remote command ran and
+no VM was restarted. A second bounded read-only probe returned the expected
+`pathfinder-root` hostname. The cause of the first timeout is unknown;
+independent service/deployment checks remain necessary before submission.
+
+## Dedicated Agent usage recheck — 2026-09-27
+
+The existing public PPD task's numeric usage was inspected read-only from
+both FlowMesh's task result API and its exact dedicated-worker result file.
+Both exposed `num_requests=1` and no input, cached-input or output token
+units. This is insufficient for list-price Agent-call accounting; request
+count is not a token estimate. No prompt, answer, task body, credential or
+raw result was displayed. The deployed worker runs `openai-agents` 0.7.0 and
+its `ModelSettings` includes `include_usage`. The future route-action Agent
+config now requests streamed usage, but this has not been deployed or proved
+on the Qwen backend. The full-episode-cost and submission gates remain closed.

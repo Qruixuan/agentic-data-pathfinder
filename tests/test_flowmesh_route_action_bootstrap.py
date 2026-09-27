@@ -5,6 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import yaml
+
 from pathfinder.cli import _parser
 from pathfinder.integrations.flowmesh.route_action_bootstrap import (
     PREVIEW_SCHEMA, load_route_action_preview, require_preview_loopback,
@@ -20,6 +22,15 @@ QUOTE = ROOT / "artifacts/route-action-quotes-t60-dev-20260927-v2-draft"
 
 
 class RouteActionBootstrapTests(unittest.TestCase):
+    def test_agent_requests_streamed_provider_usage(self):
+        config = yaml.safe_load((
+            ROOT / "integrations/flowmesh/agent_configs/"
+            "pathfinder_route_action_qwen_first_offer.yaml"
+        ).read_text(encoding="utf-8"))
+        settings = config["model"]["model_settings"]
+        self.assertIs(settings["include_usage"], True)
+        self.assertEqual("list_route_offers", settings["tool_choice"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
