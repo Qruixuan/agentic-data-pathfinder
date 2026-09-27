@@ -1406,12 +1406,21 @@ def _parser() -> argparse.ArgumentParser:
             "registry instead of a single --data-agent-url"
         ),
     )
-    gateway.add_argument(
+    route_action_mode = gateway.add_mutually_exclusive_group()
+    route_action_mode.add_argument(
         "--route-action-preview-config",
         type=Path,
         help=(
             "enable cost-only route tools on a loopback-only development "
             "Gateway; never authorizes workflow submission"
+        ),
+    )
+    route_action_mode.add_argument(
+        "--route-action-live-config",
+        type=Path,
+        help=(
+            "enable admission-gated route tools on a loopback-only "
+            "Gateway; does not itself submit a workflow"
         ),
     )
 
@@ -7331,6 +7340,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 require_preview_loopback(args.host)
                 route_action_gateway = load_route_action_preview(
                     args.route_action_preview_config
+                )
+            elif args.route_action_live_config is not None:
+                from .integrations.flowmesh.route_action_bootstrap import (
+                    load_route_action_live,
+                    require_preview_loopback,
+                )
+
+                require_preview_loopback(args.host)
+                route_action_gateway = load_route_action_live(
+                    args.route_action_live_config
                 )
             run_mcp_server(
                 config_path=args.config,

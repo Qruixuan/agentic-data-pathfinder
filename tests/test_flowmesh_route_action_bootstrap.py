@@ -1,6 +1,8 @@
 """No-network preview wiring for the existing verified public cohort."""
 
 import json
+import contextlib
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -105,6 +107,20 @@ class RouteActionBootstrapTests(unittest.TestCase):
         require_preview_loopback(args.host)
         with self.assertRaisesRegex(RouteActionBridgeError, "loopback"):
             require_preview_loopback("0.0.0.0")
+
+    def test_live_and_preview_modes_are_mutually_exclusive(self):
+        args = _parser().parse_args([
+            "serve-flowmesh-tools", "--host", "127.0.0.1",
+            "--route-action-live-config", str(self.config_file),
+        ])
+        self.assertEqual(self.config_file, args.route_action_live_config)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                _parser().parse_args([
+                    "serve-flowmesh-tools",
+                    "--route-action-live-config", str(self.config_file),
+                    "--route-action-preview-config", str(self.config_file),
+                ])
 
 
 if __name__ == "__main__":

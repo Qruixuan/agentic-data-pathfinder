@@ -57,6 +57,8 @@ class RouteActionGateway:
         self, *, bridge: RouteActionBridge, session_db: str | Path,
         quote_source: VerifiedQuoteSource,
         cache_reader: VerifiedCacheReader | None = None,
+        admitted_sessions: Mapping[str, RouteSession] | None = None,
+        admitted_runs: Mapping[tuple[str, str], str | None] | None = None,
     ) -> None:
         if quote_source is None:
             raise RouteActionBridgeError("verified quote source is required")
@@ -64,6 +66,16 @@ class RouteActionGateway:
         self.quote_source = quote_source
         self.cache_reader = cache_reader
         self.session_db = Path(session_db)
+        if (admitted_sessions is None) != (admitted_runs is None):
+            raise RouteActionBridgeError(
+                "live route sessions and runs must be admitted together"
+            )
+        self._admitted_sessions = (
+            None if admitted_sessions is None else dict(admitted_sessions)
+        )
+        self._admitted_runs = (
+            None if admitted_runs is None else dict(admitted_runs)
+        )
 
     def register_session(
         self, *, session_id: str, question_id: str,
@@ -88,6 +100,11 @@ class RouteActionGateway:
             session_id, question_id, physical_design_id,
             object_id, public_task_sha256,
         )
+        if (self._admitted_sessions is not None
+                and self._admitted_sessions.get(session_id) != session):
+            raise RouteActionBridgeError(
+                "route session is absent from the frozen runtime admission"
+            )
         self.session_db.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(self.session_db)) as connection:
             with connection:
@@ -137,6 +154,11 @@ class RouteActionGateway:
         if row is None:
             raise RouteActionBridgeError("route session is unknown")
         session = RouteSession(session_id, *row)
+        if (self._admitted_sessions is not None
+                and self._admitted_sessions.get(session_id) != session):
+            raise RouteActionBridgeError(
+                "stored route session differs from runtime admission"
+            )
         expected = self.bridge.public_question_identity(session.question_id)
         if expected != (session.object_id, session.public_task_sha256):
             raise RouteActionBridgeError(
@@ -219,4 +241,17 @@ class RouteActionGateway:
         """Runner-only handoff after canonical admission and live preflight."""
         self._session(session_id)
         choice = self.bridge.load_choice(session_id)
-        return self.bridge.handoff(choice, bound_trial)
+        handoff = self.bridge.handoff(choice, bound_trial)
+        if (self._admitted_runs is not None
+                and (handoff.run_id, choice.trial_key)
+                not in self._admitted_runs):
+            raise RouteActionBridgeError(
+                "route handoff run is absent from runtime admission"
+            )
+        if (self._admitted_runs is not None
+                and self._admitted_runs[(handoff.run_id, choice.trial_key)]
+                != handoff.cache_episode_id):
+            raise RouteActionBridgeError(
+                "route handoff cache episode differs from admission"
+            )
+        return handoff

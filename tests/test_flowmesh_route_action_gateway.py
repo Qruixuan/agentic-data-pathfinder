@@ -9,7 +9,7 @@ from pathfinder.integrations.flowmesh.route_action_bridge import (
     CacheObservation, RouteActionBridge, RouteActionBridgeError, RouteQuote,
 )
 from pathfinder.integrations.flowmesh.route_action_gateway import (
-    RouteActionGateway,
+    RouteActionGateway, RouteSession,
 )
 from pathfinder.integrations.flowmesh.route_action_workflow import (
     ROUTE_ACTION_AGENT_CONFIG, build_route_choice_workflow,
@@ -151,6 +151,58 @@ class RouteActionGatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(RouteActionBridgeError,
                                     "verified live cache reader"):
             gateway.list_route_offers("no-cache")
+
+    def test_live_gateway_rejects_unfrozen_sessions_and_runs(self):
+        allowed = RouteSession(
+            "route-session-1", self.question_id, "D_base",
+            self.object_id, self.task_sha,
+        )
+        gateway = RouteActionGateway(
+            bridge=self.bridge, session_db=self.gateway.session_db,
+            quote_source=Quotes(), cache_reader=Cache(),
+            admitted_sessions={allowed.session_id: allowed},
+            admitted_runs={},
+        )
+        with self.assertRaisesRegex(RouteActionBridgeError,
+                                    "frozen runtime admission"):
+            gateway.register_session(
+                session_id="not-precommitted", question_id=self.question_id,
+                physical_design_id="D_base", object_id=self.object_id,
+                public_task_sha256=self.task_sha,
+            )
+        gateway.register_session(
+            session_id=allowed.session_id, question_id=self.question_id,
+            physical_design_id="D_base", object_id=self.object_id,
+            public_task_sha256=self.task_sha,
+        )
+        offers = gateway.list_route_offers(allowed.session_id)
+        gateway.commit_route_choice(
+            allowed.session_id, "D0", offers["offer_set_sha256"],
+        )
+        choice = self.bridge.load_choice(allowed.session_id)
+        trial = {
+            "flowmesh_submission_authorized": True,
+            "trial_key": choice.trial_key,
+            "design_id": "D0", "repetition": 0,
+            "executor_node_id": "N7", "route_family": "raw",
+            "artifact_object_id": self.object_id,
+            "public_task_binding_sha256": self.task_sha,
+            "route_coordinator_binding": {
+                "service_contract_id": "N7.execution-compute",
+            },
+        }
+        with self.assertRaisesRegex(RouteActionBridgeError,
+                                    "absent from runtime admission"):
+            gateway.handoff_for_session(allowed.session_id, trial)
+        admitted = RouteActionGateway(
+            bridge=self.bridge, session_db=self.gateway.session_db,
+            quote_source=Quotes(), cache_reader=Cache(),
+            admitted_sessions={allowed.session_id: allowed},
+            admitted_runs={(choice.run_id, choice.trial_key): None},
+        )
+        self.assertEqual(choice.run_id, admitted.handoff_for_session(
+            allowed.session_id, trial,
+        ).run_id)
 
     def test_mcp_tools_are_opt_in_and_do_not_change_old_tools(self):
         config = ROOT / "configs" / "phase_b_causal_gate_system.json"
