@@ -83,9 +83,27 @@ class InterleavedCacheEpisodeTest(unittest.TestCase):
             ("one-action", miss["trial_key"]): "one-episode",
             ("one-action", hit["trial_key"]): "one-episode",
         }
-        FrozenCatalogBoundSemanticRouteRequestHandler(
+        handler = FrozenCatalogBoundSemanticRouteRequestHandler(
             **kwargs, bound_route_runs=pair,
         )
+        request = build_semantic_route_request(
+            run_id="one-action",
+            idempotency_key=hashlib.sha256(b"one-action").hexdigest(),
+            bound_trial=miss, bound_stages=stages,
+            cache_episode_id="one-episode",
+        )
+        self.assertEqual("test-only", handler.execute(request)["status"])
+        unbound = build_semantic_route_request(
+            run_id="other-action",
+            idempotency_key=hashlib.sha256(b"other-action").hexdigest(),
+            bound_trial=miss, bound_stages=stages,
+            cache_episode_id="one-episode",
+        )
+        with self.assertRaisesRegex(
+            FullFlowSemanticRouteServiceFactoryError,
+            "absent from the verified run binding",
+        ):
+            handler.execute(unbound)
         with self.assertRaisesRegex(
             FullFlowSemanticRouteServiceFactoryError,
             "repeats outside one cache miss/hit pair",

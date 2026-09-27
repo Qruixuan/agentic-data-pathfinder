@@ -910,12 +910,12 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
                 episode_id is not None,
                 "interleaved cache route requires its bound episode",
             )
-        _require(
-            episode_id is None
-            or self._cache_episodes.get((request["run_id"], trial_key))
-            == episode_id,
-            "cache episode is absent from the verified run binding",
-        )
+        if episode_id is not None and not self._strict_route_runs:
+            _require(
+                self._cache_episodes.get((request["run_id"], trial_key))
+                == episode_id,
+                "cache episode is absent from the verified run binding",
+            )
         expected_keys = trial["semantic_stage_keys"]
         expected = [self._stages.get(key) for key in expected_keys]
         _require(
