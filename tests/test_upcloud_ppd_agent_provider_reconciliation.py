@@ -101,5 +101,74 @@ class AgentProviderReconciliationTests(unittest.TestCase):
             self._reconcile(sidecar, provider, card)
 
 
+class LegacyAgentProviderCorroborationTests(unittest.TestCase):
+    def setUp(self):
+        self.receipt = {
+            "schema_version":
+                "pathfinder.ppd-agent-observed-list-price-subtotal/v1",
+            "status": "CONDITIONAL_AGENT_SDK_LIST_PRICE_SUBTOTAL",
+            "sdk_request_entries_reconciled": True,
+            "provider_attempts_reconciled": False,
+            "run_id": "sample-run", "task_id": "sample-task",
+            "numeric_usage_sidecar_sha256": _digest("sidecar"),
+            "model_id": "qwen3.8-27b", "sdk_request_count": 2,
+            "request_units": [
+                {"input_tokens": 10, "output_tokens": 2},
+                {"input_tokens": 20, "output_tokens": 3},
+            ],
+            "input_tokens": 30, "output_tokens": 5,
+        }
+        self.rows = [
+            {"request_id_sha256": _digest("request-2"),
+             "input_units": 20, "cached_input_units": 5,
+             "output_units": 3, "cached_detail_explicit": True},
+            {"request_id_sha256": _digest("request-1"),
+             "input_units": 10, "cached_input_units": 0,
+             "output_units": 2, "cached_detail_explicit": True},
+        ]
+        self.card = {
+            "schema_version":
+                "pathfinder.ppd-agent-official-list-price-snapshot/v1",
+            "model_id": "qwen3.8-27b", "currency": "CNY",
+            "input_standard": "3", "input_implicit_cache": "1",
+            "output": "10",
+        }
+
+    def test_numeric_match_does_not_claim_exact_identity(self):
+        result = reconciliation.corroborate_legacy_agent_provider_rows(
+            self.receipt, self.rows, self.card,
+        )
+        self.assertEqual("NUMERIC_CORROBORATION_NOT_REQUEST_ID_JOIN",
+                         result["status"])
+        self.assertEqual(5, result["cached_input_units"])
+        self.assertEqual("0.000130000",
+                         result["correlated_rows_list_price_cny"])
+        self.assertFalse(result["exact_task_request_id_join"])
+        self.assertFalse(result["provider_attempt_coverage_verified"])
+        self.assertNotIn("request-1", json.dumps(result))
+
+    def test_ambiguous_pair_fails_closed(self):
+        self.rows.append({**self.rows[0],
+                          "request_id_sha256": _digest("request-3")})
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            reconciliation.corroborate_legacy_agent_provider_rows(
+                self.receipt, self.rows, self.card,
+            )
+
+    def test_missing_cache_detail_fails_closed(self):
+        self.rows[0]["cached_detail_explicit"] = False
+        with self.assertRaisesRegex(ValueError, "cache detail"):
+            reconciliation.corroborate_legacy_agent_provider_rows(
+                self.receipt, self.rows, self.card,
+            )
+
+    def test_stale_receipt_cannot_be_promoted(self):
+        self.receipt["provider_attempts_reconciled"] = True
+        with self.assertRaisesRegex(ValueError, "not eligible"):
+            reconciliation.corroborate_legacy_agent_provider_rows(
+                self.receipt, self.rows, self.card,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
