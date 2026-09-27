@@ -1,0 +1,16 @@
+# Derived Pathfinder instrumentation image. Base image/repository unchanged.
+ARG PATHFINDER_PPD_USAGE_BASE_IMAGE
+FROM ${PATHFINDER_PPD_USAGE_BASE_IMAGE}
+
+USER root
+COPY pathfinder_agent_usage_capture.py \
+    /app/worker/executors/pathfinder_agent_usage_capture.py
+COPY pathfinder_agent_provider_attempts.py \
+    /app/worker/executors/pathfinder_agent_provider_attempts.py
+COPY patch_agent_executor_usage.py /opt/pathfinder/patch_agent_executor_usage.py
+RUN python /opt/pathfinder/patch_agent_executor_usage.py && \
+    chown appuser:appuser \
+      /app/worker/executors/pathfinder_agent_usage_capture.py \
+      /app/worker/executors/pathfinder_agent_provider_attempts.py \
+      /app/worker/executors/agent_executor.py
+USER appuser
