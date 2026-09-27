@@ -44,6 +44,16 @@ request.
 | Runtime endpoints | Existing N7/N8 route-to-N6 origin was checked read-only | Recheck all participating new image IDs, mounts, epochs, N3/N4 advertised origins, N6 identity, DNS, auth boundaries, cache state and dependency health after the formal deployment |
 | Research design | Prior public sample proves an engineering representation Agent/N1 score path only | Freeze development/holdout split and baseline policy before outcomes; record claim class and counterbalanced design/cache schedule |
 
+The runtime-admission gap is concrete, not a missing status flag. The current
+ten-route admission binds cache episodes by `(run_id, trial_key)` from the old
+schedule. The route-action bridge deliberately creates a fresh run ID from
+its session/choice and a cross-question cache episode from its execution
+namespace. Reusing the old admission would fail that runtime binding. The
+new admission must pre-bind every *potential* selectable session/action to
+its fresh run ID and shared cache episode before the Agent chooses; only the
+chosen one may then be dispatched. Do not bypass the coordinator's cache
+binding or infer that a verified historical trial authorizes a fresh run.
+
 The previously supplied Model Studio workbook predates the successful
 15:59 UTC Agent sample. It cannot reconcile that sample's requests. A fresh
 request-audit export for that interval can validate the *old* sample; a new
