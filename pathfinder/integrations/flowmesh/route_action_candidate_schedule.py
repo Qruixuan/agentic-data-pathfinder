@@ -282,3 +282,55 @@ def verify_route_action_candidates(
         "workflow_submitted": False,
         "credentials_recorded": False,
     }
+
+
+def candidate_run_bindings(
+    candidate_dir: str | Path, *, plan_dir: str | Path,
+    quote_dir: str | Path, admitted_trials: Sequence[dict[str, Any]],
+) -> dict[str, dict[tuple[str, str], str | None]]:
+    """Cross-check *candidate* run IDs against already verified trials.
+
+    The caller must independently verify the source-bound runtime admission
+    that supplied ``admitted_trials``. This function is intentionally not a
+    production admission or permission to submit a FlowMesh workflow.
+    """
+    verify_route_action_candidates(
+        candidate_dir, plan_dir=plan_dir, quote_dir=quote_dir,
+    )
+    trials = {trial.get("trial_key"): trial for trial in admitted_trials}
+    _require(len(trials) == len(admitted_trials),
+             "admitted trial identities repeat")
+    rows = [json.loads(line) for line in (
+        Path(candidate_dir) / ROWS
+    ).read_bytes().splitlines()]
+    result: dict[str, dict[tuple[str, str], str | None]] = {
+        "N7": {}, "N8": {},
+    }
+    families = {
+        "R": "raw", "I": "indexed-raw", "D": "remote-derived",
+        "DC": "local-cache-derived",
+    }
+    for row in rows:
+        trial = trials.get(row["trial_key"])
+        _require(
+            isinstance(trial, dict)
+            and trial.get("flowmesh_submission_authorized") is True
+            and trial.get("required_runtime_adapter_ids") == []
+            and trial.get("design_id") == row["action_id"]
+            and trial.get("executor_node_id") == row["executor_node_id"]
+            and trial.get("route_family") == families[row["arm_id"]]
+            and trial.get("artifact_object_id") == row["object_id"]
+            and trial.get("public_task_binding_sha256")
+            == row["public_task_sha256"]
+            and trial.get("repetition")
+            == (1 if row["cache_state"] == "hit" else 0),
+            "candidate run differs from its verified admitted trial",
+        )
+        node = row["executor_node_id"]
+        key = (row["run_id"], row["trial_key"])
+        _require(node in result and key not in result[node],
+                 "candidate run/trial identity repeats or has wrong node")
+        result[node][key] = row["cache_episode_id"]
+    _require(sum(map(len, result.values())) == len(rows),
+             "candidate run binding coverage differs")
+    return result

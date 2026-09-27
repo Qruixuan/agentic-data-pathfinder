@@ -783,6 +783,7 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
         bound_trials: Sequence[Mapping[str, Any]],
         bound_stages: Sequence[Mapping[str, Any]],
         bound_cache_episodes: Mapping[tuple[str, str], str] | None = None,
+        bound_route_runs: Mapping[tuple[str, str], str | None] | None = None,
     ) -> None:
         _require(logical_node_id in {"N7", "N8"}, "handler node is invalid")
         self._node = logical_node_id
@@ -806,6 +807,58 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
             )
             self._stages[key] = stage
         self._strict_cache_episodes = bound_cache_episodes is not None
+        _require(
+            bound_cache_episodes is None or bound_route_runs is None,
+            "route-run and legacy cache bindings cannot be combined",
+        )
+        self._strict_route_runs = bound_route_runs is not None
+        self._route_runs: dict[tuple[str, str], str | None] = {}
+        runs: dict[str, list[dict[str, Any]]] = {}
+        for key, episode_id in (bound_route_runs or {}).items():
+            _require(
+                isinstance(key, tuple) and len(key) == 2
+                and all(isinstance(part, str) and part for part in key),
+                "bound route-run identity is invalid",
+            )
+            run_id, trial_key = key
+            _identifier(run_id, "bound route run_id")
+            trial = self._trials.get(trial_key)
+            _require(
+                trial is not None
+                and trial.get("executor_node_id") == self._node,
+                "route run is not bound to this coordinator's trial",
+            )
+            cache = trial.get("route_family") == "local-cache-derived"
+            _require(
+                (isinstance(episode_id, str) and bool(episode_id))
+                if cache else episode_id is None,
+                "route run has an invalid cache episode",
+            )
+            if episode_id is not None:
+                _identifier(episode_id, "bound route cache_episode_id")
+            self._route_runs[key] = episode_id
+            runs.setdefault(run_id, []).append({
+                "trial": trial, "episode_id": episode_id,
+            })
+        for alternatives in runs.values():
+            if len(alternatives) == 1:
+                continue
+            _require(len(alternatives) == 2,
+                     "route run has too many alternate trials")
+            first, second = alternatives
+            left, right = first["trial"], second["trial"]
+            _require(
+                left.get("route_family") == right.get("route_family")
+                == "local-cache-derived"
+                and {left.get("repetition"), right.get("repetition")}
+                == {0, 1}
+                and all(left.get(field) == right.get(field) for field in (
+                    "design_id", "executor_node_id", "artifact_object_id",
+                    "public_task_binding_sha256",
+                ))
+                and first["episode_id"] == second["episode_id"],
+                "route run repeats outside one cache miss/hit pair",
+            )
         self._cache_episodes: dict[tuple[str, str], str] = {}
         for key, episode_id in (bound_cache_episodes or {}).items():
             _require(
@@ -843,6 +896,13 @@ class FrozenCatalogBoundSemanticRouteRequestHandler:
             "semantic trial is absent from the verified admission catalog",
         )
         episode_id = request.get("cache_episode_id")
+        if self._strict_route_runs:
+            key = (request["run_id"], trial_key)
+            _require(
+                key in self._route_runs
+                and self._route_runs[key] == episode_id,
+                "route run is absent from the verified run binding",
+            )
         if self._strict_cache_episodes and trial.get("route_family") == (
             "local-cache-derived"
         ):

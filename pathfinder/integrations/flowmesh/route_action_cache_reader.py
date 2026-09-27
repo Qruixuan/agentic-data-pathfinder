@@ -10,12 +10,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 from typing import Any
 
 from .route_action_bridge import CacheObservation, RouteActionBridgeError
 from ...simulator.full_flow_route_adapters import (
     semantic_cache_episode_namespace,
+)
+from ...simulator.n4_derived_data_plane import (
+    PACKAGE_MANIFEST_NAME, verify_n4_derived_data_package,
 )
 
 
@@ -73,6 +77,34 @@ class LiveCacheStatusReader:
         self._clients = dict(clients)
         self._artifacts = normalized
         self._catalog_sha = artifact_catalog_sha256
+
+    @classmethod
+    def from_verified_n4_package(
+        cls, *, clients: Mapping[str, Any], package_dir: str | Path,
+        expected_object_ids: set[str],
+    ) -> "LiveCacheStatusReader":
+        """Derive cache identities only from a canonical N4 package.
+
+        The package is independently verified before its public manifest is
+        read. A partial or foreign object set cannot be advertised as a hit.
+        """
+        root = Path(package_dir)
+        report = verify_n4_derived_data_package(root)
+        manifest = json.loads((root / PACKAGE_MANIFEST_NAME).read_bytes())
+        artifacts: dict[str, dict[str, str]] = {}
+        for row in manifest["objects"]:
+            object_id = row["object_id"]
+            representation = row["representation_id"]
+            artifacts.setdefault(object_id, {})[representation] = row[
+                "artifact_sha256"
+            ]
+        _require(set(artifacts) == expected_object_ids,
+                 "verified N4 package differs from planned cache objects")
+        return cls(
+            clients=clients,
+            expected_artifacts=artifacts,
+            artifact_catalog_sha256=report["package_sha256"],
+        )
 
     def observe(
         self, *, question_id: str, object_id: str,

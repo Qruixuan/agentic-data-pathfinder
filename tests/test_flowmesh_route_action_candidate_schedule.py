@@ -7,6 +7,7 @@ import unittest
 
 from pathfinder.integrations.flowmesh.route_action_candidate_schedule import (
     RouteActionCandidateScheduleError,
+    candidate_run_bindings,
     freeze_route_action_candidates,
     verify_route_action_candidates,
 )
@@ -148,6 +149,47 @@ class RouteActionCandidateScheduleTests(unittest.TestCase):
         self.assertEqual(160, report["session_count"])
         self.assertEqual(1120, report["candidate_count"])
         self.assertIs(report["workflow_submitted"], False)
+
+    def test_candidate_runs_cross_check_source_bound_trial_fields(self):
+        self.freeze()
+        families = {
+            "R": "raw", "I": "indexed-raw", "D": "remote-derived",
+            "DC": "local-cache-derived",
+        }
+        trials = {}
+        for row in self.rows():
+            trials[row["trial_key"]] = {
+                "trial_key": row["trial_key"],
+                "flowmesh_submission_authorized": True,
+                "required_runtime_adapter_ids": [],
+                "design_id": row["action_id"],
+                "executor_node_id": row["executor_node_id"],
+                "route_family": families[row["arm_id"]],
+                "artifact_object_id": row["object_id"],
+                "public_task_binding_sha256": row["public_task_sha256"],
+                "repetition": 1 if row["cache_state"] == "hit" else 0,
+            }
+        admitted = list(trials.values())
+        bindings = candidate_run_bindings(
+            self.output, plan_dir=PLAN, quote_dir=QUOTE,
+            admitted_trials=admitted,
+        )
+        self.assertEqual(56, sum(map(len, bindings.values())))
+        self.assertEqual({"N7", "N8"}, set(bindings))
+        self.assertEqual(4, len({
+            (run_id, trial_key) for node in bindings.values()
+            for (run_id, trial_key), episode in node.items()
+            if episode is not None and trial_key.endswith("|D3|r0000")
+        }))
+        admitted[0]["artifact_object_id"] = "wrong-object"
+        with self.assertRaisesRegex(
+            RouteActionCandidateScheduleError,
+            "differs from its verified admitted trial",
+        ):
+            candidate_run_bindings(
+                self.output, plan_dir=PLAN, quote_dir=QUOTE,
+                admitted_trials=admitted,
+            )
 
 
 if __name__ == "__main__":

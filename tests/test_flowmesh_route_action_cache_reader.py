@@ -1,6 +1,7 @@
 """Read-only cache observation tests; no live services or credentials."""
 
 import unittest
+from pathlib import Path
 
 from pathfinder.integrations.flowmesh.route_action_bridge import (
     RouteActionBridgeError,
@@ -79,6 +80,32 @@ class LiveCacheStatusReaderTests(unittest.TestCase):
         with self.assertRaisesRegex(RouteActionBridgeError,
                                     "not identity-bound"):
             self.reader.observe(**self.args, executor_node_id="N7")
+
+    def test_real_n4_package_supplies_verified_cache_identities(self):
+        root = (Path(__file__).resolve().parents[1] / "artifacts"
+                / "upcloud-ppd-engineering-20260926-v4" / "n4")
+        if not root.is_dir():
+            self.skipTest("public N4 fixture is absent")
+        object_id = "nextqa-val-11584566583"
+        reader = LiveCacheStatusReader.from_verified_n4_package(
+            clients={"N7": self.n7, "N8": self.n8},
+            package_dir=root, expected_object_ids={object_id},
+        )
+        observed = reader.observe(
+            question_id="public-question", object_id=object_id,
+            executor_node_id="N7", cache_episode_id="fresh-episode-1",
+        )
+        self.assertEqual("hit", observed.state)
+        self.assertEqual({"multimodal_digest", "sampled_frame_bundle"},
+                         {call["representation_id"]
+                          for call in self.n7.calls})
+        with self.assertRaisesRegex(
+            RouteActionBridgeError, "differs from planned cache objects",
+        ):
+            LiveCacheStatusReader.from_verified_n4_package(
+                clients={"N7": self.n7, "N8": self.n8},
+                package_dir=root, expected_object_ids={"different-object"},
+            )
 
 
 if __name__ == "__main__":

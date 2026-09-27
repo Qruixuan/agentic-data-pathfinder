@@ -42,6 +42,70 @@ class _Coordinator:
 
 
 class InterleavedCacheEpisodeTest(unittest.TestCase):
+    def test_route_run_binding_rejects_unbound_noncache_run(self) -> None:
+        _source, trial, stages = _fixtures("N7")
+        trial["route_family"] = "raw"
+        coordinator = _Coordinator()
+        handler = FrozenCatalogBoundSemanticRouteRequestHandler(
+            logical_node_id="N7",
+            delegate=GenericSemanticRouteRequestHandler(coordinator),
+            bound_trials=[trial], bound_stages=stages,
+            bound_route_runs={("admitted-run", trial["trial_key"]): None},
+        )
+        for run_id, accepted in (("admitted-run", True),
+                                 ("unadmitted-run", False)):
+            request = build_semantic_route_request(
+                run_id=run_id,
+                idempotency_key=hashlib.sha256(run_id.encode()).hexdigest(),
+                bound_trial=trial, bound_stages=stages,
+            )
+            if accepted:
+                self.assertEqual("test-only", handler.execute(request)["status"])
+            else:
+                with self.assertRaisesRegex(
+                    FullFlowSemanticRouteServiceFactoryError,
+                    "absent from the verified run binding",
+                ):
+                    handler.execute(request)
+
+    def test_route_run_binding_accepts_only_one_cache_pair(self) -> None:
+        _source, miss, stages = _fixtures("N7")
+        miss.update(route_family="local-cache-derived", design_id="D3",
+                    repetition=0, artifact_object_id="object-one",
+                    public_task_binding_sha256="a" * 64)
+        hit = dict(miss, trial_key="hit-trial", repetition=1)
+        kwargs = dict(
+            logical_node_id="N7",
+            delegate=GenericSemanticRouteRequestHandler(_Coordinator()),
+            bound_trials=[miss, hit], bound_stages=stages,
+        )
+        pair = {
+            ("one-action", miss["trial_key"]): "one-episode",
+            ("one-action", hit["trial_key"]): "one-episode",
+        }
+        FrozenCatalogBoundSemanticRouteRequestHandler(
+            **kwargs, bound_route_runs=pair,
+        )
+        with self.assertRaisesRegex(
+            FullFlowSemanticRouteServiceFactoryError,
+            "repeats outside one cache miss/hit pair",
+        ):
+            FrozenCatalogBoundSemanticRouteRequestHandler(
+                **kwargs, bound_route_runs={
+                    **pair, ("one-action", hit["trial_key"]):
+                    "different-episode",
+                },
+            )
+        changed_hit = dict(hit, artifact_object_id="other-object")
+        with self.assertRaisesRegex(
+            FullFlowSemanticRouteServiceFactoryError,
+            "repeats outside one cache miss/hit pair",
+        ):
+            FrozenCatalogBoundSemanticRouteRequestHandler(
+                **{**kwargs, "bound_trials": [miss, changed_hit]},
+                bound_route_runs=pair,
+            )
+
     def test_frozen_handler_rejects_unbound_episode_and_run(self) -> None:
         _source, trial, stages = _fixtures("N7")
         trial["route_family"] = "local-cache-derived"
