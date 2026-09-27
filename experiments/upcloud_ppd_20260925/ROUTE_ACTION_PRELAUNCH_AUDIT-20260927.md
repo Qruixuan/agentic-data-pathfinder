@@ -146,3 +146,22 @@ video-level build/occupancy, forward/restore transition and Agent selection
 call costs, plus a fresh admitted plan and deployment gates. No new FlowMesh
 workflow, N6 inference, N1 score, or source-bound experiment was run to
 produce these quotes.
+
+## Local preview integration addendum — 2026-09-27
+
+The bounded route-action preview and its required Gateway dependencies were
+committed on `codex/route-action-quote-preview` as `15f3538`. Unrelated dirty
+worktree changes were left unstaged. The opt-in CLI bootstrap enforces a
+loopback listener and `preview_only=true`; its no-model regression exercised
+offer listing and one durable choice commit against the development quote and
+historical public plan. This does not perform the admitted handoff or submit a
+workflow. The preview requires independently pinned plan, source-trace, and
+rate-card digests and refuses to write state into frozen packages.
+
+Relevant working-tree tests passed (62 across the focused route/cache/Gateway
+and visual-artifact suites). A clean LF Git archive of `15f3538` passed its
+available package-contained tests (11 run, 2 fixture-dependent skips), and
+all three checksum-bound quote payloads verified again inside that archive.
+The skipped tests require the separate historical public-plan fixture; they
+passed in the working tree where that frozen fixture is available. The branch
+has not been deployed or used to produce a new source-bound admission.
