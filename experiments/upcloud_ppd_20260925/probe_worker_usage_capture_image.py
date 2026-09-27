@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+from hashlib import sha256
 import json
 import sys
 import tempfile
@@ -39,6 +41,10 @@ def main() -> None:
     from worker.executors.pathfinder_agent_usage_capture import (
         capture_agent_usage,
     )
+    from worker.executors.pathfinder_agent_provider_attempts import (
+        begin_httpx_attempt_capture,
+        take_httpx_attempts,
+    )
 
     usage = SimpleNamespace(
         requests=1, input_tokens=11, output_tokens=2, total_tokens=13,
@@ -66,6 +72,31 @@ def main() -> None:
                 or not receipt["request_entries_reconciled"]
                 or "do-not-record-this-answer" in files[0].read_text()):
             raise RuntimeError("numeric capture receipt is invalid")
+        import httpx
+
+        async def probe_transport() -> None:
+            if not begin_httpx_attempt_capture(directory):
+                raise RuntimeError("task-scoped HTTP attempt capture did not start")
+            transport = httpx.MockTransport(lambda request: httpx.Response(
+                200, headers={"x-request-id": "synthetic-request-id"},
+            ))
+            async with httpx.AsyncClient(transport=transport) as client:
+                response = await client.post(
+                    "https://dashscope-intl.aliyuncs.com/"
+                    "compatible-mode/v1/chat/completions", json={},
+                )
+            if response.status_code != 200:
+                raise RuntimeError("synthetic provider response differed")
+
+        asyncio.run(probe_transport())
+        attempts = take_httpx_attempts()
+        if (len(attempts) != 1
+                or attempts[0]["http_status"] != 200
+                or attempts[0]["request_id_sha256"] != sha256(
+                    b"synthetic-request-id"
+                ).hexdigest()
+                or "synthetic-request-id" in json.dumps(attempts)):
+            raise RuntimeError("HTTP attempt capture is not metadata-only")
     print("OFFLINE_AGENT_USAGE_CAPTURE_OK")
 
 
