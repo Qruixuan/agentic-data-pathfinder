@@ -74,7 +74,7 @@ def main() -> None:
             raise RuntimeError("numeric capture receipt is invalid")
         import httpx
 
-        async def probe_transport() -> None:
+        async def probe_transport() -> list[dict[str, object]]:
             if not begin_httpx_attempt_capture(directory):
                 raise RuntimeError("task-scoped HTTP attempt capture did not start")
             transport = httpx.MockTransport(lambda request: httpx.Response(
@@ -87,9 +87,9 @@ def main() -> None:
                 )
             if response.status_code != 200:
                 raise RuntimeError("synthetic provider response differed")
+            return take_httpx_attempts()
 
-        asyncio.run(probe_transport())
-        attempts = take_httpx_attempts()
+        attempts = asyncio.run(probe_transport())
         if (len(attempts) != 1
                 or attempts[0]["http_status"] != 200
                 or attempts[0]["request_id_sha256"] != sha256(
