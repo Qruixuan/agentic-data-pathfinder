@@ -36,4 +36,6 @@ toolkits:
     config:
       url: ${oc.env:PATHFINDER_MCP_URL}
 
-max_turns: 5
+# The frozen PPD protocol allows at most four Agent provider attempts per
+# choice; keep the worker's own turn ceiling at the same limit.
+max_turns: 4
